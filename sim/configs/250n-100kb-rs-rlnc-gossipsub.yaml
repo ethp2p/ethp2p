@@ -1,0 +1,24 @@
+simulation:
+  driver: shadow
+  log_level: info
+  trace_file: trace.bctrace
+
+strategies:
+  - name: RS
+    data_shards: 16
+    parity_shards: 16
+
+  - name: gossipsub
+
+workload:
+  num_messages: 2
+  message_size: 100000
+  publish_wait_seconds: 5.0
+  stop_time_minutes: 30.0
+
+topology:
+  generate:
+    num_nodes: 250
+    degree: 4
+    type: random
+    seed: 42

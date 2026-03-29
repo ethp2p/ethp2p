@@ -1,0 +1,13 @@
+version: v2
+modules:
+  - path: .
+    includes:
+      - broadcast/pb
+      - broadcast/rs/pb
+      - protocol/pb
+lint:
+  use:
+    - STANDARD
+  except:
+    - PACKAGE_VERSION_SUFFIX
+    - PACKAGE_DIRECTORY_MATCH

@@ -1,0 +1,26 @@
+syntax = "proto3";
+package ethp2p.broadcast.rs;
+
+option go_package = "github.com/ethp2p/ethp2p/broadcast/rs/pb";
+
+// Preamble is the session preamble for Reed-Solomon coded messages.
+message Preamble {
+  // Number of data shards (k). Indices 0 through k-1.
+  int32 num_data = 1;
+  // Number of parity shards (n-k). Indices k through n-1.
+  int32 num_parity = 2;
+  // Original unpadded message size in bytes. Used to trim decoded output.
+  int32 length = 3;
+  // SHA-256 hash of each shard, indexed by shard index. Used for per-chunk
+  // verification. Provisional; will be replaced by Merkle commitment or
+  // builder signature.
+  repeated bytes hashes = 4;
+  // SHA-256 hash of the original message. Verified after decode for
+  // end-to-end integrity.
+  bytes hash = 5;
+}
+
+// ChunkIdent identifies an RS chunk (shard) on the wire.
+message ChunkIdent {
+  int32 index = 1;
+}

@@ -1,0 +1,33 @@
+*.swp
+
+# Test binaries
+*.test
+
+# Coverage files
+coverage.out
+
+# Go cache
+.gocache/
+
+# ping and server latencies
+scripts/*.csv
+
+# qlogs
+*/*.sqlog
+
+# shadow runs
+sim/cli/runs/
+experiments/
+
+# built binaries
+/simnode
+runs/
+
+sim/simcfg/simnode/simnode
+
+.notes.md
+.work/
+.gitnexus/
+
+.claude/
+.cachebro/

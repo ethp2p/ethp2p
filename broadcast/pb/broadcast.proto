@@ -1,0 +1,66 @@
+syntax = "proto3";
+package ethp2p.broadcast;
+
+option go_package = "github.com/ethp2p/ethp2p/broadcast/pb";
+
+// Bcast is the control frame exchanged on the per-peer BCAST stream.
+// Carries handshake, subscribe, and unsubscribe messages.
+message Bcast {
+  oneof message {
+    Handshake peer_handshake = 1;
+    Subscribe channel_subscribe = 2;
+    Unsubscribe channel_unsubscribe = 3;
+  }
+
+  // Handshake is the first message exchanged on a BCAST stream.
+  message Handshake {
+    uint32 version = 1;
+    repeated string channels = 2;
+    string peer_id = 3;
+  }
+
+  // Subscribe requests the remote peer to include us in a channel.
+  message Subscribe {
+    string channel = 1;
+  }
+
+  // Unsubscribe requests removal from a channel.
+  message Unsubscribe {
+    string channel = 1;
+  }
+}
+
+// Sess is the frame type carried on per-session SESS streams.
+// The first frame MUST be Open (which may carry initial routing
+// state inline); subsequent frames are Update.
+message Sess {
+  oneof frame {
+    Open session_open = 1;
+    Update routing_update = 2;
+  }
+
+  // Open is the first frame on a SESS stream, establishing the session.
+  message Open {
+    string channel = 1;
+    string message_id = 2;
+    bytes preamble = 3;
+    bytes initial_update = 4;
+  }
+
+  // Update carries an opaque routing state update (e.g. bitmap, have list).
+  message Update {
+    bytes data = 1;
+  }
+}
+
+// Chunk is the protocol namespace for chunk streams.
+message Chunk {
+  // Header prefixes each chunk on a CHUNK stream. The receiver reads
+  // data_length raw bytes from the stream immediately after the header.
+  message Header {
+    string channel = 1;
+    string message_id = 2;
+    bytes chunk_id = 3;
+    uint32 data_length = 4;
+  }
+}

@@ -1,0 +1,27 @@
+name: rs-1000-trace
+description: "1000-node RS-ChunkLen with 16 KiB chunks, bitmaps from start, .bctrace for viz"
+
+simulation:
+  driver: shadow
+  log_level: info
+  trace_file: trace.bctrace
+
+topology:
+  generate:
+    num_nodes: 1000
+    degree: 12
+    type: realistic
+    seed: 1828923
+    super_node_fraction: 0.05
+
+workload:
+  num_messages: 2
+  message_size: 2097152
+  publish_wait_seconds: 30.0
+  stop_time_minutes: 10.0
+
+strategies:
+  - name: RS-ChunkLen
+    chunk_len: 16384
+    enable_bitmaps: true
+    bitmap_threshold: 0

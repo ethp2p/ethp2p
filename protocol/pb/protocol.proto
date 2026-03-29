@@ -1,0 +1,15 @@
+syntax = "proto3";
+package ethp2p.protocol;
+
+option go_package = "github.com/ethp2p/ethp2p/protocol/pb";
+
+enum Protocol {
+  PROTOCOL_UNSPECIFIED = 0;
+  PROTOCOL_BCAST = 1;
+  PROTOCOL_SESS = 2;
+  PROTOCOL_CHUNK = 3;
+}
+
+message Selector {
+  Protocol protocol = 1;
+}
