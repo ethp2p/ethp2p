@@ -128,3 +128,7 @@ ethp2p is, in principle, designed for the Consensus Layer, but several component
 ethp2p is developed in alignment with CROPS principles: censorship and capture resistance, open source, privacy, security. Open source is non-negotiable.
 
 We explored other coding schemes during development but they did not appear to meet our requirements for unencumbered use. Implementations were created purely for internal experimentation and benchmarking purposes, and only their specs are included.
+
+## License
+
+GNU Lesser General Public License v3.0 (LGPLv3).
