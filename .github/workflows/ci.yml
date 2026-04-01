@@ -10,6 +10,17 @@ env:
   GO_VERSION: "1.25"
 
 jobs:
+  markdown-lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Lint specs
+        uses: rvben/rumdl@0.1.0v0
+        with:
+          path: specs/
+          report-type: annotations
+
   lint:
     runs-on: ubuntu-latest
     steps:
