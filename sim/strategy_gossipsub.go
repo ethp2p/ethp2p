@@ -375,6 +375,7 @@ func newGossipsubNode(nodeNum int, h host.Host, logger *slog.Logger, trace *goss
 }
 
 func newPubSub(ctx context.Context, h host.Host, trace *gossipsubTrace) (*pubsub.PubSub, error) {
+	// Matches Prysm beacon-chain/p2p/pubsub.go gossipsub parameters.
 	params := pubsub.DefaultGossipSubParams()
 	params.D = 8
 	params.Dlo = 6
@@ -382,13 +383,17 @@ func newPubSub(ctx context.Context, h host.Host, trace *gossipsubTrace) (*pubsub
 	params.Dlazy = 6
 	params.HeartbeatInterval = 700 * time.Millisecond
 	params.FanoutTTL = 60 * time.Second
-	params.HistoryLength = 1000
-	params.HistoryGossip = 1000
+	params.HistoryLength = 6
+	params.HistoryGossip = 3
 
 	opts := []pubsub.Option{
 		pubsub.WithGossipSubParams(params),
 		pubsub.WithMaxMessageSize(1 << 30),
 		pubsub.WithMessageIdFn(gossipsubMessageIDFromPB),
+		pubsub.WithMessageSignaturePolicy(pubsub.StrictNoSign),
+		pubsub.WithNoAuthor(),
+		pubsub.WithPeerOutboundQueueSize(600),
+		pubsub.WithValidateQueueSize(600),
 	}
 	if trace != nil {
 		opts = append(opts, pubsub.WithRawTracer(trace))
