@@ -35,6 +35,9 @@ The two schemes currently supported are Reed-Solomon and Random Linear Network
 Coding (RLNC). Additional strategies can be added without changing the core
 framework, or adjusting it only minimally.
 
+Reviewer's Note: You probably need to mention the constraint that chunks must be
+verifiable.
+
 ## 1. About this document
 
 This document specifies the broadcast framework itself. It covers key concepts,
@@ -47,7 +50,8 @@ The broadcast framework assumes peer discovery, authentication, and routing are
 ambient concerns handled by ethp2p. They are currently implemented minimally and
 will be completed as the ethp2p stack matures.
 
-Sections 4 through 6 use RFC 2119 language such as MUST, SHOULD, and MAY.
+Sections 4 through 6 use [RFC 2119](https://www.rfc-editor.org/rfc/rfc2119)
+language such as MUST, SHOULD, and MAY.
 
 ## 2. Key concepts
 
@@ -56,6 +60,10 @@ object type (e.g. execution payload, blob, BALs, zkEVM proofs, etc). Peers
 subscribe to channels according to their protocol duties. A channel carries
 messages of one type over time, with each message handled by its own session,
 which is explicitly delimited by open and close semantics.
+
+Reviewer's Note: Is there a good reason to not call this a topic? This looks and
+sounds similar to a gossipsub topic, why use a new term when we have one that
+people are already familiar with?
 
 **Message.** An Ethereum object whose serialized version is published to a
 channel via the framework. A message is identified by the pair
@@ -97,6 +105,14 @@ or a list of generation ranks in RLNC. Strategies use routing updates to keep a
 live view of their vicinity, and decide what chunks to send, to whom, in what
 order, and when to stop.
 
+Reviewer's Note: Can we coalesce the _Routing update_ with _Preamble_?
+The _Preamble_ and _Routing updates_ are opaque to this framework, and only have
+meaning in the context of a strategy.
+
+Reviewer's Note: I don't think "Routing" is a good term here. It implies there
+is a specific path from the start to a destination. This is more about some
+strategy specific metadata.
+
 **Reconstruction.** The operation to recover the original message from a
 sufficient set of valid chunks. Once a relay has enough chunks, it decodes the
 message and delivers it to the application. A Session continues serving chunks
@@ -115,6 +131,19 @@ implemented as two unidirectional streams, one in each direction, each carrying
 length-prefixed protobuf frames. This is the only long-lived stream type in the
 framework.
 
+Reviewer's Note: Should we have a Channel stream? This serves a couple
+purposes:
+
+1. Informs our peer that we are interested in a specific channel.
+2. Maps a channel name to a short numeric identifier (stream id).
+3. The remote peer can close this stream to signal that they can no longer serve
+   this channel.
+
+Instead of a "Subscribe" message, peers exchange "ChannelsAvailable" messages to
+inform the remote what channels this peer can serve. This gives a node more
+flexibility in choosing who to "tune-in" to. This splits subscribe into two
+things: advertise and join.
+
 **SESS stream.** A per-session unidirectional stream. It carries the
 session-open message, including the preamble to configure the coder, and
 optional initial routing state. Session-open is followed by zero or more routing
@@ -124,6 +153,16 @@ collaborating to reconstruct a Message will initiate a pair of `SESS` streams
 for the given Session, one in each direction. The opener resets the stream to
 signal reconstruction was locally achieved, which implies that the receiver can
 request any missing chunks.
+
+Reviewer's Note: Is this a MUST reset? Why? Maybe enough to say close or reset
+with error code RECONSTRUCTED=0xTBD. This is also conflicts with the section
+below 5.3.
+
+> When a node reconstructs the message, it MUST reset its inbound `SESS`
+> streams for that session using application error code `0x01`
+
+In the quoted section the receiver is resetting the stream. In the above
+paragraph it says the "opener" resets the stream.
 
 **CHUNK stream.** An ephemeral unidirectional stream to dispatch a single chunk.
 First, the chunk header is written, followed by the chunk data. The header
@@ -191,6 +230,13 @@ handshake. The dialing peer opens an outbound `BCAST` stream and writes its
 handshake. The accepting peer MUST accept the inbound stream and open its own
 outbound `BCAST` stream to complete the handshake in both directions. In the
 case of simultaneous open, both sides concurrently open outbound streams and
+
+Reviewer's Note: After we've established a TLS connection (or Noise) we don't
+have this ambiguity around simultaneous connections.
+
+Reviewer's Note: Why the distinction between dialing and accepting peers? This
+seems symmetric. Would suffice to say: Each peer opens an outbound ...
+
 accept inbound streams. The handshake is not complete until both sides have sent
 and received a `Bcast.Handshake` frame.
 
@@ -198,9 +244,19 @@ On the outbound stream, the peer MUST write a `BCAST` protocol selector followed
 by a `Bcast.Handshake` frame containing:
 
 - `version`, the protocol version, currently `1`
+
+Reviewer's Note: Do we need a version negotiation protocol here? Could some
+other layer handle this and we assume this is only one specific version? We are
+using protobufs, Depending on how these are framed, the field number of the
+message could be enough to encode the version number.
+
 - `channels`, the set of subscribed channel identifiers
 - `peer_id`, the peer's public key or network identity (TODO: to be eliminated
   once ethp2p itself has a handshake)
+
+Reviewer's Note: We don't want the peer_id field here. That seems like a receipe
+for bugs. Implementations MUST get the peer ID from the authenticated connection
+(e.g the TLS layer will give you this.)
 
 On the inbound stream, the peer MUST read the `BCAST` protocol selector and the
 `Bcast.Handshake` frame, then validate the protocol version. If the versions are
@@ -209,6 +265,9 @@ incompatible, the peer MUST close the connection (TODO: stream in the future).
 After a successful handshake, both sides know the remote peer's identity (TODO),
 protocol version, and initial channel set. Non-`BCAST` streams received before
 handshake completion MUST be cancelled.
+
+Reviewer's Note: I think only the `channels` aspect of this is really necessary.
+If so, then do we need this handshake message at all?
 
 ### 4.2. Channel subscription
 
@@ -238,7 +297,14 @@ into active sessions for that channel.
 message Sess {
   oneof frame {
     Open session_open = 1;
+
+    Reviewer's Note: If the session_open is always the first message, you don't need this extra byte of framing overhead. You just specify in the protocol it's the first message.
+
     Update routing_update = 2;
+
+    Reviewer's Note: If you did the above, then you don't even need this
+    wrapping frame anymore and this stream just becomes an opaque stream that
+    the framework gives to the strategy for metadata updates.
   }
 
   // Open is the first frame on a SESS stream, establishing the session.
@@ -289,9 +355,14 @@ Receivers SHOULD process routing updates promptly, because stale routing state
 leads to unnecessary chunk sends.
 
 The timing, frequency, and trigger conditions for routing updates are not
-strictly defined. The current implementation is overeager, and we expect to
-refine the trigger conditions and frequency as the protocol matures. The
-framework sends routing updates before dispatching chunks so that peers can
+strictly defined.
+
+The current implementation is overeager, and we expect to
+refine the trigger conditions and frequency as the protocol matures.
+
+Reviewer's Note: I don't think the above sentence belongs here.
+
+The framework sends routing updates before dispatching chunks so that peers can
 update their view of inventory before new data arrives.
 
 ### 5.3. Completion signaling
@@ -307,6 +378,8 @@ SHOULD cancel pending chunk sends to that peer.
 
 If a peer disconnects without resetting, it is treated as departed and removed
 from the session immediately.
+
+Reviewer's Note: Why does it matter if it reset or not?
 
 ## 6. Data protocol (CHUNK streams)
 
@@ -324,6 +397,13 @@ message Chunk {
 }
 ```
 
+Reviewer's Note: The connection should be closed with protocol error if, after
+receiving the chunk, any attribute (such as data_length, chunk_id, message_id)
+is incorrect.
+
+Reviewer's Note: The Header can simply reference the session id and avoid
+duplicating the channel and message id.
+
 ### 6.1. Chunk header
 
 Each chunk is sent on its own unidirectional stream. The sender MUST write a
@@ -335,7 +415,15 @@ Each chunk is sent on its own unidirectional stream. The sender MUST write a
 - `data_length`, the number of raw bytes that follow
 
 The framework requires `data_length` because it cannot parse strategy-specific
-chunk identifiers to determine where the payload begins. The receiver MUST route
+chunk identifiers to determine where the payload begins.
+
+Reviewer's Note: The payload begins after the header, right?
+Reviewer's Note: Why does the framework need the data length? Why not just pass
+the stream to the strategy? The strategy may be able to do something better than
+allocating the whole chunk, or it may be able to incrementally process the
+chunk.
+
+The receiver MUST route
 the frame by channel. If it is not subscribed to that channel, it MUST cancel
 the stream.
 
@@ -354,12 +442,24 @@ has been submitted to an asynchronous verification pipeline and the result will
 later be delivered on the `Verified` channel. A chunk enters strategy state only
 after verification succeeds and `TakeChunk` accepts it.
 
+Reviewer's Note: The above paragraph sounds implementation specific, and I'm not
+sure this belongs here.
+
 When multiple peers send chunks in the same deduplication group, such as
 duplicate Reed-Solomon shards or linearly dependent RLNC chunks for the same
 generation, the framework ties their inbound reads to a shared cancellation
 context. Once the strategy decides the group is satisfied, the framework cancels
-the remaining reads. This immediately frees QUIC stream capacity and
-connection-level flow control budget.
+the remaining reads.
+
+Reviewer's Note: How does the framework know what chunks are in the same dedupe
+group?
+
+This immediately frees QUIC stream capacity and connection-level flow control
+budget.
+
+Reviewer's Note: What do you mean by immediately? flow control might not change
+(implementation specific), the sender can use their existing flow control
+credits for something else, but only after they receive the cancellation.
 
 If the session does not yet exist because the chunk arrived before `Sess.Open`,
 the framework MAY buffer the stream reference and rely on transport-level
@@ -371,6 +471,9 @@ backpressure until the session is established.
 
 A session moves monotonically through four stages. It never transitions
 backward.
+
+Reviewer's Note: I only see this moving through 3 stages? The origin is a
+separate state.
 
 ```text
                   TakeChunk returns             Decode succeeds
@@ -403,6 +506,10 @@ channel. The strategy encodes the message into chunks and produces the preamble.
 The framework registers the session and opens `SESS` streams to all peers
 currently subscribed to the channel.
 
+Reviewer's Note: If we had a channel stream, this would be to all peers that
+have a open channel with us for this channel (instead of all peers subscribed to
+the channel).
+
 Origin sessions begin in the origin stage. The framework polls the strategy for
 chunks and dispatches them to peers. Peers that connect or subscribe after the
 session begins can still be attached and start receiving chunks. Origin sessions
@@ -421,6 +528,9 @@ tracks progress toward reconstruction.
 
 Relays do not wait for reconstruction before forwarding. After each accepted
 chunk, the framework polls the strategy for outbound work through `PollChunks`.
+
+Reviewer's Note: This is an implementation detail.
+
 The strategy uses its current state together with peers' advertised inventory
 from routing updates to decide what to send next. For RLNC, this may mean
 generating new random linear combinations from the current basis. For
@@ -444,7 +554,13 @@ application. The session may still serve chunks to peers that have not
 reconstructed. A session is disposed once all participating peers have either
 reconstructed or departed.
 
+Reviewer's Note: Reconstruction and relaying sound like they are properties of
+the strategy. From the framework's perspective it seems all it needs to do is
+forward the session stream to the strategy.
+
 ## 8. The Strategy interface
+
+Reviewer's Note: This is about the implementation and not the core protocol.
 
 ### 8.1. Ownership boundary
 
