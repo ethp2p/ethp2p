@@ -16,7 +16,7 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Lint specs
-        uses: rvben/rumdl@0.1.0v0
+        uses: rvben/rumdl@v0
         with:
           path: specs/
           report-type: annotations
@@ -87,4 +87,3 @@ jobs:
 
       - name: Run large network RS tests
         run: go test -race -v -run 'TestLargeNetwork_RS|TestScalability' ./sim/...
-
