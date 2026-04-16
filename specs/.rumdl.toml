@@ -1,0 +1,19 @@
+[global]
+exclude = [
+  ".git",
+  ".github",
+  "node_modules",
+  "vendor",
+  "dist",
+  "build",
+  "CHANGELOG.md",
+  "LICENSE.md",
+]
+respect-gitignore = true
+
+[MD013]
+line-length = 100
+code-blocks = false
+tables = false
+reflow = true
+reflow-mode = "semantic-line-breaks"
