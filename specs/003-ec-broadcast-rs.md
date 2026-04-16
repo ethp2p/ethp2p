@@ -1,26 +1,61 @@
 # Reed-Solomon broadcast strategy
 
-This document specifies the Reed-Solomon (RS) erasure coding strategy for the ethp2p broadcast framework defined in the [framework spec](broadcast-spec-v3.md).
+This document specifies the Reed-Solomon (RS) erasure coding strategy
+for the ethp2p broadcast framework defined in the [framework spec](broadcast-spec-v3.md).
 
-We assume the reader is familiar with systematic Reed-Solomon codes: k data shards, n-k parity shards, any k of n suffice to reconstruct. What follows focuses on the network-level machinery built around RS: how we verify, route, dispatch, and deduplicate shards across a mesh of peers.
+We assume the reader is familiar with systematic Reed-Solomon codes: k data shards,
+n-k parity shards, any k of n suffice to reconstruct.
+What follows focuses on the network-level machinery built around RS: how we verify, route, dispatch,
+and deduplicate shards across a mesh of peers.
 
-RS is a good fit when chunks are independently verifiable and the topology is well-connected enough for shard-level dedup to be effective. Its main limitation (cf. RLNC) is that relays cannot recode: they forward the exact shards they received, so data novelty depends on the origin producing enough distinct shards and on the topology spreading them. This limitation creates a coupon collector dynamic: as a node accumulates shards, the probability that the next arriving shard is novel decreases. Without countermeasures, the last few shards dominate completion time.
+RS is a good fit when chunks are independently verifiable and the topology is well-connected enough
+for shard-level dedup to be effective.
+Its main limitation (cf.
+RLNC) is that relays cannot recode: they forward the exact shards they received,
+so data novelty depends on the origin producing enough distinct shards
+and on the topology spreading them.
+This limitation creates a coupon collector dynamic: as a node accumulates shards,
+the probability that the next arriving shard is novel decreases.
+Without countermeasures, the last few shards dominate completion time.
 
-We mitigate this through bitmap-based routing (peers advertise what they have, so senders skip redundant shards), the emit planner's least-allocated-first ordering (rare shards get priority), and per-relay Fibonacci hashing (neighboring relays spread different shards). These mechanisms reduce but do not eliminate the coupon collector tail; further topological optimizations are under investigation.
+We mitigate this through bitmap-based routing
+(peers advertise what they have, so senders skip redundant shards),
+the emit planner's least-allocated-first ordering
+(rare shards get priority),
+and per-relay Fibonacci hashing (neighboring relays spread different shards).
+These mechanisms reduce but do not eliminate the coupon collector tail;
+further topological optimizations are under investigation.
 
-In simulations, these mechanisms bring RS within ~10% of RLNC's p90 latency across all benchmarked message sizes, despite the no-recode constraint. RS is already deployed in Ethereum for PeerDAS blob erasure coding, so the network-level optimizations described here achieve close-to-optimal performance without adding any novelty to the protocol.
+In simulations, these mechanisms bring RS within ~10% of RLNC's p90 latency across all benchmarked
+message sizes, despite the no-recode constraint.
+RS is already deployed in Ethereum for PeerDAS blob erasure coding,
+so the network-level optimizations described here achieve close-to-optimal performance without
+adding any novelty to the protocol.
 
 ## 1. Terminology
 
-Terms defined in the framework spec (Channel, Session, Chunk, Preamble, Routing Update, Strategy) apply here. Additional terms:
+Terms defined in the framework spec
+(Channel, Session, Chunk, Preamble, Routing Update, Strategy) apply here.
+Additional terms:
 
-**Shard.** An RS chunk. Each shard carries a unique, independently verifiable piece of the erasure code. RS chunks are addressed by shard index (0 to n-1), where indices 0 through k-1 are data shards and k through n-1 are parity shards.
+**Shard.** An RS chunk.
+Each shard carries a unique, independently verifiable piece of the erasure code.
+RS chunks are addressed by shard index
+(0 to n-1), where indices 0 through k-1 are data shards and k through n-1 are parity shards.
 
-**Bitmap.** The routing state type for RS. A bitset where bit i indicates whether the node holds shard i. Peers exchange bitmaps to advertise inventory.
+**Bitmap.**
+The routing state type for RS.
+A bitset where bit i indicates whether the node holds shard i.
+Peers exchange bitmaps to advertise inventory.
 
 ## 2. Encoding
 
-When the application publishes a message, the origin strategy encodes it. The encoding is systematic: data shards `0` through `k-1` contain the original message bytes (plus padding on the last shard), and parity shards `k` through `n-1` contain redundancy. The origin can set these parameters dynamically based on message size, and it announces the values via the Session `Preamble` for receivers to configure their strategy for the session.
+When the application publishes a message, the origin strategy encodes it.
+The encoding is systematic: data shards `0` through `k-1` contain the original message bytes
+(plus padding on the last shard), and parity shards `k` through `n-1` contain redundancy.
+The origin can set these parameters dynamically based on message size,
+and it announces the values via the Session `Preamble` for receivers to configure their strategy
+for the session.
 
 ```go
 // 1. Compute chunk structure from config.
@@ -58,7 +93,9 @@ for i := range shards {
 
 ## 3. Preamble
 
-The RS preamble carries everything a relay needs to initialize its strategy instance and verify incoming chunks. It is transmitted in the `Sess.Open` frame as opaque bytes (see framework spec, Section 5.1).
+The RS preamble carries everything a relay needs to initialize its strategy instance
+and verify incoming chunks.
+It is transmitted in the `Sess.Open` frame as opaque bytes (see framework spec, Section 5.1).
 
 ```protobuf
 // Preamble is the session preamble for Reed-Solomon coded messages.
@@ -81,35 +118,70 @@ message Preamble {
 
 ## 4. Chunk verification
 
-> The current hash-based verification is provisional, but we proceed to describe it here and then introduce future replacements.
+> The current hash-based verification is provisional,
+> but we proceed to describe it here and then introduce future replacements.
 
-RS uses synchronous per-chunk verification. When a chunk arrives, the strategy computes its SHA-256 hash and compares it against the corresponding entry in `ChunkHashes`. If the hashes match, the chunk is accepted; if not, it is rejected. No asynchronous verification pipeline is used.
+RS uses synchronous per-chunk verification.
+When a chunk arrives, the strategy computes its SHA-256 hash
+and compares it against the corresponding entry in `ChunkHashes`.
+If the hashes match, the chunk is accepted; if not, it is rejected.
+No asynchronous verification pipeline is used.
 
-This hash-based scheme authenticates individual chunks independently, so a relay can verify and begin forwarding each shard the moment it arrives. **A single invalid chunk cannot corrupt the decode; it is caught and rejected before entering the strategy's state.**
+This hash-based scheme authenticates individual chunks independently,
+so a relay can verify and begin forwarding each shard the moment it arrives.
+**A single invalid chunk cannot corrupt the decode; it is caught and rejected before entering the
+strategy's state.**
 
-After reconstruction, the strategy computes the SHA-256 hash of the decoded message and verifies it against `MessageHash`. This provides end-to-end integrity: even if Reed-Solomon reconstruction produces output (because enough shards passed individual verification), the message hash catches any inconsistency.
+After reconstruction, the strategy computes the SHA-256 hash of the decoded message
+and verifies it against `MessageHash`.
+This provides end-to-end integrity: even if Reed-Solomon reconstruction produces output
+(because enough shards passed individual verification), the message hash catches any inconsistency.
 
 In the future, two authentication modes are planned, and the choice may vary per channel:
 
-1. **Builder signature.** In contexts like ePBS where the builder's identity is known, the builder authenticates every chunk via a signature. Sending invalid chunks is irrational for a builder, so this alone should afford the required security. This method is compatible with streaming chunks out.
+1. **Builder signature.**
+   In contexts like ePBS where the builder's identity is known,
+   the builder authenticates every chunk via a signature.
+   Sending invalid chunks is irrational for a builder,
+   so this alone should afford the required security.
+   This method is compatible with streaming chunks out.
 
-2. **Merkle commitment.** A Merkle tree over all chunk hashes, where each chunk carries its inclusion proof. This does not require a known signer but requires the full chunk set to construct the commitment, therefore incompatible with streaming. Suitable for contexts where the publisher is anonymous, or there are multiple concurrent publishers.
+2. **Merkle commitment.**
+   A Merkle tree over all chunk hashes, where each chunk carries its inclusion proof.
+   This does not require a known signer but requires the full chunk set to construct the commitment,
+   therefore incompatible with streaming.
+   Suitable for contexts where the publisher is anonymous,
+   or there are multiple concurrent publishers.
 
 ## 5. Routing
 
 The RS routing update type is a bitmap acting as a shard havelist.
 
-Routing update emission is gated by a threshold: the bitmap is not emitted until the node has received at least `BitmapThreshold` percent of the total shards (default 50%). This avoids flooding the network with routing updates when the node has very little to report, and where the coupon collector problem is not yet visible.
+Routing update emission is gated by a threshold:
+the bitmap is not emitted until the node has received at least `BitmapThreshold` percent of the
+total shards (default 50%).
+This avoids flooding the network with routing updates when the node has very little to report,
+and where the coupon collector problem is not yet visible.
 
-Once the threshold is crossed, every accepted shard triggers a routing update. The threshold can be set to zero (always emit) or routing can be disabled entirely via `DisableBitmap`.
+Once the threshold is crossed, every accepted shard triggers a routing update.
+The threshold can be set to zero
+(always emit) or routing can be disabled entirely via `DisableBitmap`.
 
-During development, we also send routing updates every 25ms, but this behavior will be replaced by more adaptive constructions.
+During development, we also send routing updates every 25ms,
+but this behavior will be replaced by more adaptive constructions.
 
-When a routing update arrives from a peer, the strategy OR-merges the received bitmap into its previous view of that peer's inventory, and cancels in-flight sends that are now redundant.
+When a routing update arrives from a peer,
+the strategy OR-merges the received bitmap into its previous view of that peer's inventory,
+and cancels in-flight sends that are now redundant.
 
 ## 6. Dispatch
 
-Dispatch is driven by the **emit planner**, a min-heap that orders shards by allocation count (how many times a shard has been dispatched across all peers). Ties are broken by a per-relay random priority derived from Fibonacci hashing: `(seed ^ uint64(idx) * 0x9E3779B97F4A7C15) >> 32`, where the seed is random per relay. This means neighboring relays naturally prioritize different shards, reducing duplicate transmissions without explicit coordination.
+Dispatch is driven by the **emit planner**, a min-heap that orders shards by allocation count
+(how many times a shard has been dispatched across all peers).
+Ties are broken by a per-relay random priority derived from Fibonacci hashing:
+`(seed ^ uint64(idx) * 0x9E3779B97F4A7C15) >> 32`, where the seed is random per relay.
+This means neighboring relays naturally prioritize different shards,
+reducing duplicate transmissions without explicit coordination.
 
 For each peer that has not yet reconstructed, the planner pops the least-allocated shard and checks:
 
@@ -117,15 +189,21 @@ For each peer that has not yet reconstructed, the planner pops the least-allocat
 2. it is not already in-flight to this peer,
 3. the shard has not exceeded the per-shard redundancy budget.
 
-If any check fails, the next entry is tried. On allocation, both the peer's in-flight count and the planner's allocation count are incremented, pushing the shard down the heap for future rounds.
+If any check fails, the next entry is tried.
+On allocation, both the peer's in-flight count and the planner's allocation count are incremented,
+pushing the shard down the heap for future rounds.
 
-Origins are unconstrained: they send each shard as many times as there are peers that need it. Relays are budget-constrained by `ForwardMultiplier` to limit per-relay bandwidth amplification. Failed sends do not consume budget; the shard remains available for future allocation.
+Origins are unconstrained: they send each shard as many times as there are peers that need it.
+Relays are budget-constrained by `ForwardMultiplier` to limit per-relay bandwidth amplification.
+Failed sends do not consume budget; the shard remains available for future allocation.
 
-On successful send, the strategy optimistically marks the shard as present in the peer's inventory and increments the shard sent count.
+On successful send, the strategy optimistically marks the shard as present in the peer's inventory
+and increments the shard sent count.
 
 ## 7. Decoding
 
-Decoding triggers when the strategy has received at least k shards (any k of n). The framework calls `Decode` on a background goroutine.
+Decoding triggers when the strategy has received at least k shards (any k of n).
+The framework calls `Decode` on a background goroutine.
 
 ```go
 // 1. Clone shards (RS reconstruction mutates the array).
@@ -160,4 +238,6 @@ Decode failure is non-recoverable (see framework spec, Section 7.4).
 | `ForwardMultiplier` | 4       | Maximum successful sends per shard for relays. Origins are unlimited.                                                                                                                         |
 | `DisableBitmap`     | false   | If true, routing bitmaps are never emitted.                                                                                                                                                   |
 
-These parameters interact with message size in ways that are not yet fully characterized. The optimal configuration as a function of message size and network conditions is an open empirical question.
+These parameters interact with message size in ways that are not yet fully characterized.
+The optimal configuration as a function of message size
+and network conditions is an open empirical question.

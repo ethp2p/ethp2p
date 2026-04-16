@@ -1,4 +1,5 @@
 [global]
+extend-disable = ["MD057"]
 exclude = [
   ".git",
   ".github",
