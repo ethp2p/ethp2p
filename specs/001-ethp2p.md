@@ -1,14 +1,34 @@
 # ethp2p
 
-ethp2p is a next-generation p2p networking stack purpose-built for Ethereum. Its design principles are vertical integration, mechanical sympathy, zero idle resources, privacy by default, and the conviction that in a time-critical protocol, consistent performance _is_ an essential part of correctness.
+ethp2p is a next-generation p2p networking stack purpose-built for Ethereum.
+Its design principles are vertical integration, mechanical sympathy, zero idle resources,
+privacy by default, and the conviction that in a time-critical protocol,
+consistent performance _is_ an essential part of correctness.
 
-ethp2p replaces generic sequential store-and-forward propagation with object-specific broadcast. For large objects like execution payloads, we adopt erasure-coded broadcast; for smaller objects (e.g. attestations), we design specialized broadcast strategies that leverage the inherent properties of the data. We replace reactive peering with duty-aware proactive connections, full network awareness, and rapid session resumption. We leverage the full potential of QUIC standards to saturate network links and maximize Ethereum's goodput. We thread the fine needle between latency and anonymity to boost network privacy. We grease the critical path per-slot by prioritizing network flows, shaping traffic, and coordinating bandwidth between the consensus and execution layers.
+ethp2p replaces generic sequential store-and-forward propagation with object-specific broadcast.
+For large objects like execution payloads, we adopt erasure-coded broadcast; for smaller objects
+(e.g. attestations),
+we design specialized broadcast strategies that leverage the inherent properties of the data.
+We replace reactive peering with duty-aware proactive connections, full network awareness,
+and rapid session resumption.
+We leverage the full potential of QUIC standards to saturate network links
+and maximize Ethereum's goodput.
+We thread the fine needle between latency and anonymity to boost network privacy.
+We grease the critical path per-slot by prioritizing network flows, shaping traffic,
+and coordinating bandwidth between the consensus and execution layers.
 
-ethp2p is constrained by [EIP-7870 (Hardware and Bandwidth Recommendations)](https://eips.ethereum.org/EIPS/eip-7870). While requirements may adjust in lockstep with the evolution of bandwidth distribution around the world, we are committed to keeping Ethereum universally accessible everywhere. Frugality and efficiency are our best bet at ensuring that everyone can run an Ethereum node while upholding censorship resistance, openness, privacy, and security. That is the job of the networking layer: making Ethereum a World Computer, and not just a Computer.
+ethp2p is constrained by
+[EIP-7870 (Hardware and Bandwidth Recommendations)](https://eips.ethereum.org/EIPS/eip-7870).
+While requirements may adjust in lockstep with the evolution of bandwidth distribution around the
+world, we are committed to keeping Ethereum universally accessible everywhere.
+Frugality and efficiency are our best bet at ensuring that everyone can run an Ethereum node
+while upholding censorship resistance, openness, privacy, and security.
+That is the job of the networking layer: making Ethereum a World Computer, and not just a Computer.
 
 ## Layers
 
-Layering is the bread and butter of networking stacks, and ethp2p couldn't break that tradition. ethp2p comprises five layers:
+Layering is the bread and butter of networking stacks,
+and ethp2p couldn't break that tradition. ethp2p comprises five layers:
 
 | Layer     | Notions                                                                                 | Status         |
 | --------- | --------------------------------------------------------------------------------------- | -------------- |
@@ -18,9 +38,13 @@ Layering is the bread and butter of networking stacks, and ethp2p couldn't break
 | Privacy   | 2-hop mixnet, RLN spam resistance, proof of validator, decoy traffic                    | 🌑 Research    |
 | Control   | Slot-phase traffic shaping, duty scheduling, EL coordination, circuit breakers          | 🌗 Designing   |
 
-Each layer has a single responsibility, clear interfaces, and the ability to degrade independently. The layers share context (slot timing, duties, peer quality) to enable cross-layer optimization; isolation is for failure containment, not information hiding. There is no plug'n'play modularity: each layer's design deliberately compounds with the next for maximum mechanical sympathy.
+Each layer has a single responsibility, clear interfaces, and the ability to degrade independently.
+The layers share context (slot timing, duties, peer quality) to enable cross-layer optimization;
+isolation is for failure containment, not information hiding.
+There is no plug'n'play modularity:
+each layer's design deliberately compounds with the next for maximum mechanical sympathy.
 
-```
+```text
 ┌───────────────────────────────────────────────────────────────────────┐
 │                           CONSENSUS CLIENT                            │
 │                (beacon chain, fork choice, validator)                 │
@@ -65,11 +89,34 @@ Each layer has a single responsibility, clear interfaces, and the ability to deg
 
 🌗 Designing.
 
-QUIC (RFC 9000) is the primary transport: native stream multiplexing without head-of-line blocking, 0-RTT resumption, and datagram support (RFC 9221) for fire-and-forget messages like attestations. TLS 1.3 with Encrypted Client Hello (ECH) hides both content and connection metadata. Congestion control defaults to BBRv3, with Prague CC / L4S available for ECN-capable paths. We leverage stream prioritization to favor critical-path traffic during congestion. We factor in pacing and flow control signals to load balance traffic across peers more intelligently. Multipath QUIC (RFC 9443) aggregates bandwidth across interfaces when available. For environments where QUIC is blocked, TCP with QMux (draft-opik-quic-qmux) provides stream multiplexing as a degraded fallback.
+QUIC (RFC 9000) is the primary transport: native stream multiplexing without head-of-line blocking,
+0-RTT resumption, and datagram support (RFC 9221) for fire-and-forget messages like attestations.
+TLS 1.3 with Encrypted Client Hello (ECH) hides both content and connection metadata.
+Congestion control defaults to BBRv3, with Prague CC / L4S available for ECN-capable paths.
+We leverage stream prioritization to favor critical-path traffic during congestion.
+We factor in pacing and flow control signals to load balance traffic across peers more
+intelligently.
+Multipath QUIC (RFC 9443) aggregates bandwidth across interfaces when available.
+For environments where QUIC is blocked,
+TCP with QMux (draft-opik-quic-qmux) provides stream multiplexing as a degraded fallback.
 
-QUIC has a censorship resistance dividend. ethp2p traffic over QUIC with TLS 1.3 and ECH is indistinguishable from ordinary HTTPS: same ports, same handshake, same packet structure. The more our traffic looks like normal internet traffic, the harder it is to censor. This is not just a privacy feature; it is a precondition for operating Ethereum nodes in adversarial network environments.
+QUIC has a censorship resistance dividend. ethp2p traffic over QUIC with TLS 1.3
+and ECH is indistinguishable from ordinary HTTPS: same ports, same handshake, same packet structure.
+The more our traffic looks like normal internet traffic, the harder it is to censor.
+This is not just a privacy feature;
+it is a precondition for operating Ethereum nodes in adversarial network environments.
 
-Several QUIC capabilities are load-bearing for the design. Stream priorities let us favor block propagation over background sync during congestion. Exposed pacing and flow control signals enable the control plane to load balance across peers when a write would block for lack of flow control credit. Pluggable congestion control (BBRv3, Prague CC for L4S) matches the algorithm to path characteristics. Multipath QUIC aggregates bandwidth across interfaces, particularly useful between supernodes. MASQUE provides a QUIC-native proxy protocol that doubles as a privacy building block and potential relay transport. On the horizon: datagram optimizations, TLS handshake improvements (including better 0-RTT resumption), and GRO for reduced per-packet overhead.
+Several QUIC capabilities are load-bearing for the design.
+Stream priorities let us favor block propagation over background sync during congestion.
+Exposed pacing and flow control signals enable the control plane to load balance across peers
+when a write would block for lack of flow control credit.
+Pluggable congestion control (BBRv3, Prague CC for L4S) matches the algorithm to path
+characteristics.
+Multipath QUIC aggregates bandwidth across interfaces, particularly useful between supernodes.
+MASQUE provides a QUIC-native proxy protocol that doubles as a privacy building block
+and potential relay transport.
+On the horizon: datagram optimizations, TLS handshake improvements
+(including better 0-RTT resumption), and GRO for reduced per-packet overhead.
 
 <!-- MISSING from design doc:
 - Stream model: varint protocol ID per stream, no multistream-select, protocol ID registry (blocks=0x01, attestations=0x02...), stream manager with priority scheduling and stale preemption
@@ -84,13 +131,44 @@ Several QUIC capabilities are load-bearing for the design. Stream priorities let
 
 🌗 Designing.
 
-Peers keep an ample view of the entire network via discv5, identifying peers by capability, latency/RTT, geoip, and ASN. Storing ENR records of 10k peers only costs 7-9MiB, so a full network view is viable. During slot downtime, they schedule tasks to warm up connections to peers and suspend them, so they can be resumed later via 0-RTT if needed. Peer tables are created intentionally, and are structured in selfish and altruistic segments. Selfish segments map to the node's current and upcoming protocol duties, with slots for attestation subnet subscription, committee membership, DAS column propagation, aggregate participation, and more. Conversely, altruistic segments reserve slots to help other peers sync the chain, bootstrap to the network, and to let light clients observe consensus.
+Peers keep an ample view of the entire network via discv5, identifying peers by capability,
+latency/RTT, geoip, and ASN.
+Storing ENR records of 10k peers only costs 7-9MiB, so a full network view is viable.
+During slot downtime, they schedule tasks to warm up connections to peers and suspend them,
+so they can be resumed later via 0-RTT if needed.
+Peer tables are created intentionally, and are structured in selfish and altruistic segments.
+Selfish segments map to the node's current and upcoming protocol duties,
+with slots for attestation subnet subscription, committee membership, DAS column propagation,
+aggregate participation, and more.
+Conversely, altruistic segments reserve slots to help other peers sync the chain,
+bootstrap to the network, and to let light clients observe consensus.
 
-On top of this structure, it is possible to build more sophisticated routing, such as latency-sensitive or expander graph-like topologies, as well as privacy-oriented structures like relay networks and small mixnets.
+On top of this structure, it is possible to build more sophisticated routing,
+such as latency-sensitive or expander graph-like topologies,
+as well as privacy-oriented structures like relay networks and small mixnets.
 
-Supernodes. The Ethereum network comprises nodes with varying resources; this happens naturally. Ethereum should keep operating even if all nodes satisfy the bare minimum EIP-7870 requirements. But it should be able to leverage excess resources opportunistically, without top-down orchestration. Nodes continuously test peer quality of service, locally deciding to promote high-performing peers or demote them when they regress. If enough nodes do this across the network, a "highway" emerges organically without deliberate configuration. Supernodes help performance, but their absence does not break the network. They are an optimization layer; the base layer is self-sufficient.
+Supernodes.
+The Ethereum network comprises nodes with varying resources; this happens naturally.
+Ethereum should keep operating even if all nodes satisfy the bare minimum EIP-7870 requirements.
+But it should be able to leverage excess resources opportunistically,
+without top-down orchestration.
+Nodes continuously test peer quality of service,
+locally deciding to promote high-performing peers or demote them when they regress.
+If enough nodes do this across the network,
+a "highway" emerges organically without deliberate configuration.
+Supernodes help performance, but their absence does not break the network.
+They are an optimization layer; the base layer is self-sufficient.
 
-RTT awareness runs through peer scoring and selection. Each peer's round-trip latency is a first-class signal alongside reliability, bandwidth, and behavioral history; scores decay over time and update on events, not heartbeats. When the duty scheduler selects peers for a given role, it factors in latency: a proposer needs low-RTT peers with geographic diversity to maximize first-hop reach; an attester needs subnet peers and nearby aggregators; a sync committee member needs persistent connections with stable RTT. Diversity enforcement across regions, autonomous systems, and client implementations prevents latency optimization from collapsing the topology into a single cluster.
+RTT awareness runs through peer scoring and selection.
+Each peer's round-trip latency is a first-class signal alongside reliability, bandwidth,
+and behavioral history; scores decay over time and update on events, not heartbeats.
+When the duty scheduler selects peers for a given role, it factors in latency:
+a proposer needs low-RTT peers with geographic diversity to maximize first-hop reach;
+an attester needs subnet peers and nearby aggregators;
+a sync committee member needs persistent connections with stable RTT.
+Diversity enforcement across regions, autonomous systems,
+and client implementations prevents latency optimization from collapsing the topology into a single
+cluster.
 
 <!-- MISSING from design doc:
 - Discovery details: full DHT crawl, ENR extensions (custody columns, validator proof commitment, protocol versions, coarse geographic hint)
@@ -106,19 +184,60 @@ RTT awareness runs through peer scoring and selection. Each peer's round-trip la
 
 ## Broadcast
 
-🌕 Implemented. Code: [`broadcast/`](broadcast/).
+🌕 Implemented.
+Code: [`broadcast/`](broadcast/).
 
-Erasure-coded broadcast breaks a large message into smaller chunks, adds redundancy through coding, and spreads them across the network in parallel. Any node that collects enough valid chunks reconstructs the original. A relay with partial data is already contributing. The framework is coding-scheme agnostic: adding a new scheme requires implementing the Strategy interface, with no changes to the wire protocol, session machinery, or stream multiplexing.
+Erasure-coded broadcast breaks a large message into smaller chunks, adds redundancy through coding,
+and spreads them across the network in parallel.
+Any node that collects enough valid chunks reconstructs the original.
+A relay with partial data is already contributing.
+The framework is coding-scheme agnostic:
+adding a new scheme requires implementing the Strategy interface,
+with no changes to the wire protocol, session machinery, or stream multiplexing.
 
-For smaller objects like attestations, aggregates, block-level access lists, and beacon blocks, we specialize the propagation technique. Gossipsub, by contrast, treats every message identically: content-addressed dedup, IHAVE/IWANT chatter, shared streams across topics. This is a reasonable default for unknown workloads. But Ethereum objects tend to be bursty, time-sensitive, within specific size ranges, and often predictable (e.g. nodes know which attestations to expect in each committee).
+For smaller objects like attestations, aggregates, block-level access lists, and beacon blocks,
+we specialize the propagation technique.
+Gossipsub, by contrast, treats every message identically: content-addressed dedup,
+IHAVE/IWANT chatter, shared streams across topics.
+This is a reasonable default for unknown workloads.
+But Ethereum objects tend to be bursty, time-sensitive, within specific size ranges,
+and often predictable (e.g. nodes know which attestations to expect in each committee).
 
-Reconciliation primitives are very useful here. Instead of content-addressing messages and gossiping message IDs, we can model committees and gossip havelists as mere bitmaps, where each index corresponds to the expected validator. This is an example of the principle of vertical integration. We can batch attestations to amortize MTU. Instead of identifying subnets by long topic names (which represent 27% of the actual attestation data), we can identify them by ordinal. Attesters could fan out more aggressively on the first hop (but this degrades privacy further). We could allow batching attestations at source, where beacon nodes managing multiple validators assigned to the same committee can send a single batched attestation instead of many individual ones. If we consolidate attestation volume, we can reduce the number of subnets.
+Reconciliation primitives are very useful here.
+Instead of content-addressing messages and gossiping message IDs,
+we can model committees and gossip havelists as mere bitmaps,
+where each index corresponds to the expected validator.
+This is an example of the principle of vertical integration.
+We can batch attestations to amortize MTU.
+Instead of identifying subnets by long topic names
+(which represent 27% of the actual attestation data), we can identify them by ordinal.
+Attesters could fan out more aggressively on the first hop (but this degrades privacy further).
+We could allow batching attestations at source,
+where beacon nodes managing multiple validators assigned to the same committee can send a single
+batched attestation instead of many individual ones.
+If we consolidate attestation volume, we can reduce the number of subnets.
 
-Reed-Solomon is the primary candidate for production deployment. It offers per-chunk authentication via Merkle proofs (each chunk can be verified independently before contributing to decoding) and sits comfortably in the public domain. The current implementation covers the full strategy lifecycle: emit planning, bitmap-based routing, consistent-hash relay dedup, and forward multiplier budgeting.
+Reed-Solomon is the primary candidate for production deployment.
+It offers per-chunk authentication via Merkle proofs
+(each chunk can be verified independently before contributing to decoding)
+and sits comfortably in the public domain.
+The current implementation covers the full strategy lifecycle: emit planning, bitmap-based routing,
+consistent-hash relay dedup, and forward multiplier budgeting.
 
-Rateless codes (e.g. R10) are a natural complement. Where RS fixes the coding rate at the origin, a rateless encoder produces chunks indefinitely, letting the network decide when "enough" have arrived. The feedback signal is attestation rate: if attestations arrive quickly after a block, propagation succeeded and the encoder can stop; if attestations lag, the encoder increases output. This turns attestations into an implicit ACK channel for broadcast quality.
+Rateless codes (e.g. R10) are a natural complement.
+Where RS fixes the coding rate at the origin, a rateless encoder produces chunks indefinitely,
+letting the network decide when "enough" have arrived.
+The feedback signal is attestation rate: if attestations arrive quickly after a block,
+propagation succeeded and the encoder can stop; if attestations lag, the encoder increases output.
+This turns attestations into an implicit ACK channel for broadcast quality.
 
-Broadcast is also latency-sensitive. When a node has chunks to forward, it classifies peers into latency tiers: inner (0-60ms RTT), mid (60-120ms), and outer (120ms+). Inner-tier peers receive chunks first, creating a propagation wavefront that expands outward through the fastest paths. Combined with erasure coding (which reduces per-peer transfer size), tier-aware forwarding exploits both topology and coding gain.
+Broadcast is also latency-sensitive.
+When a node has chunks to forward, it classifies peers into latency tiers: inner
+(0-60ms RTT), mid (60-120ms), and outer (120ms+).
+Inner-tier peers receive chunks first,
+creating a propagation wavefront that expands outward through the fastest paths.
+Combined with erasure coding (which reduces per-peer transfer size),
+tier-aware forwarding exploits both topology and coding gain.
 
 | Spec                                             | Description                                                              |
 | ------------------------------------------------ | ------------------------------------------------------------------------ |
@@ -147,13 +266,38 @@ Broadcast is also latency-sensitive. When a node has chunks to forward, it class
 
 🌑 Research.
 
-Attestations are the strongest deanonymization vector in Ethereum: recurring, deterministic, correlatable. A passive observer monitoring outbound attestation timing over a few epochs can link IP addresses to validator identities.
+Attestations are the strongest deanonymization vector in Ethereum: recurring, deterministic,
+correlatable.
+A passive observer monitoring outbound attestation timing over a few epochs can link IP addresses to
+validator identities.
 
-We are working to bake privacy-preserving primitives into ethp2p. The difficulty is striking the right tradeoff with latency. Some impact is inevitable, but at least its ceiling should be strictly bounded. We have considered OHTTP-style 2-hop mixnet built on MASQUE (decoupling content from origin via QUIC-native relay proxying), potentially routing attestations through VRF-selected relays that rotate each epoch. With traffic now being obfuscated, we have to worry about spam. Rate Limiting Nullifiers (RLN) can prevent spam without revealing sender identity, but they come at a complexity cost. Privacy Pass offers a lighter-weight alternative: anonymous tokens that prove rate compliance without linking requests to identity. Proof of Validator (PoV) could have enabled prioritized meshes via ZK proofs of validator set membership, but the same credential can be used to irrevocably prove that a given endpoint runs an Ethereum validator, so not apt unless the endpoint can be obfuscated too. Decoy traffic could drown out behavioral traces that would otherwise reveal identity to sophisticated attackers, but reserving bandwidth for this reduces goodput.
+We are working to bake privacy-preserving primitives into ethp2p.
+The difficulty is striking the right tradeoff with latency.
+Some impact is inevitable, but at least its ceiling should be strictly bounded.
+We have considered OHTTP-style 2-hop mixnet built on MASQUE
+(decoupling content from origin via QUIC-native relay proxying),
+potentially routing attestations through VRF-selected relays that rotate each epoch.
+With traffic now being obfuscated, we have to worry about spam.
+Rate Limiting Nullifiers (RLN) can prevent spam without revealing sender identity,
+but they come at a complexity cost.
+Privacy Pass offers a lighter-weight alternative:
+anonymous tokens that prove rate compliance without linking requests to identity.
+Proof of Validator (PoV) could have enabled prioritized meshes via ZK proofs of validator set
+membership, but the same credential can be used to irrevocably prove that a given endpoint runs an
+Ethereum validator, so not apt unless the endpoint can be obfuscated too.
+Decoy traffic could drown out behavioral traces
+that would otherwise reveal identity to sophisticated attackers,
+but reserving bandwidth for this reduces goodput.
 
-The transport layer contributes a baseline: running over QUIC with TLS 1.3 and ECH makes ethp2p traffic indistinguishable from ordinary HTTPS. The more our traffic looks like normal internet traffic, the harder it is to censor.
+The transport layer contributes a baseline:
+running over QUIC with TLS 1.3 and ECH makes ethp2p traffic indistinguishable from ordinary HTTPS.
+The more our traffic looks like normal internet traffic, the harder it is to censor.
 
-How should the network behave if the privacy layer itself becomes degraded? For example, if mixnet congestion increases jitter and latency guarantees are broken, should we revert to more transparent communication (e.g. normal gossip or direct messaging), or should the backpressure degrade the chain too as long as liveness is not threatened?
+How should the network behave if the privacy layer itself becomes degraded?
+For example, if mixnet congestion increases jitter and latency guarantees are broken,
+should we revert to more transparent communication
+(e.g. normal gossip or direct messaging),
+or should the backpressure degrade the chain too as long as liveness is not threatened?
 
 <!-- MISSING from design doc:
 - Deanonymization elaboration: "Once linked, validators become targets for censorship, DoS, and coercion"
@@ -172,11 +316,23 @@ How should the network behave if the privacy layer itself becomes degraded? For 
 
 🌗 Designing.
 
-The EL and CL share the bandwidth envelope defined in EIP-7870, yet today they do not coordinate. They compete for the same pipe: the EL pushes transactions and state sync while the CL propagates blocks, attestations, and blobs. Neither knows what the other is doing, and neither yields. The control plane acts as a top-down conductor, allocating priority to different flows depending on where the node is in the slot and what remains on the critical path: has the block arrived, has the execution payload been validated, are we attesting, is aggregation complete.
+The EL and CL share the bandwidth envelope defined in EIP-7870, yet today they do not coordinate.
+They compete for the same pipe:
+the EL pushes transactions and state sync while the CL propagates blocks, attestations, and blobs.
+Neither knows what the other is doing, and neither yields.
+The control plane acts as a top-down conductor,
+allocating priority to different flows depending on where the node is in the slot
+and what remains on the critical path: has the block arrived,
+has the execution payload been validated, are we attesting, is aggregation complete.
 
-Ethereum's slot structure makes this possible. The control plane divides each slot into four phases (block arrival, attestation, aggregation, idle/prep) and allocates bandwidth accordingly. During block propagation, the CL receives maximum bandwidth and the EL is throttled. During idle, bandwidth is released to the EL for mempool sync and state serving.
+Ethereum's slot structure makes this possible.
+The control plane divides each slot into four phases
+(block arrival, attestation, aggregation, idle/prep) and allocates bandwidth accordingly.
+During block propagation, the CL receives maximum bandwidth and the EL is throttled.
+During idle, bandwidth is released to the EL for mempool sync and state serving.
 
-The duty scheduler precomputes peer sets an epoch ahead and warms connections before duties arrive. Circuit breakers isolate misbehaving peers with suspension and cooldown.
+The duty scheduler precomputes peer sets an epoch ahead and warms connections before duties arrive.
+Circuit breakers isolate misbehaving peers with suspension and cooldown.
 
 <!-- MISSING from design doc:
 - Duty scheduling mechanics: assignments from consensus client, sorted map keyed by slot, epoch-start prefetch, slot-start activation
