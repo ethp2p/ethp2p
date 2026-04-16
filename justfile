@@ -19,6 +19,11 @@ proto-lint:
 install-cli:
     cd sim/cli && uv sync
 
+# Install spec tooling and format specs
+specs:
+    if ! command -v rumdl >/dev/null 2>&1; then uv tool install rumdl; fi
+    rumdl fmt specs/
+
 # Generate a topology
 topology n="10" d="4" seed="42" out="topology.json":
     simctl topology -n {{n}} -d {{d}} -s {{seed}} -o {{out}}

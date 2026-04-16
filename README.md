@@ -33,6 +33,13 @@ The transport, peering, and control layers follow. In parallel, we are researchi
 | [Reed-Solomon strategy](specs/003-ec-broadcast-rs.md)    | Per-chunk hash verification, bitmap routing, consistent-hash relay dedup |
 | [RLNC strategy](specs/004-ec-broadcast-rlnc.md)          | Ristretto255 arithmetic, rank-based routing, subspace fingerprinting     |
 
+When working on specs, run:
+
+```bash
+just specs
+```
+
+This installs `rumdl` if needed and formats files under `specs/`.
 
 ## Transport
 
