@@ -1,0 +1,29 @@
+name: bench-500
+description: "500-node, 2 MiB benchmark comparing gossipsub, RS-ChunkLen, RLNC-ChunkLen"
+
+simulation:
+  driver: shadow
+  log_level: info
+  trace_file: trace.bctrace
+
+topology:
+  generate:
+    num_nodes: 100
+    degree: 10
+    type: realistic
+    seed: 1828923
+    super_node_fraction: 0.05
+
+workload:
+  num_messages: 2
+  message_size: 2097152
+  publish_wait_seconds: 10.0
+  stop_time_minutes: 10.0
+
+strategies:
+  - name: gossipsub
+
+  - name: RS-ChunkLen
+    chunk_len: 16384
+    enable_bitmaps: true
+    bitmap_threshold: 0

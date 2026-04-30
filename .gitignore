@@ -24,6 +24,7 @@ experiments/
 runs/
 
 sim/simcfg/simnode/simnode
+sim/cmd/shadow/shadow
 
 .notes.md
 .work/
