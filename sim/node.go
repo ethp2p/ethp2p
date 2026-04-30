@@ -21,6 +21,9 @@ type Node interface {
 	Publish(messageID string, data []byte)
 	Receive(ctx context.Context) (messageID string, data []byte, err error)
 	DialPeer(ctx context.Context, nodeNum int, addr net.Addr) error
+	AwaitReady(ctx context.Context, peers []int) error
+	WarmupPeer(ctx context.Context, nodeNum int, byteCount int) error
+	AwaitWarmup(ctx context.Context, peers []int) error
 	BandwidthStats() (sent, received int)
 	ResetBandwidthStats() (sent, received int)
 	Addr() net.Addr
@@ -44,10 +47,13 @@ type BroadcastNode struct {
 
 	mu       sync.Mutex
 	conns    []*quic.Conn
+	peers    map[int]*quic.Conn
 	wg       sync.WaitGroup
 	closed   bool
 	baseSent int // cumulative baseline for ResetBandwidthStats
 	baseRecv int
+	warmup   warmupTracker
+	ready    *peerReadyTracker
 }
 
 func (n *BroadcastNode) NodeNum() int {
@@ -106,6 +112,7 @@ func (n *BroadcastNode) processIncomingConnections(ctx context.Context) {
 		n.mu.Lock()
 		n.conns = append(n.conns, c)
 		n.mu.Unlock()
+		n.wg.Go(func() { n.acceptWarmupStreams(ctx, c) })
 		n.engine.NotifyPeerConnected(quicTransport.NewTransport(c, transport.Inbound))
 	}
 }
@@ -118,16 +125,61 @@ func (n *BroadcastNode) DialPeer(ctx context.Context, p int, addr net.Addr) erro
 
 	n.mu.Lock()
 	n.conns = append(n.conns, cu)
+	n.peers[p] = cu
 	n.mu.Unlock()
 
+	n.wg.Go(func() { n.acceptWarmupStreams(ctx, cu) })
 	n.engine.NotifyPeerConnected(quicTransport.NewTransport(cu, transport.Outbound))
 	return nil
+}
+
+func (n *BroadcastNode) AwaitReady(ctx context.Context, peers []int) error {
+	if n.ready == nil {
+		return nil
+	}
+	return n.ready.await(ctx, peers)
+}
+
+func (n *BroadcastNode) WarmupPeer(ctx context.Context, p int, byteCount int) error {
+	n.mu.Lock()
+	c := n.peers[p]
+	n.mu.Unlock()
+	if c == nil {
+		return nil
+	}
+	s, err := c.OpenStreamSync(ctx)
+	if err != nil {
+		return err
+	}
+	defer s.Close()
+	return runWarmupInitiator(s, n.num, byteCount)
+}
+
+func (n *BroadcastNode) AwaitWarmup(ctx context.Context, peers []int) error {
+	return n.warmup.awaitIncoming(ctx, n.num, peers)
+}
+
+func (n *BroadcastNode) acceptWarmupStreams(ctx context.Context, c *quic.Conn) {
+	for {
+		s, err := c.AcceptStream(ctx)
+		if err != nil {
+			return
+		}
+		peer, err := runWarmupResponder(s)
+		if err != nil {
+			n.logger.Error("failed to respond to warmup stream", "err", err)
+		} else {
+			n.warmup.mark(peer)
+		}
+		s.Close()
+	}
 }
 
 func (n *BroadcastNode) BandwidthStats() (bytesSent, bytesReceived int) {
 	n.mu.Lock()
 	defer n.mu.Unlock()
-	return n.rawBandwidth()
+	sent, recv := n.rawBandwidth()
+	return sent - n.baseSent, recv - n.baseRecv
 }
 
 func (n *BroadcastNode) rawBandwidth() (sent, received int) {
@@ -160,6 +212,7 @@ func newBroadcastNode(
 	conn net.PacketConn,
 	nodeNum int,
 	logger *slog.Logger,
+	ready *peerReadyTracker,
 ) (*BroadcastNode, error) {
 	qh, err := NewQUICHost(conn)
 	if err != nil {
@@ -175,5 +228,7 @@ func newBroadcastNode(
 		stopFn:    stopFn,
 		recvCh:    recvCh,
 		logger:    logger,
+		peers:     make(map[int]*quic.Conn),
+		ready:     ready,
 	}, nil
 }

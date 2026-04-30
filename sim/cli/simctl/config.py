@@ -44,6 +44,7 @@ class WorkloadConfig(BaseModel):
     message_size: int = 100_000
     publish_wait_seconds: float = 10.0
     stop_time_minutes: float = 30.0
+    warmup: Literal["auto", "off"] = "auto"
 
 
 class TopologyGenerate(BaseModel):

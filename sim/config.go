@@ -14,6 +14,11 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
+const (
+	broadcastChannelID = broadcast.ChannelID("broadcast")
+	autoWarmupDrain    = 10 * time.Second
+)
+
 // RunConfig is the unified YAML configuration for a simulation run.
 type RunConfig struct {
 	Simulation SimulationConfig `yaml:"simulation"`
@@ -116,6 +121,7 @@ type WorkloadConfig struct {
 	MessageSize        int     `yaml:"message_size"`
 	PublishWaitSeconds float64 `yaml:"publish_wait_seconds"`
 	StopTimeMinutes    float64 `yaml:"stop_time_minutes"`
+	Warmup             string  `yaml:"warmup,omitempty"`
 }
 
 func (c *WorkloadConfig) PublishWait() time.Duration {
@@ -124,6 +130,17 @@ func (c *WorkloadConfig) PublishWait() time.Duration {
 
 func (c *WorkloadConfig) StopTime() time.Duration {
 	return time.Duration(c.StopTimeMinutes * float64(time.Minute))
+}
+
+func (c *WorkloadConfig) WarmupEnabled() (bool, error) {
+	switch c.Warmup {
+	case "", "auto":
+		return true, nil
+	case "off":
+		return false, nil
+	default:
+		return false, fmt.Errorf("unknown workload.warmup: %s", c.Warmup)
+	}
 }
 
 // LoadRunConfig reads and parses a YAML run config from path.
@@ -167,11 +184,16 @@ type StrategyFunc func(nodeNum int, conn net.PacketConn, logger *slog.Logger, ob
 // are handled here; the scheme is the only varying part.
 func ECStrategy[CI broadcast.ChunkIdent, R broadcast.Wire, P broadcast.Wire](scheme broadcast.Scheme[CI, R, P]) StrategyFunc {
 	return func(nodeNum int, conn net.PacketConn, logger *slog.Logger, obs broadcast.Observer, tw *TraceWriter) (Node, error) {
+		ready := newPeerReadyTracker(broadcastChannelID)
+		if obs == nil {
+			obs = broadcast.NoOpObserver{}
+		}
+		obs = &readinessObserver{Observer: obs, ready: ready}
 		engine := broadcast.NewEngine(broadcast.EngineConfig{
 			PeerID:   broadcast.PeerID(fmt.Sprintf("%d", nodeNum)),
 			Observer: obs,
 		})
-		channel := broadcast.AttachChannel(engine, "broadcast", scheme)
+		channel := broadcast.AttachChannel(engine, broadcastChannelID, scheme)
 		recvCh := make(chan broadcast.FullMessage, 64)
 		if err := channel.Subscribe(recvCh); err != nil {
 			engine.Close()
@@ -183,6 +205,7 @@ func ECStrategy[CI broadcast.ChunkIdent, R broadcast.Wire, P broadcast.Wire](sch
 			channel.Stop,
 			recvCh,
 			conn, nodeNum, logger,
+			ready,
 		)
 	}
 }
@@ -240,14 +263,18 @@ func (rc *RunConfig) NewScenario(driver string, logger *slog.Logger) (*Scenario,
 	}
 
 	var drv Driver
+	topo, topoErr := rc.LoadTopology()
+	if topoErr != nil {
+		return nil, topoErr
+	}
+	warmupEnabled, err := rc.Workload.WarmupEnabled()
+	if err != nil {
+		return nil, err
+	}
 	switch driver {
 	case "shadow":
 		drv = &ShadowDriver{Strategy: newNode}
 	case "simnet":
-		topo, err := rc.LoadTopology()
-		if err != nil {
-			return nil, err
-		}
 		sd := &SimnetDriver{Strategy: newNode, Topology: topo}
 		if rc.Simulation.TraceFile != "" {
 			f, err := os.Create(rc.Simulation.TraceFile)
@@ -290,11 +317,20 @@ func (rc *RunConfig) NewScenario(driver string, logger *slog.Logger) (*Scenario,
 		logger = slog.New(slog.NewTextHandler(w, &slog.HandlerOptions{Level: level}))
 	}
 
+	var warmupBytes map[int]map[int]int
+	var warmupDrain time.Duration
+	if warmupEnabled {
+		warmupBytes = AutoWarmupBytes(topo, rc.Workload.MessageSize)
+		warmupDrain = autoWarmupDrain
+	}
+
 	return &Scenario{
 		NumMessages:           rc.Workload.NumMessages,
 		MessageSize:           rc.Workload.MessageSize,
 		Driver:                drv,
 		BandwidthLogFrequency: rc.Simulation.BandwidthLogFrequency(),
+		WarmupBytes:           warmupBytes,
+		WarmupDrain:           warmupDrain,
 		Logger:                logger,
 	}, nil
 }

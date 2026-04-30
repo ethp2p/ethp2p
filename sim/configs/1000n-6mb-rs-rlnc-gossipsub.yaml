@@ -8,7 +8,7 @@ simulation:
 
 topology:
   generate:
-    num_nodes: 500
+    num_nodes: 1000
     degree: 10
     type: realistic
     seed: 1828923
@@ -16,7 +16,7 @@ topology:
 
 workload:
   num_messages: 1
-  message_size: 2097152
+  message_size: 6291456
   publish_wait_seconds: 10.0
   stop_time_minutes: 10.0
   warmup: auto
@@ -25,6 +25,6 @@ strategies:
   - name: gossipsub
 
   - name: RS-ChunkLen
-    chunk_len: 16384
+    chunk_len: 65536
     enable_bitmaps: true
     bitmap_threshold: 0

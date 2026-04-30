@@ -16,6 +16,8 @@ type Scenario struct {
 	MessageSize           int
 	Driver                Driver
 	BandwidthLogFrequency time.Duration
+	WarmupBytes           map[int]map[int]int
+	WarmupDrain           time.Duration
 	Logger                *slog.Logger
 
 	mu             sync.RWMutex
@@ -92,12 +94,47 @@ func (s *Scenario) RunNode(ctx context.Context, node Node, peers []int, publishW
 		})
 	}
 	wg.Wait()
+	readyCtx, cancelReady := context.WithTimeout(ctx, 30*time.Second)
+	defer cancelReady()
+	if err := node.AwaitReady(readyCtx, peers); err != nil {
+		panic(fmt.Sprintf("node %d failed to become ready: %s", nodeNum, err.Error()))
+	}
+	if s.WarmupBytes != nil {
+		s.warmupPeers(readyCtx, node, peers)
+		if err := node.AwaitWarmup(readyCtx, peers); err != nil {
+			panic(fmt.Sprintf("node %d failed to complete warmup: %s", nodeNum, err.Error()))
+		}
+		if nodeNum == 0 && s.WarmupDrain > 0 {
+			if err := waitContext(ctx, s.WarmupDrain); err != nil {
+				return
+			}
+		}
+	}
+	node.ResetBandwidthStats()
 	if nodeNum == 0 {
-		time.Sleep(2 * time.Minute)
 		s.publishMessages(nodeCtx, nodeNum, node, publishWait)
 	} else {
 		s.receiveMessages(nodeCtx, nodeNum, node)
 	}
+}
+
+func (s *Scenario) warmupPeers(ctx context.Context, node Node, peers []int) {
+	nodeNum := node.NodeNum()
+	ch := make(chan struct{}, 20)
+	var wg sync.WaitGroup
+	for _, p := range peers {
+		if nodeNum > p {
+			continue
+		}
+		ch <- struct{}{}
+		wg.Go(func() {
+			defer func() { <-ch }()
+			if err := node.WarmupPeer(ctx, p, s.WarmupBytes[nodeNum][p]); err != nil {
+				panic(fmt.Sprintf("failed to warm peer: %d: %s", p, err.Error()))
+			}
+		})
+	}
+	wg.Wait()
 }
 
 func (s *Scenario) publishMessages(ctx context.Context, nodeNum int, node Node, publishWait time.Duration) {

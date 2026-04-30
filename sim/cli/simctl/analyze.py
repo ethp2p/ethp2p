@@ -32,6 +32,7 @@ class RunStats:
     name: str
     num_nodes: int = 0
     message_size: int = 0
+    publish_wait_seconds: float = 0.0
     expected: int = 0
 
     # msg_idx → per-message stats
@@ -89,7 +90,12 @@ def _parse_trace_chunk_stats(node_dirs: list[Path]) -> dict[int, dict[int, dict[
     return stats
 
 
-def parse_shadow_run(run_dir: Path, name: str, message_size: int) -> RunStats:
+def parse_shadow_run(
+    run_dir: Path,
+    name: str,
+    message_size: int,
+    publish_wait_seconds: float = 0.0,
+) -> RunStats:
     """Parse a Shadow run directory for bandwidth, latency, and chunk stats."""
     hosts_dir = run_dir / "shadow.data" / "hosts"
     if not hosts_dir.exists():
@@ -180,6 +186,7 @@ def parse_shadow_run(run_dir: Path, name: str, message_size: int) -> RunStats:
         name=name,
         num_nodes=num_nodes,
         message_size=message_size,
+        publish_wait_seconds=publish_wait_seconds,
         expected=expected,
         messages=messages,
     )
@@ -210,7 +217,8 @@ def parse_run(run_dir: Path) -> list[RunStats]:
                 cfg = yaml.safe_load(f)
             strat_name = cfg.get("strategy", {}).get("name", "unknown")
             msg_size = cfg.get("workload", {}).get("message_size", 0)
-            results.append(parse_shadow_run(strat_dir, strat_name, msg_size))
+            publish_wait = cfg.get("workload", {}).get("publish_wait_seconds", 0.0)
+            results.append(parse_shadow_run(strat_dir, strat_name, msg_size, publish_wait))
         return results
 
     runs_dir = run_dir / "runs"
@@ -226,7 +234,8 @@ def parse_run(run_dir: Path) -> list[RunStats]:
                 cfg = yaml.safe_load(f)
             strat_name = cfg.get("strategy", {}).get("name", "unknown")
             msg_size = cfg.get("workload", {}).get("message_size", 0)
-            results.append(parse_shadow_run(rd, strat_name, msg_size))
+            publish_wait = cfg.get("workload", {}).get("publish_wait_seconds", 0.0)
+            results.append(parse_shadow_run(rd, strat_name, msg_size, publish_wait))
         return results
 
     if (run_dir / "shadow.data").exists():
@@ -237,7 +246,8 @@ def parse_run(run_dir: Path) -> list[RunStats]:
             cfg = yaml.safe_load(f)
         strat_name = cfg.get("strategy", {}).get("name", "unknown")
         msg_size = cfg.get("workload", {}).get("message_size", 0)
-        return [parse_shadow_run(run_dir, strat_name, msg_size)]
+        publish_wait = cfg.get("workload", {}).get("publish_wait_seconds", 0.0)
+        return [parse_shadow_run(run_dir, strat_name, msg_size, publish_wait)]
 
     raise FileNotFoundError(f"Cannot find strategies/, runs/, or shadow.data in {run_dir}")
 
@@ -267,6 +277,15 @@ def _int_str(v: float) -> str:
     return str(int(v))
 
 
+def _chunk_cell(r: RunStats, m: MessageStats, verdict: str, pct: float) -> str:
+    if r.name == "gossipsub":
+        return "-"
+    vals = m.relay_verdicts.get(verdict, [])
+    if not vals:
+        return "n/a"
+    return _int_str(_pct(vals, pct))
+
+
 def _empty_msg() -> MessageStats:
     return MessageStats()
 
@@ -293,6 +312,29 @@ def _sanity_checks(results: list[RunStats], msg_size: int) -> list[tuple[bool, s
             )))
 
     return checks
+
+
+def _warnings(results: list[RunStats]) -> list[str]:
+    warnings: list[str] = []
+    stats_delay_ms = 10_000
+    for r in results:
+        if len(r.messages) <= 1 or r.publish_wait_seconds <= 0:
+            continue
+        publish_wait_ms = r.publish_wait_seconds * 1000
+        non_last = sorted(r.messages)[:-1]
+        if not non_last:
+            continue
+        latest_snapshot_ms = max(
+            _pct(r.messages[idx].latencies_ms, 0.99) + stats_delay_ms
+            for idx in non_last
+        )
+        if latest_snapshot_ms > publish_wait_ms:
+            warnings.append(
+                f"{r.name}: per-message bandwidth windows overlap "
+                f"(publish wait {_ms(publish_wait_ms)}, p99 latency + stats delay "
+                f"{_ms(latest_snapshot_ms)}). Later bandwidth columns may be undercounted."
+            )
+    return warnings
 
 
 def _msg_indices(results: list[RunStats]) -> list[int]:
@@ -410,9 +452,8 @@ def print_table(results: list[RunStats]) -> None:
     for vname in all_verdict_names:
         print(sep())
         for i, pl in enumerate(pct_labels):
-            vvals = [ms(r, idx).relay_verdicts.get(vname, []) for r, idx in cols]
             print(row(f"chunks {vname} {pl}", [
-                _int_str(_pct(v, pcts[i])) if v else "n/a" for v in vvals
+                _chunk_cell(r, ms(r, idx), vname, pcts[i]) for r, idx in cols
             ]))
 
     checks = _sanity_checks(results, msg_size)
@@ -423,5 +464,13 @@ def print_table(results: list[RunStats]) -> None:
         for passed, label in checks:
             mark = "v" if passed else "x"
             print(f"  [{mark}]  {label}")
+
+    warnings = _warnings(results)
+    if warnings:
+        print(f"\n{'─' * 80}")
+        print("  Warnings")
+        print(f"{'─' * 80}")
+        for warning in warnings:
+            print(f"  [!]  {warning}")
 
     print()
