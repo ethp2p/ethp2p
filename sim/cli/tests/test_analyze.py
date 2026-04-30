@@ -10,7 +10,7 @@ from simctl.analyze import MessageStats, RunStats, print_table
 class AnalyzeReportTests(unittest.TestCase):
     def test_gossipsub_chunk_cells_render_as_dash(self) -> None:
         rs = RunStats(
-            name="RS-ChunkLen",
+            name="RS",
             num_nodes=2,
             message_size=1024,
             expected=1,

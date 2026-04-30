@@ -1,5 +1,5 @@
 name: rs-1000-trace
-description: "1000-node RS-ChunkLen with 16 KiB chunks, bitmaps from start, .bctrace for viz"
+description: "1000-node RS with 16 KiB chunks, bitmaps from start, .bctrace for viz"
 
 simulation:
   driver: shadow
@@ -21,7 +21,7 @@ workload:
   stop_time_minutes: 10.0
 
 strategies:
-  - name: RS-ChunkLen
+  - name: RS
     chunk_len: 16384
     enable_bitmaps: true
     bitmap_threshold: 0

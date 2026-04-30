@@ -64,13 +64,13 @@ func (sc *StrategyConfig) UnmarshalYAML(value *yaml.Node) error {
 	}
 	sc.Name = raw.Name
 	switch raw.Name {
-	case "RS", "RS-ChunkLen":
+	case "RS":
 		var cfg RSStrategyConfig
 		if err := value.Decode(&cfg); err != nil {
 			return fmt.Errorf("decode RS strategy config: %w", err)
 		}
 		sc.RS = &cfg
-	case "RLNC", "RLNC-ChunkLen":
+	case "RLNC":
 		if err := decodeRLNCStrategyConfig(sc, value); err != nil {
 			return err
 		}
@@ -243,9 +243,9 @@ func (rc *RunConfig) BuildTraceHeaderOptions(topo Topology) (TraceHeaderOptions,
 
 func (rc *RunConfig) strategyFunc() (StrategyFunc, error) {
 	switch rc.Strategy.Name {
-	case "RS", "RS-ChunkLen":
+	case "RS":
 		return ECStrategy(rs.NewScheme(rc.Strategy.RS.broadcastConfig())), nil
-	case "RLNC", "RLNC-ChunkLen":
+	case "RLNC":
 		return rlncStrategyFunc(rc.Strategy.RLNC)
 	case "gossipsub":
 		return GossipsubStrategy(), nil

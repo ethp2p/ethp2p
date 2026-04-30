@@ -67,7 +67,7 @@ func TestNetwork(t *testing.T) {
 				},
 			},
 			{
-				Name: "RS-ChunkLen",
+				Name: "RS",
 				Scenario: &Scenario{
 					NumMessages: 10,
 					MessageSize: 10 * 1024,
@@ -80,7 +80,7 @@ func TestNetwork(t *testing.T) {
 				},
 			},
 			{
-				Name: "RS-ChunkLen-2",
+				Name: "RS-2",
 				Scenario: &Scenario{
 					NumMessages: 10,
 					MessageSize: 10 * 1024,

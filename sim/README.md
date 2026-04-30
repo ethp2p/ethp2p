@@ -41,7 +41,7 @@ simulation:
   bandwidth_log_frequency_ms: 100
 
 strategy:
-  name: RS # RS, RS-ChunkLen, RLNC, RLNC-ChunkLen, gossipsub
+  name: RS # RS, RLNC, gossipsub
   data_shards: 16
   parity_shards: 16
   enable_bitmaps: true
@@ -76,13 +76,11 @@ Each strategy reads only its own fields; unknown fields are ignored.
 RLNC strategies require the private `../ethp2p-extras` overlay linked with
 `just link-rlnc` and Go commands run with `-tags rlnc`.
 
-| Strategy      | Fields                                                                                  |
-| ------------- | --------------------------------------------------------------------------------------- |
-| RS            | `data_shards`, `parity_shards`, `enable_bitmaps`, `bitmap_threshold`                    |
-| RS-ChunkLen   | `chunk_len`, `enable_bitmaps`, `bitmap_threshold`                                       |
-| RLNC          | `num_chunks`, `enable_bitmaps`                                                          |
-| RLNC-ChunkLen | `num_chunks_per_generation`, `target_chunk_size`, `origin_redundancy`, `enable_bitmaps` |
-| gossipsub     | (none)                                                                                  |
+| Strategy  | Fields                                                                                                             |
+| --------- | ------------------------------------------------------------------------------------------------------------------ |
+| RS        | `data_shards`, `parity_shards`, `chunk_len`, `forward_multiplier`, `enable_bitmaps`, `bitmap_threshold`            |
+| RLNC      | `num_chunks`, `num_chunks_per_generation`, `target_chunk_size`, `origin_redundancy`, `forward_multiplier`          |
+| gossipsub | (none)                                                                                                             |
 
 ### Experiment config
 
@@ -197,13 +195,11 @@ simctl remote experiment experiment.yaml --host=user@server --dry-run
 
 RS and RLNC nodes are created via `ECStrategy`, which wraps the broadcast engine's `Scheme` interface. Gossipsub is a standalone libp2p implementation used as a baseline.
 
-| Strategy      | Description                                           |
-| ------------- | ----------------------------------------------------- |
-| RS            | Reed-Solomon erasure coding                           |
-| RS-ChunkLen   | RS with fixed chunk size instead of fixed shard count |
-| RLNC          | Random linear network coding                          |
-| RLNC-ChunkLen | RLNC with generations and target chunk size           |
-| gossipsub     | libp2p gossipsub baseline (no erasure coding)         |
+| Strategy  | Description                                   |
+| --------- | --------------------------------------------- |
+| RS        | Reed-Solomon erasure coding                   |
+| RLNC      | Random linear network coding                  |
+| gossipsub | libp2p gossipsub baseline (no erasure coding) |
 
 ## Running tests
 

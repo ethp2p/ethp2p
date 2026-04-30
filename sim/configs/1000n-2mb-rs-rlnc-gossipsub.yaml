@@ -1,5 +1,5 @@
 name: bench-1000
-description: "1000-node, 2 MiB benchmark comparing gossipsub, RS-ChunkLen, RLNC-ChunkLen"
+description: "1000-node, 2 MiB benchmark comparing gossipsub, RS, RLNC"
 
 simulation:
   driver: shadow
@@ -23,7 +23,7 @@ workload:
 strategies:
   - name: gossipsub
 
-  - name: RS-ChunkLen
+  - name: RS
     chunk_len: 16384
     enable_bitmaps: true
     bitmap_threshold: 100
