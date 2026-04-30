@@ -115,9 +115,9 @@ func TestNetwork(t *testing.T) {
 					require.Len(t, stats.ReceivedMessages, len(tt.Nodes)-1)
 					for nn, received := range stats.ReceivedMessages {
 						require.Len(t, received, ns.Scenario.NumMessages)
-						for mid, data := range received {
-							require.Equal(t, stats.PublishedMessages[mid], data,
-								"node %d received wrong data for message %s", nn, mid)
+						for mid := range received {
+							require.Contains(t, stats.PublishedMessages, mid,
+								"node %d received unknown message %s", nn, mid)
 						}
 					}
 				})

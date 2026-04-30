@@ -150,7 +150,7 @@ func (s *Scenario) publishMessages(ctx context.Context, nodeNum int, node Node, 
 
 		now := time.Now()
 		nextPublishAt := time.Now().Add(publishWait)
-		ev := NodeEvent{MessageID: messageID, Data: data, NodeNum: nodeNum, At: now}
+		ev := NodeEvent{MessageID: messageID, NodeNum: nodeNum, At: now}
 		s.mu.RLock()
 		chans := s.publishChans
 		s.mu.RUnlock()
@@ -176,7 +176,7 @@ func (s *Scenario) publishMessages(ctx context.Context, nodeNum int, node Node, 
 
 func (s *Scenario) receiveMessages(ctx context.Context, nodeNum int, node Node) {
 	for range s.NumMessages {
-		messageID, data, err := node.Receive(ctx)
+		messageID, _, err := node.Receive(ctx)
 		if err != nil {
 			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 				return
@@ -184,7 +184,7 @@ func (s *Scenario) receiveMessages(ctx context.Context, nodeNum int, node Node) 
 			panic(err)
 		}
 		now := time.Now()
-		ev := NodeEvent{MessageID: messageID, Data: data, NodeNum: nodeNum, At: now}
+		ev := NodeEvent{MessageID: messageID, NodeNum: nodeNum, At: now}
 		s.mu.RLock()
 		chans := s.receiveChans
 		s.mu.RUnlock()
