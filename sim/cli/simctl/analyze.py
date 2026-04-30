@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -47,10 +48,45 @@ _MSG_STATS_RE = re.compile(
     r'msg="message stats" node-num=(\d+) message-id=(\S+)\s+(.*)'
 )
 _KV_RE = re.compile(r"(\S+?)=(\d+)")
+_VERDICT_NAMES = {
+    0: "accepted",
+    1: "redundant",
+    2: "decoding",
+    3: "surplus",
+}
 
 
 def _msg_idx(message_id: str) -> int:
     return int(message_id.removeprefix("msg-"))
+
+
+def _parse_trace_chunk_stats(node_dirs: list[Path]) -> dict[int, dict[int, dict[str, int]]]:
+    """Parse exact per-message chunk verdicts from per-node trace files."""
+    stats: dict[int, dict[int, dict[str, int]]] = {}
+
+    for node_dir in node_dirs:
+        events_file = node_dir / "events.ndjson"
+        if not events_file.exists():
+            continue
+
+        for line in events_file.read_text().splitlines():
+            if not line.startswith("["):
+                continue
+            try:
+                ev = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if len(ev) < 7 or ev[2] != "cr":
+                continue
+            verdict_name = _VERDICT_NAMES.get(ev[6])
+            if verdict_name is None:
+                continue
+            node_num = int(ev[1])
+            idx = _msg_idx(ev[5])
+            msg_node_stats = stats.setdefault(idx, {}).setdefault(node_num, {})
+            msg_node_stats[verdict_name] = msg_node_stats.get(verdict_name, 0) + 1
+
+    return stats
 
 
 def parse_shadow_run(run_dir: Path, name: str, message_size: int) -> RunStats:
@@ -89,6 +125,11 @@ def parse_shadow_run(run_dir: Path, name: str, message_size: int) -> RunStats:
                 for kv in _KV_RE.finditer(m.group(3)):
                     kvs[kv.group(1)] = int(kv.group(2))
                 msg_stats.setdefault(idx, {})[nn] = kvs
+
+    trace_chunk_stats = _parse_trace_chunk_stats(node_dirs)
+    for idx, by_node in trace_chunk_stats.items():
+        for nn, chunk_stats in by_node.items():
+            msg_stats.setdefault(idx, {}).setdefault(nn, {}).update(chunk_stats)
 
     num_nodes = len(node_dirs)
     expected = num_nodes - 1

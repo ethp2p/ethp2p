@@ -24,16 +24,19 @@ type ChunkStats struct {
 type Observer struct {
 	broadcast.NoOpObserver
 
-	mu       sync.RWMutex
-	roles    map[sessionKey]broadcast.SessionRole
-	sent     map[broadcast.SessionRole]int
-	verdicts [5]int // indexed by Verdict iota
+	mu                sync.RWMutex
+	roles             map[sessionKey]broadcast.SessionRole
+	sent              map[broadcast.SessionRole]int
+	sentByMessage     map[broadcast.MessageID]map[broadcast.SessionRole]int
+	verdictsByMessage map[broadcast.MessageID][5]int // indexed by Verdict iota
 }
 
 func NewObserver() *Observer {
 	return &Observer{
-		roles: make(map[sessionKey]broadcast.SessionRole),
-		sent:  make(map[broadcast.SessionRole]int),
+		roles:             make(map[sessionKey]broadcast.SessionRole),
+		sent:              make(map[broadcast.SessionRole]int),
+		sentByMessage:     make(map[broadcast.MessageID]map[broadcast.SessionRole]int),
+		verdictsByMessage: make(map[broadcast.MessageID][5]int),
 	}
 }
 
@@ -47,13 +50,21 @@ func (o *Observer) OnChunkSent(_ broadcast.PeerID, channelID broadcast.ChannelID
 	o.mu.Lock()
 	role := o.roles[sessionKey{channelID, messageID}]
 	o.sent[role] += bytesSent
+	byRole := o.sentByMessage[messageID]
+	if byRole == nil {
+		byRole = make(map[broadcast.SessionRole]int)
+		o.sentByMessage[messageID] = byRole
+	}
+	byRole[role] += bytesSent
 	o.mu.Unlock()
 }
 
-func (o *Observer) OnChunkRcvd(_ broadcast.PeerID, _ broadcast.ChannelID, _ broadcast.MessageID, verdict broadcast.Verdict) {
+func (o *Observer) OnChunkRcvd(_ broadcast.PeerID, _ broadcast.ChannelID, messageID broadcast.MessageID, verdict broadcast.Verdict) {
 	o.mu.Lock()
-	if int(verdict) < len(o.verdicts) {
-		o.verdicts[verdict]++
+	if int(verdict) < len([5]int{}) {
+		verdicts := o.verdictsByMessage[messageID]
+		verdicts[verdict]++
+		o.verdictsByMessage[messageID] = verdicts
 	}
 	o.mu.Unlock()
 }
@@ -69,12 +80,13 @@ func (o *Observer) Stats() (originSent, relaySent int) {
 func (o *Observer) Chunks() ChunkStats {
 	o.mu.RLock()
 	defer o.mu.RUnlock()
-	return ChunkStats{
-		Accepted:  o.verdicts[broadcast.VerdictAccepted],
-		Redundant: o.verdicts[broadcast.VerdictRedundant],
-		Decoding:  o.verdicts[broadcast.VerdictDecoding],
-		Surplus:   o.verdicts[broadcast.VerdictSurplus],
+	var verdicts [5]int
+	for _, msgVerdicts := range o.verdictsByMessage {
+		for i, count := range msgVerdicts {
+			verdicts[i] += count
+		}
 	}
+	return chunkStatsFromVerdicts(verdicts)
 }
 
 // ObserverSnapshot holds a point-in-time snapshot of all observer counters.
@@ -88,18 +100,46 @@ type ObserverSnapshot struct {
 func (o *Observer) Reset() ObserverSnapshot {
 	o.mu.Lock()
 	defer o.mu.Unlock()
+	var verdicts [5]int
+	for _, msgVerdicts := range o.verdictsByMessage {
+		for i, count := range msgVerdicts {
+			verdicts[i] += count
+		}
+	}
 	snap := ObserverSnapshot{
-		Chunks: ChunkStats{
-			Accepted:  o.verdicts[broadcast.VerdictAccepted],
-			Redundant: o.verdicts[broadcast.VerdictRedundant],
-			Decoding:  o.verdicts[broadcast.VerdictDecoding],
-			Surplus:   o.verdicts[broadcast.VerdictSurplus],
-		},
+		Chunks:     chunkStatsFromVerdicts(verdicts),
 		OriginSent: o.sent[broadcast.SessionRoleOrigin],
 		RelaySent:  o.sent[broadcast.SessionRoleRelay],
 	}
-	o.verdicts = [5]int{}
+	o.verdictsByMessage = make(map[broadcast.MessageID][5]int)
+	o.sentByMessage = make(map[broadcast.MessageID]map[broadcast.SessionRole]int)
 	o.sent[broadcast.SessionRoleOrigin] = 0
 	o.sent[broadcast.SessionRoleRelay] = 0
 	return snap
+}
+
+// ResetMessage snapshots and zeros counters for one message.
+func (o *Observer) ResetMessage(messageID broadcast.MessageID) ObserverSnapshot {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	byRole := o.sentByMessage[messageID]
+	snap := ObserverSnapshot{
+		Chunks:     chunkStatsFromVerdicts(o.verdictsByMessage[messageID]),
+		OriginSent: byRole[broadcast.SessionRoleOrigin],
+		RelaySent:  byRole[broadcast.SessionRoleRelay],
+	}
+	delete(o.verdictsByMessage, messageID)
+	delete(o.sentByMessage, messageID)
+	o.sent[broadcast.SessionRoleOrigin] -= snap.OriginSent
+	o.sent[broadcast.SessionRoleRelay] -= snap.RelaySent
+	return snap
+}
+
+func chunkStatsFromVerdicts(verdicts [5]int) ChunkStats {
+	return ChunkStats{
+		Accepted:  verdicts[broadcast.VerdictAccepted],
+		Redundant: verdicts[broadcast.VerdictRedundant],
+		Decoding:  verdicts[broadcast.VerdictDecoding],
+		Surplus:   verdicts[broadcast.VerdictSurplus],
+	}
 }
