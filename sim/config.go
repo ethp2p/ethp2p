@@ -48,6 +48,7 @@ type TopologyGenerate struct {
 type StrategyConfig struct {
 	Name string
 	RS   *RSStrategyConfig
+	RLNC *RLNCStrategyConfig
 }
 
 // strategyRaw is used for two-pass YAML decoding: first read the name,
@@ -69,6 +70,10 @@ func (sc *StrategyConfig) UnmarshalYAML(value *yaml.Node) error {
 			return fmt.Errorf("decode RS strategy config: %w", err)
 		}
 		sc.RS = &cfg
+	case "RLNC", "RLNC-ChunkLen":
+		if err := decodeRLNCStrategyConfig(sc, value); err != nil {
+			return err
+		}
 	case "gossipsub":
 		// no config
 	default:
@@ -240,6 +245,8 @@ func (rc *RunConfig) strategyFunc() (StrategyFunc, error) {
 	switch rc.Strategy.Name {
 	case "RS", "RS-ChunkLen":
 		return ECStrategy(rs.NewScheme(rc.Strategy.RS.broadcastConfig())), nil
+	case "RLNC", "RLNC-ChunkLen":
+		return rlncStrategyFunc(rc.Strategy.RLNC)
 	case "gossipsub":
 		return GossipsubStrategy(), nil
 	default:

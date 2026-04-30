@@ -36,12 +36,12 @@ See [`cli/configs/small_rs.yaml`](cli/configs/small_rs.yaml) for a minimal examp
 
 ```yaml
 simulation:
-  driver: shadow               # shadow or simnet
-  log_level: info              # debug, info, warn, error
+  driver: shadow # shadow or simnet
+  log_level: info # debug, info, warn, error
   bandwidth_log_frequency_ms: 100
 
 strategy:
-  name: RS                     # RS, RS-ChunkLen, RLNC, RLNC-ChunkLen, gossipsub
+  name: RS # RS, RS-ChunkLen, RLNC, RLNC-ChunkLen, gossipsub
   data_shards: 16
   parity_shards: 16
   enable_bitmaps: true
@@ -49,15 +49,15 @@ strategy:
 
 workload:
   num_messages: 10
-  message_size: 100000         # bytes
+  message_size: 100000 # bytes
   publish_wait_seconds: 10.0
   stop_time_minutes: 30.0
 
 topology:
-  generate:                    # Python generates topology before running Go
+  generate: # Python generates topology before running Go
     num_nodes: 100
     degree: 8
-    type: random               # random or ring
+    type: random # random or ring
     seed: 42
     super_node_fraction: 0.0
 ```
@@ -73,13 +73,16 @@ If Go encounters `topology.generate` without `topology.file`, it errors with a m
 
 Each strategy reads only its own fields; unknown fields are ignored.
 
-| Strategy | Fields |
-|----------|--------|
-| RS | `data_shards`, `parity_shards`, `enable_bitmaps`, `bitmap_threshold` |
-| RS-ChunkLen | `chunk_len`, `enable_bitmaps`, `bitmap_threshold` |
-| RLNC | `num_chunks`, `enable_bitmaps` |
+RLNC strategies require the private `../ethp2p-extras` overlay linked with
+`just link-rlnc` and Go commands run with `-tags rlnc`.
+
+| Strategy      | Fields                                                                                  |
+| ------------- | --------------------------------------------------------------------------------------- |
+| RS            | `data_shards`, `parity_shards`, `enable_bitmaps`, `bitmap_threshold`                    |
+| RS-ChunkLen   | `chunk_len`, `enable_bitmaps`, `bitmap_threshold`                                       |
+| RLNC          | `num_chunks`, `enable_bitmaps`                                                          |
 | RLNC-ChunkLen | `num_chunks_per_generation`, `target_chunk_size`, `origin_redundancy`, `enable_bitmaps` |
-| gossipsub | (none) |
+| gossipsub     | (none)                                                                                  |
 
 ### Experiment config
 
@@ -129,11 +132,13 @@ Topology generation is handled by Python (`sim/cli/simctl/topology.py`) using re
 **`data/country_latencies.json`** is a country-to-country latency matrix (measured round-trip times). After nodes are placed and connected into a graph, each edge's latency is looked up from this matrix based on the countries of the source and target nodes.
 
 Bandwidth is assigned by role:
+
 - Node 0 (block builder): 50 Mbps up / 100 Mbps down
 - Super nodes (controlled by `super_node_fraction`): 1024 / 1024 Mbps
 - Regular nodes: 50 / 50 Mbps
 
 The generation algorithm:
+
 1. Assigns countries and bandwidth to all nodes
 2. Builds a spanning tree for connectivity (every node reachable)
 3. Adds random edges until each node reaches the target degree
@@ -192,13 +197,13 @@ simctl remote experiment experiment.yaml --host=user@server --dry-run
 
 RS and RLNC nodes are created via `ECStrategy`, which wraps the broadcast engine's `Scheme` interface. Gossipsub is a standalone libp2p implementation used as a baseline.
 
-| Strategy | Description |
-|----------|-------------|
-| RS | Reed-Solomon erasure coding |
-| RS-ChunkLen | RS with fixed chunk size instead of fixed shard count |
-| RLNC | Random linear network coding |
-| RLNC-ChunkLen | RLNC with generations and target chunk size |
-| gossipsub | libp2p gossipsub baseline (no erasure coding) |
+| Strategy      | Description                                           |
+| ------------- | ----------------------------------------------------- |
+| RS            | Reed-Solomon erasure coding                           |
+| RS-ChunkLen   | RS with fixed chunk size instead of fixed shard count |
+| RLNC          | Random linear network coding                          |
+| RLNC-ChunkLen | RLNC with generations and target chunk size           |
+| gossipsub     | libp2p gossipsub baseline (no erasure coding)         |
 
 ## Running tests
 

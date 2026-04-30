@@ -7,6 +7,21 @@ build:
     buf generate
     go build ./...
 
+# Enable the optional private RLNC module in a local Go workspace
+link-rlnc extras="../ethp2p-extras":
+    test -f "{{extras}}/broadcast/rlnc/go.mod" || (echo "missing {{extras}}/broadcast/rlnc/go.mod" >&2; exit 1)
+    if [ ! -f go.work ]; then go work init .; fi
+    go work use . "{{extras}}/broadcast/rlnc"
+
+# Disable the optional private RLNC module in the local Go workspace
+unlink-rlnc:
+    if [ -f go.work ]; then go work edit -dropuse ../ethp2p-extras/broadcast/rlnc || true; fi
+
+# Run Go tests with optional RLNC support enabled
+test-rlnc:
+    test -f go.work || (echo "run 'just link-rlnc' first" >&2; exit 1)
+    go test -tags rlnc ./... github.com/ethp2p/ethp2p/broadcast/rlnc/...
+
 # Regenerate protobufs only
 proto:
     buf generate

@@ -18,16 +18,22 @@ class SimulationConfig(BaseModel):
 
 class StrategyConfig(BaseModel):
     """Strategy-specific configuration."""
-    name: Literal["RS", "RS-ChunkLen", "gossipsub"]
+    name: Literal["RS", "RS-ChunkLen", "RLNC", "RLNC-ChunkLen", "gossipsub"]
 
     # RS options
     data_shards: int = 16
     parity_shards: int = 16
 
-    # Chunk options (RS-ChunkLen)
+    # Chunk options (RS-ChunkLen, RLNC-ChunkLen)
     chunk_len: int | None = None
 
-    # Forward multiplier (RS relays)
+    # RLNC options
+    num_chunks: int = 16
+    num_chunks_per_generation: int = 0
+    target_chunk_size: int = 0
+    origin_redundancy: int = 0
+
+    # Forward multiplier (RS and RLNC relays)
     forward_multiplier: int = 4
 
     # Bitmap options
@@ -99,7 +105,10 @@ def get_strategy_dir_name(strat: StrategyConfig, num_nodes: int, msg_size: int) 
         parts.append(f"d{strat.data_shards}")
         parts.append(f"p{strat.parity_shards}")
 
-    if strat.name == "RS-ChunkLen" and strat.chunk_len is not None:
+    if strat.name in ("RLNC", "RLNC-ChunkLen"):
+        parts.append(f"nc{strat.num_chunks}")
+
+    if strat.name in ("RS-ChunkLen", "RLNC-ChunkLen") and strat.chunk_len is not None:
         parts.append(f"cl{strat.chunk_len}")
 
     if strat.name != "gossipsub":

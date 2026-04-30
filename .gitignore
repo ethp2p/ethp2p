@@ -32,3 +32,8 @@ sim/cmd/shadow/shadow
 
 .claude/
 .cachebro/
+
+# Local workspace for optional private overlays.
+/go.work
+/go.work.sum
+broadcast/rlnc/README.md
