@@ -6,7 +6,7 @@ import subprocess
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Sequence
 
 import yaml
 
@@ -56,31 +56,50 @@ def get_run_dir(config: Config, base_dir: Path, mode: str) -> Path:
     return base_dir / f"run-{mode}-{timestamp}-{suffix}-{safe_name}"
 
 
-def build_simnode(output_path: Path) -> None:
+def _build_tags_for_strategy(strat: StrategyConfig) -> tuple[str, ...]:
+    """Return Go build tags required by a strategy."""
+    if strat.name == "RLNC":
+        return ("rlnc",)
+    return ()
+
+
+def _add_go_build_tags(cmd: list[str], build_tags: Sequence[str]) -> None:
+    """Append Go build tags to a command if needed."""
+    if build_tags:
+        cmd.extend(["-tags", ",".join(build_tags)])
+
+
+def build_simnode(output_path: Path, build_tags: Sequence[str] = ()) -> None:
     """Build the shadow node Go binary."""
     sim_dir = Path(__file__).parent.parent.parent.resolve()
     simnode_src = sim_dir / "cmd" / "shadow"
     cmd = [
         "go",
         "build",
+    ]
+    _add_go_build_tags(cmd, build_tags)
+    cmd.extend([
         "-buildvcs=false",
         "-o",
         str(output_path.resolve()),
         str(simnode_src),
-    ]
+    ])
     subprocess.run(cmd, check=True)
 
 
-def build_simnet_test(output_path: Path) -> None:
+def build_simnet_test(output_path: Path, build_tags: Sequence[str] = ()) -> None:
     """Compile the simnet test binary."""
     cmd = [
         "go",
         "test",
+    ]
+    _add_go_build_tags(cmd, build_tags)
+    cmd.extend([
         "-c",
         "-o",
         str(output_path.resolve()),
         "./sim/cmd/simnet",
-    ]
+    ])
     subprocess.run(cmd, check=True, cwd=get_ethp2p_root())
 
 
@@ -214,7 +233,7 @@ def run_shadow_with_topology(
     )
 
     binary_path = run_dir / "simnode"
-    build_simnode(binary_path)
+    build_simnode(binary_path, build_tags=_build_tags_for_strategy(strat))
 
     shadow_config = generate_shadow_yaml(
         topology=topology,
@@ -263,7 +282,7 @@ def run_simnet_with_topology(
     )
 
     binary_path = run_dir / "simnetnode.test"
-    build_simnet_test(binary_path)
+    build_simnet_test(binary_path, build_tags=_build_tags_for_strategy(strat))
 
     timeout_minutes = int(config.workload.stop_time_minutes) + 5
 

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -31,6 +32,7 @@ class RunStats:
     name: str
     num_nodes: int = 0
     message_size: int = 0
+    publish_wait_seconds: float = 0.0
     expected: int = 0
 
     # msg_idx → per-message stats
@@ -47,13 +49,53 @@ _MSG_STATS_RE = re.compile(
     r'msg="message stats" node-num=(\d+) message-id=(\S+)\s+(.*)'
 )
 _KV_RE = re.compile(r"(\S+?)=(\d+)")
+_VERDICT_NAMES = {
+    0: "accepted",
+    1: "redundant",
+    2: "decoding",
+    3: "surplus",
+}
 
 
 def _msg_idx(message_id: str) -> int:
     return int(message_id.removeprefix("msg-"))
 
 
-def parse_shadow_run(run_dir: Path, name: str, message_size: int) -> RunStats:
+def _parse_trace_chunk_stats(node_dirs: list[Path]) -> dict[int, dict[int, dict[str, int]]]:
+    """Parse exact per-message chunk verdicts from per-node trace files."""
+    stats: dict[int, dict[int, dict[str, int]]] = {}
+
+    for node_dir in node_dirs:
+        events_file = node_dir / "events.ndjson"
+        if not events_file.exists():
+            continue
+
+        for line in events_file.read_text().splitlines():
+            if not line.startswith("["):
+                continue
+            try:
+                ev = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if len(ev) < 7 or ev[2] != "cr":
+                continue
+            verdict_name = _VERDICT_NAMES.get(ev[6])
+            if verdict_name is None:
+                continue
+            node_num = int(ev[1])
+            idx = _msg_idx(ev[5])
+            msg_node_stats = stats.setdefault(idx, {}).setdefault(node_num, {})
+            msg_node_stats[verdict_name] = msg_node_stats.get(verdict_name, 0) + 1
+
+    return stats
+
+
+def parse_shadow_run(
+    run_dir: Path,
+    name: str,
+    message_size: int,
+    publish_wait_seconds: float = 0.0,
+) -> RunStats:
     """Parse a Shadow run directory for bandwidth, latency, and chunk stats."""
     hosts_dir = run_dir / "shadow.data" / "hosts"
     if not hosts_dir.exists():
@@ -89,6 +131,11 @@ def parse_shadow_run(run_dir: Path, name: str, message_size: int) -> RunStats:
                 for kv in _KV_RE.finditer(m.group(3)):
                     kvs[kv.group(1)] = int(kv.group(2))
                 msg_stats.setdefault(idx, {})[nn] = kvs
+
+    trace_chunk_stats = _parse_trace_chunk_stats(node_dirs)
+    for idx, by_node in trace_chunk_stats.items():
+        for nn, chunk_stats in by_node.items():
+            msg_stats.setdefault(idx, {}).setdefault(nn, {}).update(chunk_stats)
 
     num_nodes = len(node_dirs)
     expected = num_nodes - 1
@@ -139,6 +186,7 @@ def parse_shadow_run(run_dir: Path, name: str, message_size: int) -> RunStats:
         name=name,
         num_nodes=num_nodes,
         message_size=message_size,
+        publish_wait_seconds=publish_wait_seconds,
         expected=expected,
         messages=messages,
     )
@@ -169,7 +217,8 @@ def parse_run(run_dir: Path) -> list[RunStats]:
                 cfg = yaml.safe_load(f)
             strat_name = cfg.get("strategy", {}).get("name", "unknown")
             msg_size = cfg.get("workload", {}).get("message_size", 0)
-            results.append(parse_shadow_run(strat_dir, strat_name, msg_size))
+            publish_wait = cfg.get("workload", {}).get("publish_wait_seconds", 0.0)
+            results.append(parse_shadow_run(strat_dir, strat_name, msg_size, publish_wait))
         return results
 
     runs_dir = run_dir / "runs"
@@ -185,7 +234,8 @@ def parse_run(run_dir: Path) -> list[RunStats]:
                 cfg = yaml.safe_load(f)
             strat_name = cfg.get("strategy", {}).get("name", "unknown")
             msg_size = cfg.get("workload", {}).get("message_size", 0)
-            results.append(parse_shadow_run(rd, strat_name, msg_size))
+            publish_wait = cfg.get("workload", {}).get("publish_wait_seconds", 0.0)
+            results.append(parse_shadow_run(rd, strat_name, msg_size, publish_wait))
         return results
 
     if (run_dir / "shadow.data").exists():
@@ -196,7 +246,8 @@ def parse_run(run_dir: Path) -> list[RunStats]:
             cfg = yaml.safe_load(f)
         strat_name = cfg.get("strategy", {}).get("name", "unknown")
         msg_size = cfg.get("workload", {}).get("message_size", 0)
-        return [parse_shadow_run(run_dir, strat_name, msg_size)]
+        publish_wait = cfg.get("workload", {}).get("publish_wait_seconds", 0.0)
+        return [parse_shadow_run(run_dir, strat_name, msg_size, publish_wait)]
 
     raise FileNotFoundError(f"Cannot find strategies/, runs/, or shadow.data in {run_dir}")
 
@@ -226,6 +277,15 @@ def _int_str(v: float) -> str:
     return str(int(v))
 
 
+def _chunk_cell(r: RunStats, m: MessageStats, verdict: str, pct: float) -> str:
+    if r.name == "gossipsub":
+        return "-"
+    vals = m.relay_verdicts.get(verdict, [])
+    if not vals:
+        return "n/a"
+    return _int_str(_pct(vals, pct))
+
+
 def _empty_msg() -> MessageStats:
     return MessageStats()
 
@@ -252,6 +312,29 @@ def _sanity_checks(results: list[RunStats], msg_size: int) -> list[tuple[bool, s
             )))
 
     return checks
+
+
+def _warnings(results: list[RunStats]) -> list[str]:
+    warnings: list[str] = []
+    stats_delay_ms = 10_000
+    for r in results:
+        if len(r.messages) <= 1 or r.publish_wait_seconds <= 0:
+            continue
+        publish_wait_ms = r.publish_wait_seconds * 1000
+        non_last = sorted(r.messages)[:-1]
+        if not non_last:
+            continue
+        latest_snapshot_ms = max(
+            _pct(r.messages[idx].latencies_ms, 0.99) + stats_delay_ms
+            for idx in non_last
+        )
+        if latest_snapshot_ms > publish_wait_ms:
+            warnings.append(
+                f"{r.name}: per-message bandwidth windows overlap "
+                f"(publish wait {_ms(publish_wait_ms)}, p99 latency + stats delay "
+                f"{_ms(latest_snapshot_ms)}). Later bandwidth columns may be undercounted."
+            )
+    return warnings
 
 
 def _msg_indices(results: list[RunStats]) -> list[int]:
@@ -369,9 +452,8 @@ def print_table(results: list[RunStats]) -> None:
     for vname in all_verdict_names:
         print(sep())
         for i, pl in enumerate(pct_labels):
-            vvals = [ms(r, idx).relay_verdicts.get(vname, []) for r, idx in cols]
             print(row(f"chunks {vname} {pl}", [
-                _int_str(_pct(v, pcts[i])) if v else "n/a" for v in vvals
+                _chunk_cell(r, ms(r, idx), vname, pcts[i]) for r, idx in cols
             ]))
 
     checks = _sanity_checks(results, msg_size)
@@ -382,5 +464,13 @@ def print_table(results: list[RunStats]) -> None:
         for passed, label in checks:
             mark = "v" if passed else "x"
             print(f"  [{mark}]  {label}")
+
+    warnings = _warnings(results)
+    if warnings:
+        print(f"\n{'─' * 80}")
+        print("  Warnings")
+        print(f"{'─' * 80}")
+        for warning in warnings:
+            print(f"  [!]  {warning}")
 
     print()

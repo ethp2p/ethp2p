@@ -9,6 +9,7 @@ import (
 	"os"
 	"time"
 
+	"github.com/ethp2p/ethp2p/broadcast"
 	"github.com/ethp2p/ethp2p/sim"
 )
 
@@ -126,7 +127,7 @@ func logMessageStats(scenario *sim.Scenario, drv *sim.ShadowDriver, node sim.Nod
 	}
 	if drv != nil {
 		if obs := drv.Observer(); obs != nil {
-			snap := obs.Reset()
+			snap := obs.ResetMessage(broadcast.MessageID(messageID))
 			args = append(args,
 				"accepted", snap.Chunks.Accepted,
 				"redundant", snap.Chunks.Redundant,

@@ -1,5 +1,5 @@
 name: bench-500
-description: "500-node, 2 MiB benchmark, rs"
+description: "500-node, 2 MiB benchmark comparing gossipsub, RS, RLNC"
 
 simulation:
   driver: shadow
@@ -15,12 +15,15 @@ topology:
     super_node_fraction: 0.05
 
 workload:
-  num_messages: 2
+  num_messages: 1
   message_size: 2097152
-  publish_wait_seconds: 30.0
+  publish_wait_seconds: 10.0
   stop_time_minutes: 10.0
+  warmup: auto
 
 strategies:
+  - name: gossipsub
+
   - name: RS
     chunk_len: 16384
     enable_bitmaps: true

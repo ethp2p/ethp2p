@@ -11,7 +11,6 @@ import (
 // NodeEvent represents a publish or receive event from a node.
 type NodeEvent struct {
 	MessageID string
-	Data      []byte
 	NodeNum   int
 	At        time.Time
 }
@@ -28,10 +27,10 @@ type BandwidthEvent struct {
 
 // ScenarioStats holds collected publish/receive data from a simulation run.
 type ScenarioStats struct {
-	PublishedMessages map[broadcast.MessageID][]byte
+	PublishedMessages map[broadcast.MessageID]struct{}
 	PublishedAt       map[broadcast.MessageID]time.Time
 
-	ReceivedMessages map[int]map[broadcast.MessageID][]byte        // nodeNum → messageID → data
+	ReceivedMessages map[int]map[broadcast.MessageID]struct{}      // nodeNum → messageID
 	ReceivedAt       map[int]map[broadcast.MessageID]time.Time     // nodeNum → messageID → time
 	ReceivedLatency  map[int]map[broadcast.MessageID]time.Duration // nodeNum → messageID → latency from PublishedAt
 
@@ -81,9 +80,9 @@ type StatsCollector struct {
 
 func (c *StatsCollector) Run(ctx context.Context) ScenarioStats {
 	stats := ScenarioStats{
-		PublishedMessages: make(map[broadcast.MessageID][]byte),
+		PublishedMessages: make(map[broadcast.MessageID]struct{}),
 		PublishedAt:       make(map[broadcast.MessageID]time.Time),
-		ReceivedMessages:  make(map[int]map[broadcast.MessageID][]byte),
+		ReceivedMessages:  make(map[int]map[broadcast.MessageID]struct{}),
 		ReceivedAt:        make(map[int]map[broadcast.MessageID]time.Time),
 		ReceivedLatency:   make(map[int]map[broadcast.MessageID]time.Duration),
 	}
@@ -92,16 +91,16 @@ func (c *StatsCollector) Run(ctx context.Context) ScenarioStats {
 		case <-ctx.Done():
 			return stats
 		case ev := <-c.published:
-			stats.PublishedMessages[broadcast.MessageID(ev.MessageID)] = ev.Data
+			stats.PublishedMessages[broadcast.MessageID(ev.MessageID)] = struct{}{}
 			stats.PublishedAt[broadcast.MessageID(ev.MessageID)] = ev.At
 		case ev := <-c.received:
 			mid := broadcast.MessageID(ev.MessageID)
 			if _, ok := stats.ReceivedMessages[ev.NodeNum]; !ok {
-				stats.ReceivedMessages[ev.NodeNum] = make(map[broadcast.MessageID][]byte)
+				stats.ReceivedMessages[ev.NodeNum] = make(map[broadcast.MessageID]struct{})
 				stats.ReceivedAt[ev.NodeNum] = make(map[broadcast.MessageID]time.Time)
 				stats.ReceivedLatency[ev.NodeNum] = make(map[broadcast.MessageID]time.Duration)
 			}
-			stats.ReceivedMessages[ev.NodeNum][mid] = ev.Data
+			stats.ReceivedMessages[ev.NodeNum][mid] = struct{}{}
 			stats.ReceivedAt[ev.NodeNum][mid] = ev.At
 			if pubTime, ok := stats.PublishedAt[mid]; ok {
 				stats.ReceivedLatency[ev.NodeNum][mid] = ev.At.Sub(pubTime)

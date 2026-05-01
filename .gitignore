@@ -24,6 +24,7 @@ experiments/
 runs/
 
 sim/simcfg/simnode/simnode
+sim/cmd/shadow/shadow
 
 .notes.md
 .work/
@@ -31,3 +32,8 @@ sim/simcfg/simnode/simnode
 
 .claude/
 .cachebro/
+
+# Local workspace for optional private overlays.
+/go.work
+/go.work.sum
+broadcast/rlnc/README.md

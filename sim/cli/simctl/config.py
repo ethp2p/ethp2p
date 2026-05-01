@@ -5,7 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Literal
 
-from pydantic import BaseModel
+from pydantic import BaseModel, model_validator
 
 
 class SimulationConfig(BaseModel):
@@ -18,16 +18,22 @@ class SimulationConfig(BaseModel):
 
 class StrategyConfig(BaseModel):
     """Strategy-specific configuration."""
-    name: Literal["RS", "RS-ChunkLen", "gossipsub"]
+    name: Literal["RS", "RLNC", "gossipsub"]
 
     # RS options
     data_shards: int = 16
     parity_shards: int = 16
 
-    # Chunk options (RS-ChunkLen)
+    # RS fixed-size chunk option.
     chunk_len: int | None = None
 
-    # Forward multiplier (RS relays)
+    # RLNC options
+    num_chunks: int = 16
+    num_chunks_per_generation: int = 0
+    target_chunk_size: int = 0
+    origin_redundancy: int = 0
+
+    # Forward multiplier (RS and RLNC relays)
     forward_multiplier: int = 4
 
     # Bitmap options
@@ -37,6 +43,20 @@ class StrategyConfig(BaseModel):
     # Per-strategy override for publish wait (optional, used in experiments)
     publish_wait_seconds: float | None = None
 
+    @model_validator(mode="after")
+    def validate_strategy_fields(self) -> "StrategyConfig":
+        if self.name == "RLNC" and "chunk_len" in self.model_fields_set:
+            raise ValueError("RLNC uses target_chunk_size, not chunk_len")
+        if (
+            self.name == "RLNC"
+            and self.target_chunk_size > 0
+            and self.num_chunks_per_generation <= 0
+        ):
+            raise ValueError(
+                "RLNC target_chunk_size requires num_chunks_per_generation > 0"
+            )
+        return self
+
 
 class WorkloadConfig(BaseModel):
     """What to publish: message count, size, pacing, duration."""
@@ -44,6 +64,7 @@ class WorkloadConfig(BaseModel):
     message_size: int = 100_000
     publish_wait_seconds: float = 10.0
     stop_time_minutes: float = 30.0
+    warmup: Literal["auto", "off"] = "auto"
 
 
 class TopologyGenerate(BaseModel):
@@ -94,14 +115,22 @@ def get_strategy_dir_name(strat: StrategyConfig, num_nodes: int, msg_size: int) 
     """Generate a compact directory name for a strategy run."""
     parts = [strat.name]
 
-    if strat.name in ("RS", "RS-ChunkLen"):
+    if strat.name == "RS":
         parts.append(f"d{strat.data_shards}")
         parts.append(f"p{strat.parity_shards}")
+        if strat.chunk_len is not None:
+            parts.append(f"cl{strat.chunk_len}")
 
-    if strat.name == "RS-ChunkLen" and strat.chunk_len is not None:
-        parts.append(f"cl{strat.chunk_len}")
+    if strat.name == "RLNC":
+        parts.append(f"nc{strat.num_chunks}")
+        if strat.target_chunk_size:
+            parts.append(f"tcs{strat.target_chunk_size}")
+        if strat.num_chunks_per_generation:
+            parts.append(f"ncpg{strat.num_chunks_per_generation}")
+        if strat.origin_redundancy:
+            parts.append(f"or{strat.origin_redundancy}")
 
-    if strat.name != "gossipsub":
+    if strat.name == "RS":
         parts.append(f"bm{int(strat.enable_bitmaps)}")
         parts.append(f"t{strat.bitmap_threshold}")
 
@@ -117,5 +146,31 @@ def resolve_for_go(config: Config, strat: StrategyConfig) -> dict:
     d.pop("strategies", None)
     d.pop("name", None)
     d.pop("description", None)
-    d["strategy"] = strat.model_dump(exclude_none=True)
+    d["strategy"] = strategy_for_go(strat)
     return d
+
+
+def strategy_for_go(strat: StrategyConfig) -> dict:
+    """Return only the fields consumed by the selected Go strategy."""
+    out: dict[str, object] = {"name": strat.name}
+
+    if strat.name == "RS":
+        out.update(
+            data_shards=strat.data_shards,
+            parity_shards=strat.parity_shards,
+            forward_multiplier=strat.forward_multiplier,
+            enable_bitmaps=strat.enable_bitmaps,
+            bitmap_threshold=strat.bitmap_threshold,
+        )
+        if strat.chunk_len is not None:
+            out["chunk_len"] = strat.chunk_len
+    elif strat.name == "RLNC":
+        out.update(
+            num_chunks=strat.num_chunks,
+            num_chunks_per_generation=strat.num_chunks_per_generation,
+            target_chunk_size=strat.target_chunk_size,
+            origin_redundancy=strat.origin_redundancy,
+            forward_multiplier=strat.forward_multiplier,
+        )
+
+    return out

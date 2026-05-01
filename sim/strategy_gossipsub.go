@@ -6,11 +6,9 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
-	"io"
 	"log/slog"
 	mrand "math/rand/v2"
 	"net"
-	"sync"
 	"sync/atomic"
 	"time"
 
@@ -31,10 +29,10 @@ import (
 	"go.uber.org/fx"
 )
 
-const warmupBytesLen = 1 << 10
-const gossipsubChannelID = "broadcast-test"
-
-var warmupBytes = make([]byte, warmupBytesLen)
+const (
+	gossipsubChannelID         = "broadcast-test"
+	gossipsubHeartbeatInterval = 700 * time.Millisecond
+)
 
 func getNodePrivateKey(nodeNum int) (crypto.PrivKey, error) {
 	var seed [32]byte
@@ -45,28 +43,6 @@ func getNodePrivateKey(nodeNum int) (crypto.PrivKey, error) {
 		return nil, err
 	}
 	return privkey, err
-}
-
-func handshakeStream(s io.ReadWriteCloser, bytes []byte, nodeNum int) (int, error) {
-	var p int64
-	err := binary.Write(s, binary.BigEndian, int64(nodeNum))
-	if err != nil {
-		return 0, err
-	}
-	err = binary.Read(s, binary.BigEndian, &p)
-	if err != nil {
-		return 0, err
-	}
-	var wg sync.WaitGroup
-	wg.Go(func() {
-		io.CopyN(io.Discard, s, int64(len(bytes)))
-	})
-	_, err = s.Write(bytes)
-	wg.Wait()
-	if err != nil {
-		return 0, err
-	}
-	return int(p), nil
 }
 
 func multiaddrFromNetAddr(a net.Addr) ma.Multiaddr {
@@ -111,6 +87,7 @@ type GossipsubNode struct {
 	trace    *gossipsubTrace
 	baseSent int
 	baseRecv int
+	warmup   warmupTracker
 }
 
 var _ Node = (*GossipsubNode)(nil)
@@ -337,11 +314,6 @@ func NewGossipsubNode(conn net.PacketConn, nodeNum int, logger *slog.Logger, tw 
 }
 
 func newGossipsubNode(nodeNum int, h host.Host, logger *slog.Logger, trace *gossipsubTrace) (*GossipsubNode, error) {
-	h.SetStreamHandler("/warmup", func(s network.Stream) {
-		handshakeStream(s, warmupBytes, 1)
-		s.Close()
-	})
-
 	ctx, cancel := context.WithCancel(context.Background())
 	ps, err := newPubSub(ctx, h, trace)
 	if err != nil {
@@ -361,7 +333,7 @@ func newGossipsubNode(nodeNum int, h host.Host, logger *slog.Logger, trace *goss
 		return nil, fmt.Errorf("failed to subscribe: %w", err)
 	}
 
-	return &GossipsubNode{
+	g := &GossipsubNode{
 		num:     nodeNum,
 		ctx:     ctx,
 		cancel:  cancel,
@@ -371,7 +343,15 @@ func newGossipsubNode(nodeNum int, h host.Host, logger *slog.Logger, trace *goss
 		sub:     sub,
 		logger:  logger,
 		trace:   trace,
-	}, nil
+	}
+	h.SetStreamHandler("/warmup", func(s network.Stream) {
+		peer, err := runWarmupResponder(s)
+		if err == nil {
+			g.warmup.mark(peer)
+		}
+		s.Close()
+	})
+	return g, nil
 }
 
 func newPubSub(ctx context.Context, h host.Host, trace *gossipsubTrace) (*pubsub.PubSub, error) {
@@ -381,7 +361,7 @@ func newPubSub(ctx context.Context, h host.Host, trace *gossipsubTrace) (*pubsub
 	params.Dlo = 6
 	params.Dhi = 12
 	params.Dlazy = 6
-	params.HeartbeatInterval = 700 * time.Millisecond
+	params.HeartbeatInterval = gossipsubHeartbeatInterval
 	params.FanoutTTL = 60 * time.Second
 	params.HistoryLength = 6
 	params.HistoryGossip = 3
@@ -448,13 +428,73 @@ func (g *GossipsubNode) DialPeer(ctx context.Context, nodeNum int, addr net.Addr
 	if err := g.host.Connect(ctx, peer.AddrInfo{ID: peerID, Addrs: []ma.Multiaddr{maddr}}); err != nil {
 		return fmt.Errorf("failed to connect to peer: %w", err)
 	}
+	return nil
+}
+
+func (g *GossipsubNode) AwaitReady(ctx context.Context, peers []int) error {
+	expected := make(map[peer.ID]struct{})
+	for _, nodeNum := range peers {
+		if nodeNum == g.num {
+			continue
+		}
+		peerID, err := gossipsubPeerID(nodeNum)
+		if err != nil {
+			return fmt.Errorf("failed to get peer ID: %w", err)
+		}
+		expected[peerID] = struct{}{}
+	}
+	if len(expected) == 0 {
+		return nil
+	}
+
+	ticker := time.NewTicker(100 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		if g.hasTopicPeers(expected) {
+			return waitContext(ctx, 2*gossipsubHeartbeatInterval)
+		}
+		select {
+		case <-ticker.C:
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-g.ctx.Done():
+			return g.ctx.Err()
+		}
+	}
+}
+
+func (g *GossipsubNode) hasTopicPeers(expected map[peer.ID]struct{}) bool {
+	seen := make(map[peer.ID]struct{})
+	for _, p := range g.channel.ListPeers() {
+		seen[p] = struct{}{}
+	}
+	for p := range expected {
+		if _, ok := seen[p]; !ok {
+			return false
+		}
+	}
+	return true
+}
+
+func (g *GossipsubNode) WarmupPeer(ctx context.Context, nodeNum int, byteCount int) error {
+	peerID, err := gossipsubPeerID(nodeNum)
+	if err != nil {
+		return fmt.Errorf("failed to get peer ID: %w", err)
+	}
 	s, err := g.host.NewStream(ctx, peerID, "/warmup")
 	if err != nil {
 		return fmt.Errorf("failed to create warmup stream: %w", err)
 	}
-	handshakeStream(s, warmupBytes, 1)
+	if err := runWarmupInitiator(s, g.num, byteCount); err != nil {
+		s.Close()
+		return fmt.Errorf("failed to warm up stream: %w", err)
+	}
 	s.Close()
 	return nil
+}
+
+func (g *GossipsubNode) AwaitWarmup(ctx context.Context, peers []int) error {
+	return g.warmup.awaitIncoming(ctx, g.num, peers)
 }
 
 func (g *GossipsubNode) rawBandwidth() (sent, received int) {
@@ -470,7 +510,8 @@ func (g *GossipsubNode) rawBandwidth() (sent, received int) {
 }
 
 func (g *GossipsubNode) BandwidthStats() (bytesSent, bytesReceived int) {
-	return g.rawBandwidth()
+	sent, recv := g.rawBandwidth()
+	return sent - g.baseSent, recv - g.baseRecv
 }
 
 func (g *GossipsubNode) ResetBandwidthStats() (bytesSent, bytesReceived int) {

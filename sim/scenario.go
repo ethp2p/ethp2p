@@ -16,6 +16,8 @@ type Scenario struct {
 	MessageSize           int
 	Driver                Driver
 	BandwidthLogFrequency time.Duration
+	WarmupBytes           map[int]map[int]int
+	WarmupDrain           time.Duration
 	Logger                *slog.Logger
 
 	mu             sync.RWMutex
@@ -92,12 +94,47 @@ func (s *Scenario) RunNode(ctx context.Context, node Node, peers []int, publishW
 		})
 	}
 	wg.Wait()
+	readyCtx, cancelReady := context.WithTimeout(ctx, 30*time.Second)
+	defer cancelReady()
+	if err := node.AwaitReady(readyCtx, peers); err != nil {
+		panic(fmt.Sprintf("node %d failed to become ready: %s", nodeNum, err.Error()))
+	}
+	if s.WarmupBytes != nil {
+		s.warmupPeers(readyCtx, node, peers)
+		if err := node.AwaitWarmup(readyCtx, peers); err != nil {
+			panic(fmt.Sprintf("node %d failed to complete warmup: %s", nodeNum, err.Error()))
+		}
+		if nodeNum == 0 && s.WarmupDrain > 0 {
+			if err := waitContext(ctx, s.WarmupDrain); err != nil {
+				return
+			}
+		}
+	}
+	node.ResetBandwidthStats()
 	if nodeNum == 0 {
-		time.Sleep(2 * time.Minute)
 		s.publishMessages(nodeCtx, nodeNum, node, publishWait)
 	} else {
 		s.receiveMessages(nodeCtx, nodeNum, node)
 	}
+}
+
+func (s *Scenario) warmupPeers(ctx context.Context, node Node, peers []int) {
+	nodeNum := node.NodeNum()
+	ch := make(chan struct{}, 20)
+	var wg sync.WaitGroup
+	for _, p := range peers {
+		if nodeNum > p {
+			continue
+		}
+		ch <- struct{}{}
+		wg.Go(func() {
+			defer func() { <-ch }()
+			if err := node.WarmupPeer(ctx, p, s.WarmupBytes[nodeNum][p]); err != nil {
+				panic(fmt.Sprintf("failed to warm peer: %d: %s", p, err.Error()))
+			}
+		})
+	}
+	wg.Wait()
 }
 
 func (s *Scenario) publishMessages(ctx context.Context, nodeNum int, node Node, publishWait time.Duration) {
@@ -113,7 +150,7 @@ func (s *Scenario) publishMessages(ctx context.Context, nodeNum int, node Node, 
 
 		now := time.Now()
 		nextPublishAt := time.Now().Add(publishWait)
-		ev := NodeEvent{MessageID: messageID, Data: data, NodeNum: nodeNum, At: now}
+		ev := NodeEvent{MessageID: messageID, NodeNum: nodeNum, At: now}
 		s.mu.RLock()
 		chans := s.publishChans
 		s.mu.RUnlock()
@@ -139,7 +176,7 @@ func (s *Scenario) publishMessages(ctx context.Context, nodeNum int, node Node, 
 
 func (s *Scenario) receiveMessages(ctx context.Context, nodeNum int, node Node) {
 	for range s.NumMessages {
-		messageID, data, err := node.Receive(ctx)
+		messageID, _, err := node.Receive(ctx)
 		if err != nil {
 			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 				return
@@ -147,7 +184,7 @@ func (s *Scenario) receiveMessages(ctx context.Context, nodeNum int, node Node) 
 			panic(err)
 		}
 		now := time.Now()
-		ev := NodeEvent{MessageID: messageID, Data: data, NodeNum: nodeNum, At: now}
+		ev := NodeEvent{MessageID: messageID, NodeNum: nodeNum, At: now}
 		s.mu.RLock()
 		chans := s.receiveChans
 		s.mu.RUnlock()
