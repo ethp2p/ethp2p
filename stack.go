@@ -5,7 +5,7 @@ package ethp2p
 
 import (
 	"errors"
-	"sync"
+	"sync/atomic"
 
 	"github.com/ethp2p/ethp2p/broadcast"
 	"github.com/ethp2p/ethp2p/transport"
@@ -27,39 +27,28 @@ type Stack struct {
 	// BroadcastConfig configures the broadcast engine.
 	BroadcastConfig broadcast.EngineConfig
 
-	initialized bool
-
-	engineMu sync.Mutex
-	engine   *broadcast.Engine
+	initialized atomic.Bool
+	engine      *broadcast.Engine
 }
 
-// Init validates the configuration.
+// Init validates the configuration and constructs the broadcast engine. It is
+// an error to call Init on an already-initialized stack.
 func (s *Stack) Init() error {
+	if !s.initialized.CompareAndSwap(false, true) {
+		return errors.New("stack already initialized")
+	}
 	if s.PeerID == "" {
 		return errors.New("peer ID is required")
 	}
 	if s.Key == nil {
 		return errors.New("key is required")
 	}
-	s.initialized = true
+	s.engine = broadcast.NewEngine(s.BroadcastConfig)
 	return nil
 }
 
 // ID returns the authenticated peer ID of this node. Valid after Init.
 func (s *Stack) ID() string { return string(s.PeerID) }
 
-// BroadcastEngine returns the stack's singleton broadcast engine, creating it
-// on first use from BroadcastConfig. Later calls return the same engine.
-// Inbound connections derive peer identity from transport authentication, so
-// the stack key is only consumed when ethp2p initiates a connection.
-func (s *Stack) BroadcastEngine() (*broadcast.Engine, error) {
-	if !s.initialized {
-		return nil, errors.New("stack not initialized: call Init")
-	}
-	s.engineMu.Lock()
-	defer s.engineMu.Unlock()
-	if s.engine == nil {
-		s.engine = broadcast.NewEngine(s.BroadcastConfig)
-	}
-	return s.engine, nil
-}
+// BroadcastEngine returns the stack's broadcast engine, constructed by Init.
+func (s *Stack) BroadcastEngine() *broadcast.Engine { return s.engine }
