@@ -28,7 +28,7 @@ func newEmitPlanner() *emitPlanner {
 	}
 }
 
-func (h *emitPlanner) Len() int           { return len(h.entries) }
+func (h *emitPlanner) Len() int { return len(h.entries) }
 func (h *emitPlanner) Less(i, j int) bool {
 	a, b := h.entries[i], h.entries[j]
 	if a.Times != b.Times {

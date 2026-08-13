@@ -11,8 +11,6 @@ const defaultMaxInboundChunkStreams = 5
 
 // EngineConfig holds configuration for an Engine.
 type EngineConfig struct {
-	// TODO: this will be ambient data provided to the broadcast engine once we develop the wire handshake.
-	PeerID   PeerID
 	Observer Observer
 
 	// MaxInboundChunkStreams bounds the number of concurrent inbound
@@ -77,10 +75,9 @@ func NewEngine(config EngineConfig) *Engine {
 // The conn is sent through the event loop, which spawns the peer's handshake
 // and run goroutines.
 //
-// TODO at the moment, ownership of the transport Conn is passed to the Engine,
-// who may decide to terminate the connection. In the future, the connection
-// will be shared with other protocols, so we'll pass in some form of a scoped
-// connection.
+// Ownership of this protocol-scoped connection is passed to the Engine. When
+// compat shares the underlying QUIC connection with libp2p, closing this value
+// closes only the borrowed ethp2p view.
 func (e *Engine) NotifyPeerConnected(conn transport.Conn) {
 	select {
 	case e.eventCh <- engineEvent{kind: evPeerConnected, conn: conn}:

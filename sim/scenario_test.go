@@ -3,6 +3,8 @@ package sim
 import (
 	"context"
 	"fmt"
+	"log/slog"
+	"net"
 	"testing"
 	"testing/synctest"
 	"time"
@@ -10,6 +12,29 @@ import (
 	"github.com/ethp2p/ethp2p/broadcast/rs"
 	"github.com/stretchr/testify/require"
 )
+
+type addressOnlyDriver struct {
+	addrs map[int]net.Addr
+}
+
+func (*addressOnlyDriver) NewNode(int, *slog.Logger) (Node, error) { return nil, nil }
+func (d *addressOnlyDriver) NodeAddr(nodeNum int) net.Addr         { return d.addrs[nodeNum] }
+func (*addressOnlyDriver) Start()                                  {}
+func (*addressOnlyDriver) Close() error                            { return nil }
+
+func TestScenarioPeerAddressesIncludeInboundTopologyNeighbors(t *testing.T) {
+	node0 := &net.UDPAddr{IP: net.IPv4(10, 0, 0, 1), Port: DefaultListenPort}
+	node1 := &net.UDPAddr{IP: net.IPv4(10, 0, 0, 2), Port: DefaultListenPort}
+	scenario := &Scenario{
+		Driver: &addressOnlyDriver{addrs: map[int]net.Addr{0: node0, 1: node1}},
+		topology: Topology{Edges: []EdgeSpec{
+			{Source: 0, Target: 1},
+		}},
+	}
+
+	peers := scenario.peerAddresses(1, nil)
+	require.Equal(t, map[int]net.Addr{0: node0}, peers)
+}
 
 func TestNetwork(t *testing.T) {
 	tests := []Topology{

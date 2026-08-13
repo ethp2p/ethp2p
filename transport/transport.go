@@ -15,6 +15,19 @@ type deadliner interface {
 
 var ErrDatagramsUnsupported = errors.New("datagrams not supported yet")
 
+// PeerID is an authenticated peer identifier. It uses the canonical libp2p
+// string encoding, so it converts to and from libp2p's peer.ID freely.
+type PeerID string
+
+// AuthInfo contains the authenticated identities at both ends of a connection.
+type AuthInfo struct {
+	Local  PeerID
+	Remote PeerID
+}
+
+// Clone returns an independent copy of the authentication data.
+func (a AuthInfo) Clone() AuthInfo { return a }
+
 // ConnDirection indicates whether a connection was initiated by us or by them.
 //
 // TODO Deal with simultaneous open.
@@ -55,6 +68,11 @@ type Conn interface {
 	ConnectionStats() (bytesSent, bytesReceived uint64)
 
 	Direction() ConnDirection
+
+	// AuthInfo returns the authenticated identities at both ends of the
+	// connection. Every transport authenticates with TLS 1.3, so every
+	// connection carries it.
+	AuthInfo() AuthInfo
 }
 
 // SendStream is a unidirectional write-only stream.

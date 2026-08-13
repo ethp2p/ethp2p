@@ -62,11 +62,11 @@ func (q *QUICHost) Close() error {
 }
 
 var defaultQuicConfig = quic.Config{
-	MaxIdleTimeout:            365 * 24 * time.Hour, // quic-go rejects math.MaxInt64; 1-year effectively disables
-	MaxIncomingStreams:         16384,                // per-chunk streams at scale need headroom
-	MaxIncomingUniStreams:      16384,
-	DisablePathMTUDiscovery:   true, // Required for Shadow simulator (disables DF bit)
-	Tracer:                    qlog.DefaultConnectionTracer,
+	MaxIdleTimeout:          365 * 24 * time.Hour, // quic-go rejects math.MaxInt64; 1-year effectively disables
+	MaxIncomingStreams:      16384,                // per-chunk streams at scale need headroom
+	MaxIncomingUniStreams:   16384,
+	DisablePathMTUDiscovery: true, // Required for Shadow simulator (disables DF bit)
+	Tracer:                  qlog.DefaultConnectionTracer,
 }
 
 func makeQUICTransportAndListener(conn net.PacketConn) (*quic.Transport, *quic.Listener, error) {

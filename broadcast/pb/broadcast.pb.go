@@ -248,7 +248,7 @@ type Bcast_Handshake struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Version       uint32                 `protobuf:"varint,1,opt,name=version,proto3" json:"version,omitempty"`
 	Channels      []string               `protobuf:"bytes,2,rep,name=channels,proto3" json:"channels,omitempty"`
-	PeerId        string                 `protobuf:"bytes,3,opt,name=peer_id,json=peerId,proto3" json:"peer_id,omitempty"`
+	PeerId        []byte                 `protobuf:"bytes,3,opt,name=peer_id,json=peerId,proto3" json:"peer_id,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -297,11 +297,11 @@ func (x *Bcast_Handshake) GetChannels() []string {
 	return nil
 }
 
-func (x *Bcast_Handshake) GetPeerId() string {
+func (x *Bcast_Handshake) GetPeerId() []byte {
 	if x != nil {
 		return x.PeerId
 	}
-	return ""
+	return nil
 }
 
 // Subscribe requests the remote peer to include us in a channel.
@@ -590,7 +590,7 @@ const file_broadcast_pb_broadcast_proto_rawDesc = "" +
 	"\tHandshake\x12\x18\n" +
 	"\aversion\x18\x01 \x01(\rR\aversion\x12\x1a\n" +
 	"\bchannels\x18\x02 \x03(\tR\bchannels\x12\x17\n" +
-	"\apeer_id\x18\x03 \x01(\tR\x06peerId\x1a%\n" +
+	"\apeer_id\x18\x03 \x01(\fR\x06peerId\x1a%\n" +
 	"\tSubscribe\x12\x18\n" +
 	"\achannel\x18\x01 \x01(\tR\achannel\x1a'\n" +
 	"\vUnsubscribe\x12\x18\n" +

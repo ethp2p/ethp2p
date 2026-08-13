@@ -102,7 +102,7 @@ func newQUICHost(t *testing.T) *quicHost {
 	return h
 }
 
-func (h *quicHost) dial(ctx context.Context, addr net.Addr) (transport.Conn, error) {
+func (h *quicHost) dial(ctx context.Context, addr net.Addr) (*quic.Conn, error) {
 	tlsConf := &tls.Config{
 		InsecureSkipVerify: true,
 		NextProtos:         []string{"eth-ec-broadcast-test"},
@@ -111,15 +111,15 @@ func (h *quicHost) dial(ctx context.Context, addr net.Addr) (transport.Conn, err
 	if err != nil {
 		return nil, err
 	}
-	return quicpkg.NewTransport(conn, transport.Outbound), nil
+	return conn, nil
 }
 
-func (h *quicHost) accept(ctx context.Context) (transport.Conn, error) {
+func (h *quicHost) accept(ctx context.Context) (*quic.Conn, error) {
 	conn, err := h.listener.Accept(ctx)
 	if err != nil {
 		return nil, err
 	}
-	return quicpkg.NewTransport(conn, transport.Inbound), nil
+	return conn, nil
 }
 
 func (h *quicHost) close() error {
@@ -167,10 +167,7 @@ func newTestNode(t *testing.T, peerID broadcast.PeerID) *testNode {
 	t.Helper()
 	host := newQUICHost(t)
 	obs := newTestObserver()
-	cfg := broadcast.EngineConfig{
-		PeerID:   peerID,
-		Observer: obs,
-	}
+	cfg := broadcast.EngineConfig{Observer: obs}
 	engine := broadcast.NewEngine(cfg)
 	t.Cleanup(func() { engine.Close() })
 	return &testNode{
@@ -361,18 +358,18 @@ func connectNodes(t *testing.T, nodes []*testNode, edges []edge) {
 		from := nodes[e.from]
 		to := nodes[e.to]
 
-		var dialConn, acceptConn transport.Conn
+		var dialRaw, acceptRaw *quic.Conn
 		var dialErr, acceptErr error
 		var wg sync.WaitGroup
 
 		wg.Add(2)
 		go func() {
 			defer wg.Done()
-			dialConn, dialErr = from.host.dial(ctx, to.host.addr)
+			dialRaw, dialErr = from.host.dial(ctx, to.host.addr)
 		}()
 		go func() {
 			defer wg.Done()
-			acceptConn, acceptErr = to.host.accept(ctx)
+			acceptRaw, acceptErr = to.host.accept(ctx)
 		}()
 		wg.Wait()
 
@@ -383,8 +380,13 @@ func connectNodes(t *testing.T, nodes []*testNode, edges []edge) {
 			t.Fatalf("accept %d->%d: %v", e.from, e.to, acceptErr)
 		}
 
-		from.engine.NotifyPeerConnected(dialConn)
-		to.engine.NotifyPeerConnected(acceptConn)
+		fromAuth := transport.AuthInfo{
+			Local:  transport.PeerID(from.peerID),
+			Remote: transport.PeerID(to.peerID),
+		}
+		toAuth := transport.AuthInfo{Local: fromAuth.Remote, Remote: fromAuth.Local}
+		from.engine.NotifyPeerConnected(quicpkg.NewTransport(dialRaw, transport.Outbound, fromAuth))
+		to.engine.NotifyPeerConnected(quicpkg.NewTransport(acceptRaw, transport.Inbound, toAuth))
 	}
 }
 

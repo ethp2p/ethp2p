@@ -64,12 +64,16 @@ func (s quicReceiveStream) CancelRead(code uint64) {
 type Conn struct {
 	conn *quic.Conn
 	dir  transport.ConnDirection
+	auth transport.AuthInfo
 }
 
 // NewTransport creates a new QUIC transport from an underlying connection.
-func NewTransport(conn *quic.Conn, dir transport.ConnDirection) *Conn {
-	return &Conn{conn: conn, dir: dir}
+func NewTransport(conn *quic.Conn, dir transport.ConnDirection, auth transport.AuthInfo) *Conn {
+	return &Conn{conn: conn, dir: dir, auth: auth}
 }
+
+// AuthInfo returns an independent copy of the authenticated endpoint data.
+func (t *Conn) AuthInfo() transport.AuthInfo { return t.auth.Clone() }
 
 // Direction returns whether this connection is inbound or outbound.
 func (t *Conn) Direction() transport.ConnDirection { return t.dir }
