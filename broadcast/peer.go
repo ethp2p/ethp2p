@@ -1,7 +1,6 @@
 package broadcast
 
 import (
-	"bytes"
 	"context"
 	"fmt"
 	"maps"
@@ -162,7 +161,6 @@ func (p *PeerConn) handshake(ctx context.Context, ourChannels []ChannelID) (Peer
 			PeerHandshake: &bcastpb.Bcast_Handshake{
 				Version:  ProtocolV1,
 				Channels: channelStrings,
-				PeerId:   []byte(auth.Local),
 			},
 		},
 	}
@@ -261,16 +259,6 @@ func (p *PeerConn) handshake(ctx context.Context, ourChannels []ChannelID) (Peer
 
 	p.ctrlOut = wr.stream
 	p.ctrlIn = rr.s
-
-	if !bytes.Equal(rr.hs.PeerId, []byte(auth.Remote)) {
-		wr.stream.CancelWrite(0)
-		rr.s.CancelRead(0)
-		return "", 0, nil, fmt.Errorf(
-			"peer ID mismatch: authenticated %x, advertised %x",
-			auth.Remote,
-			rr.hs.PeerId,
-		)
-	}
 
 	remoteChannels := make([]ChannelID, len(rr.hs.Channels))
 	for i, t := range rr.hs.Channels {

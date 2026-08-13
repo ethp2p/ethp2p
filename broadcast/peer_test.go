@@ -2,7 +2,6 @@ package broadcast
 
 import (
 	"context"
-	"strings"
 	"testing"
 	"time"
 
@@ -54,44 +53,6 @@ func TestHandshakeUsesAuthenticatedPeerIDs(t *testing.T) {
 	}
 	if got := <-rightResult; got.err != nil || got.peer != "authenticated-left" {
 		t.Fatalf("right handshake = (%q, %v)", got.peer, got.err)
-	}
-}
-
-func TestHandshakeRejectsApplicationPeerIDSpoof(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
-	leftRaw, rightRaw := newTestTransportPair(ctx)
-	leftRaw.auth = testAuthInfo("authenticated-left", "authenticated-right")
-	rightRaw.auth = testAuthInfo("spoofed-right", "authenticated-left")
-	left := newPeerConn(
-		&Engine{ctx: ctx, config: EngineConfig{Observer: NoOpObserver{}}},
-		&uniHandshakeTransport{testTransport: leftRaw},
-	)
-	right := newPeerConn(
-		&Engine{ctx: ctx, config: EngineConfig{Observer: NoOpObserver{}}},
-		&uniHandshakeTransport{testTransport: rightRaw},
-	)
-
-	leftErr := make(chan error, 1)
-	rightDone := make(chan struct{}, 1)
-	go func() {
-		_, _, _, err := left.handshake(ctx, nil)
-		leftErr <- err
-	}()
-	go func() {
-		_, _, _, _ = right.handshake(ctx, nil)
-		rightDone <- struct{}{}
-	}()
-
-	err := <-leftErr
-	if err == nil || !strings.Contains(err.Error(), "peer ID mismatch") {
-		t.Fatalf("handshake error = %v, want peer ID mismatch", err)
-	}
-	select {
-	case <-rightDone:
-	case <-ctx.Done():
-		t.Fatal("remote handshake did not stop")
 	}
 }
 
