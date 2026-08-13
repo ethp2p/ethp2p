@@ -172,6 +172,12 @@ func (s *strategy) TakeChunk(peer broadcast.PeerID, chunkID *ChunkIdent, data []
 		return broadcast.VerdictInvalid, false, nil
 	}
 
+	// Once complete, the decode goroutine may be reading s.chunks
+	// concurrently; freeze further writes (see tryDecode).
+	if s.complete {
+		return broadcast.VerdictRedundant, false, nil
+	}
+
 	idx := chunkID.Index
 
 	if s.chunks[idx] != nil {
