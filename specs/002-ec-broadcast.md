@@ -686,8 +686,8 @@ because each chunk is a random linear combination whose contents are not known i
 
 ## 9. Open questions
 
-**Identity types.**
-`PeerID`, `ChannelID`, and `MessageID` to be replaced with meaningful data in Ethereum.
+**Identity types.** `PeerID`, `ChannelID`,
+and `MessageID` to be replaced with meaningful data in Ethereum.
 
 **Channel lifecycle.**
 The framework supports dynamic channel attachment and detachment,
