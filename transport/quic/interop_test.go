@@ -216,3 +216,18 @@ func TestInteropSamePeerIDFreshCert(t *testing.T) {
 	}
 	require.NotEqual(t, certs[0], certs[1])
 }
+
+// TestInteropClientConfigAcceptAny: ClientConfig with a nil expectation
+// accepts any identity.
+func TestInteropClientConfigAcceptAny(t *testing.T) {
+	h := newLibp2pHost(t, "ed25519")
+	identity := newTestIdentity(t, false)
+
+	conf, keyCh := identity.ClientConfig(nil)
+	conn, err := quic.DialAddr(context.Background(), dialAddr(t, quicAddrOf(t, h)), conf, &quic.Config{})
+	require.NoError(t, err)
+	defer conn.CloseWithError(0, "")
+
+	key := <-keyCh
+	require.Equal(t, quictls.ID(h.ID()), quictls.IDFromKey(key))
+}
