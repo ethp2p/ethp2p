@@ -187,3 +187,32 @@ func TestInteropWrongPeerIDReverse(t *testing.T) {
 	_, err = h.Network().DialPeer(ctx, wrong)
 	require.Error(t, err)
 }
+
+// TestInteropSamePeerIDFreshCert: two hosts built from the same key have
+// the same peer ID but fresh certificates; we pin by ID, so both dials
+// succeed and the certs differ.
+func TestInteropSamePeerIDFreshCert(t *testing.T) {
+	sk, _, err := crypto.GenerateEd25519Key(rand.Reader)
+	require.NoError(t, err)
+	newHost := func() host.Host {
+		h, err := libp2p.New(libp2p.Identity(sk))
+		require.NoError(t, err)
+		t.Cleanup(func() { h.Close() })
+		return h
+	}
+	h1, h2 := newHost(), newHost()
+	require.Equal(t, h1.ID(), h2.ID())
+
+	identity := newTestIdentity(t, false)
+	var certs [][]byte
+	for _, h := range []host.Host{h1, h2} {
+		conf, keyCh := identity.ClientConfig(quictls.ID(h.ID()))
+		conn, err := quic.DialAddr(context.Background(), dialAddr(t, quicAddrOf(t, h)), conf, &quic.Config{})
+		require.NoError(t, err)
+		key := <-keyCh
+		require.Equal(t, quictls.ID(h.ID()), quictls.IDFromKey(key))
+		certs = append(certs, conn.ConnectionState().TLS.PeerCertificates[0].Raw)
+		conn.CloseWithError(0, "")
+	}
+	require.NotEqual(t, certs[0], certs[1])
+}
