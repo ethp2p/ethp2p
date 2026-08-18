@@ -16,6 +16,14 @@ import (
 	"slices"
 )
 
+// Config configures the handshake.
+type Config struct {
+	// AdvertiseEthp2pALPN advertises the "ethp2p_0" ALPN in addition to
+	// "libp2p", so ethp2p-aware peers can negotiate it. go-libp2p peers
+	// don't know it and fall back to "libp2p".
+	AdvertiseEthp2pALPN bool
+}
+
 // Identity holds an identity key and the certificate that ties it to the
 // TLS handshake.
 type Identity struct {
@@ -25,7 +33,7 @@ type Identity struct {
 
 // NewIdentity creates an Identity from a signer, generating a fresh
 // self-signed certificate.
-func NewIdentity(sk Signer) (*Identity, error) {
+func NewIdentity(sk Signer, cfg Config) (*Identity, error) {
 	if sk == nil {
 		return nil, errors.New("quictls: nil signer")
 	}
@@ -37,6 +45,10 @@ func NewIdentity(sk Signer) (*Identity, error) {
 	if err != nil {
 		return nil, err
 	}
+	nextProtos := []string{alpn}
+	if cfg.AdvertiseEthp2pALPN {
+		nextProtos = []string{alpnEthp2p, alpn}
+	}
 	return &Identity{
 		pub: sk.Public(),
 		config: tls.Config{
@@ -47,7 +59,7 @@ func NewIdentity(sk Signer) (*Identity, error) {
 			VerifyPeerCertificate: func(_ [][]byte, _ [][]*x509.Certificate) error {
 				panic("quictls: tls config not specialized for peer")
 			},
-			NextProtos:             []string{alpn},
+			NextProtos:             nextProtos,
 			SessionTicketsDisabled: true,
 		},
 	}, nil

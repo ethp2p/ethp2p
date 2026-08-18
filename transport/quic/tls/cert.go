@@ -21,6 +21,12 @@ const (
 	certificatePrefix = "libp2p-tls-handshake:"
 	// alpn is the ALPN protocol negotiated by the handshake.
 	alpn = "libp2p"
+
+	// alpnEthp2p is the ethp2p-specific ALPN, preferred when both ends
+	// support it. "libp2p" stays in the list so go-libp2p peers can
+	// still connect. The _0 suffix versions the protocol; bump it on
+	// breaking wire changes.
+	alpnEthp2p = "ethp2p_0"
 )
 
 // extensionID is the x509 extension OID carrying the identity key

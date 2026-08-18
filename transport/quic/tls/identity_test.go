@@ -13,13 +13,13 @@ import (
 	"testing"
 )
 
-func newTestIdentity(t *testing.T) *Identity {
+func newTestIdentity(t *testing.T, advertiseEthp2p bool) *Identity {
 	t.Helper()
 	signer, err := NewEd25519Signer()
 	if err != nil {
 		t.Fatal(err)
 	}
-	identity, err := NewIdentity(signer)
+	identity, err := NewIdentity(signer, Config{AdvertiseEthp2pALPN: advertiseEthp2p})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -97,7 +97,7 @@ func TestParseKeyUnknownType(t *testing.T) {
 }
 
 func TestVerifyPeerCertSelf(t *testing.T) {
-	identity := newTestIdentity(t)
+	identity := newTestIdentity(t, false)
 	raw := identity.config.Certificates[0].Certificate[0]
 	cert, err := x509.ParseCertificate(raw)
 	if err != nil {
@@ -116,7 +116,7 @@ func TestVerifyPeerCertSelf(t *testing.T) {
 }
 
 func TestVerifyPeerCertTampered(t *testing.T) {
-	identity := newTestIdentity(t)
+	identity := newTestIdentity(t, false)
 	raw := identity.config.Certificates[0].Certificate[0]
 	bad := append([]byte(nil), raw...)
 	bad[len(bad)/2] ^= 0xff
@@ -152,53 +152,68 @@ func TestVerifyPeerCertMissingExtension(t *testing.T) {
 }
 
 func TestHandshakeRoundtrip(t *testing.T) {
-	client := newTestIdentity(t)
-	server := newTestIdentity(t)
+	for _, tc := range []struct {
+		name       string
+		advertise  bool
+		negotiated string
+	}{
+		{"libp2p-only", false, "libp2p"},
+		{"ethp2p_0", true, "ethp2p_0"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			client := newTestIdentity(t, tc.advertise)
+			server := newTestIdentity(t, tc.advertise)
 
-	conf, keyCh := client.ClientConfig(server.ID())
-	clientConn, serverConn := net.Pipe()
-	defer clientConn.Close()
-	defer serverConn.Close()
+			conf, keyCh := client.ClientConfig(server.ID())
+			clientConn, serverConn := net.Pipe()
+			defer clientConn.Close()
+			defer serverConn.Close()
 
-	done := make(chan error, 1)
-	serverState := make(chan tls.ConnectionState, 1)
-	go func() {
-		srv := tls.Server(serverConn, server.ServerConfig())
-		if err := srv.Handshake(); err != nil {
-			done <- err
-			return
-		}
-		serverState <- srv.ConnectionState()
-		done <- nil
-	}()
+			done := make(chan error, 1)
+			serverState := make(chan tls.ConnectionState, 1)
+			go func() {
+				srv := tls.Server(serverConn, server.ServerConfig())
+				if err := srv.Handshake(); err != nil {
+					done <- err
+					return
+				}
+				serverState <- srv.ConnectionState()
+				done <- nil
+			}()
 
-	cli := tls.Client(clientConn, conf)
-	if err := cli.Handshake(); err != nil {
-		t.Fatal(err)
-	}
-	if err := <-done; err != nil {
-		t.Fatal(err)
-	}
+			cli := tls.Client(clientConn, conf)
+			if err := cli.Handshake(); err != nil {
+				t.Fatal(err)
+			}
+			if err := <-done; err != nil {
+				t.Fatal(err)
+			}
 
-	// client derived the server's identity from the handshake
-	key := <-keyCh
-	if !bytes.Equal(server.ID(), IDFromKey(key)) {
-		t.Fatal("client derived wrong peer ID")
-	}
-	// server re-derives the client's identity from the TLS state
-	state := <-serverState
-	_, id, err := VerifyPeerCert(state.PeerCertificates)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !bytes.Equal(client.ID(), id) {
-		t.Fatal("server derived wrong peer ID")
+			// client derived the server's identity from the handshake
+			key := <-keyCh
+			if !bytes.Equal(server.ID(), IDFromKey(key)) {
+				t.Fatal("client derived wrong peer ID")
+			}
+			// server re-derives the client's identity from the TLS state
+			state := <-serverState
+			_, id, err := VerifyPeerCert(state.PeerCertificates)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !bytes.Equal(client.ID(), id) {
+				t.Fatal("server derived wrong peer ID")
+			}
+			// both sides advertise the same ALPNs; the server's preference wins
+			if state.NegotiatedProtocol != tc.negotiated {
+				t.Fatalf("negotiated %q, want %q", state.NegotiatedProtocol, tc.negotiated)
+			}
+		})
 	}
 }
 
 func TestClientConfigPeerMismatch(t *testing.T) {
-	client := newTestIdentity(t)
-	server := newTestIdentity(t)
+	client := newTestIdentity(t, false)
+	server := newTestIdentity(t, false)
 
 	conf, _ := client.ClientConfig(ID("wrong"))
 	clientConn, serverConn := net.Pipe()
