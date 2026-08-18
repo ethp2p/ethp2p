@@ -231,3 +231,24 @@ func TestInteropClientConfigAcceptAny(t *testing.T) {
 	key := <-keyCh
 	require.Equal(t, quictls.ID(h.ID()), quictls.IDFromKey(key))
 }
+
+// TestInteropNoCommonALPNOutbound: our client dials a QUIC server that
+// only offers "h3"; no common ALPN, so the handshake fails cleanly.
+func TestInteropNoCommonALPNOutbound(t *testing.T) {
+	server := newTestIdentity(t, true)
+	conf := server.ServerConfig()
+	conf.NextProtos = []string{"h3"}
+
+	udpConn, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	require.NoError(t, err)
+	defer udpConn.Close()
+	ln, err := quic.Listen(udpConn, conf, &quic.Config{})
+	require.NoError(t, err)
+	defer ln.Close()
+
+	client := newTestIdentity(t, true)
+	cconf, _ := client.ClientConfig(nil)
+	addr := fmt.Sprintf("127.0.0.1:%d", udpConn.LocalAddr().(*net.UDPAddr).Port)
+	_, err = quic.DialAddr(context.Background(), addr, cconf, &quic.Config{})
+	require.Error(t, err)
+}
