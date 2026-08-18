@@ -164,3 +164,26 @@ func TestInteropWrongPeerID(t *testing.T) {
 	_, err := quic.DialAddr(context.Background(), dialAddr(t, quicAddrOf(t, h)), conf, &quic.Config{})
 	require.Error(t, err)
 }
+
+// TestInteropWrongPeerIDReverse: a go-libp2p client dials our listener
+// pinning a wrong peer ID; our certificate doesn't match, so the dial
+// fails on their side.
+func TestInteropWrongPeerIDReverse(t *testing.T) {
+	h := newLibp2pHost(t, "ed25519")
+	identity := newTestIdentity(t, false)
+
+	udpConn, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	require.NoError(t, err)
+	defer udpConn.Close()
+	ln, err := quic.Listen(udpConn, identity.ServerConfig(), &quic.Config{})
+	require.NoError(t, err)
+	defer ln.Close()
+
+	addr := ma.StringCast(fmt.Sprintf("/ip4/127.0.0.1/udp/%d/quic-v1", udpConn.LocalAddr().(*net.UDPAddr).Port))
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	wrong := peer.ID("definitely-not-our-identity")
+	h.Peerstore().AddAddrs(wrong, []ma.Multiaddr{addr}, peerstore.TempAddrTTL)
+	_, err = h.Network().DialPeer(ctx, wrong)
+	require.Error(t, err)
+}
