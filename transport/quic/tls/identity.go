@@ -1,8 +1,8 @@
 // Package quictls implements the wire-level libp2p QUIC/TLS handshake:
 // TLS 1.3 with a self-signed certificate that carries the peer's identity
 // key in a custom x509 extension. It is wire-compatible with go-libp2p
-// (ALPN "libp2p", extension OID 1.3.6.1.4.1.53594.1.1) but imports nothing
-// outside the standard library.
+// (ALPN "libp2p", extension OID 1.3.6.1.4.1.53594.1.1) and supports the
+// same identity key types: ed25519, ECDSA, RSA, and secp256k1.
 package quictls
 
 import (

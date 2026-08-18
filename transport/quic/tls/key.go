@@ -14,6 +14,9 @@ import (
 	"errors"
 	"fmt"
 	"math/big"
+
+	"github.com/decred/dcrd/dcrec/secp256k1/v4"
+	decrecdsa "github.com/decred/dcrd/dcrec/secp256k1/v4/ecdsa"
 )
 
 // KeyType is the wire enum for identity key types (libp2p crypto.proto).
@@ -146,6 +149,36 @@ func (s rsaSigner) Sign(m []byte) ([]byte, error) {
 	return rsa.SignPKCS1v15(rand.Reader, s.priv, crypto.SHA256, hash[:])
 }
 
+type secp256k1Key struct{ pub *secp256k1.PublicKey }
+
+func (k secp256k1Key) Type() KeyType { return KeyTypeSecp256k1 }
+func (k secp256k1Key) Bytes() []byte { return k.pub.SerializeCompressed() }
+func (k secp256k1Key) Verify(m, s []byte) bool {
+	sig, err := decrecdsa.ParseDERSignature(s)
+	if err != nil {
+		return false
+	}
+	hash := sha256.Sum256(m)
+	return sig.Verify(hash[:], k.pub)
+}
+
+type secp256k1Signer struct{ priv *secp256k1.PrivateKey }
+
+func (s secp256k1Signer) Public() Key { return secp256k1Key{pub: s.priv.PubKey()} }
+func (s secp256k1Signer) Sign(m []byte) ([]byte, error) {
+	hash := sha256.Sum256(m)
+	return decrecdsa.Sign(s.priv, hash[:]).Serialize(), nil
+}
+
+// NewSecp256k1Signer generates a new secp256k1 identity key.
+func NewSecp256k1Signer() (Signer, error) {
+	priv, err := secp256k1.GeneratePrivateKey()
+	if err != nil {
+		return nil, err
+	}
+	return secp256k1Signer{priv: priv}, nil
+}
+
 // marshalKey encodes a public key as the protobuf PublicKey message
 // { KeyType Type = 1; bytes Data = 2; }.
 func marshalKey(k Key) []byte {
@@ -230,16 +263,10 @@ func skipField(b []byte, wt int) (int, error) {
 }
 
 var keyTypes = map[KeyType]func([]byte) (Key, error){
-	KeyTypeEd25519: parseEd25519,
-	KeyTypeECDSA:   parseECDSA,
-	KeyTypeRSA:     parseRSA,
-}
-
-// RegisterKeyType registers a parser for a key type not built in (e.g.
-// secp256k1). Call from an init function; the parser receives the raw key
-// data from the wire.
-func RegisterKeyType(t KeyType, parse func([]byte) (Key, error)) {
-	keyTypes[t] = parse
+	KeyTypeEd25519:   parseEd25519,
+	KeyTypeECDSA:     parseECDSA,
+	KeyTypeRSA:       parseRSA,
+	KeyTypeSecp256k1: parseSecp256k1,
 }
 
 func parseEd25519(b []byte) (Key, error) {
@@ -271,6 +298,14 @@ func parseRSA(b []byte) (Key, error) {
 		return nil, errors.New("quictls: invalid rsa key")
 	}
 	return rsaKey{pub: r, wire: b}, nil
+}
+
+func parseSecp256k1(b []byte) (Key, error) {
+	pub, err := secp256k1.ParsePubKey(b)
+	if err != nil {
+		return nil, fmt.Errorf("quictls: invalid secp256k1 key: %s", err)
+	}
+	return secp256k1Key{pub: pub}, nil
 }
 
 const maxInlineKeyLength = 42

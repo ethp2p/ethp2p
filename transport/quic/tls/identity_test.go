@@ -37,6 +37,16 @@ func TestIDFromKey(t *testing.T) {
 		t.Fatalf("expected identity multihash, got %x", id)
 	}
 
+	// secp256k1 protobuf encoding is 37 bytes → identity multihash (0x00).
+	secpSigner, err := NewSecp256k1Signer()
+	if err != nil {
+		t.Fatal(err)
+	}
+	sid := IDFromKey(secpSigner.Public())
+	if len(sid) != 39 || sid[0] != 0x00 || sid[1] != 37 {
+		t.Fatalf("expected identity multihash, got %x", sid)
+	}
+
 	// rsa 2048 protobuf encoding is > 42 bytes → sha2-256 multihash (0x12 0x20).
 	rsaSigner, err := NewRSASigner(2048)
 	if err != nil {
@@ -61,7 +71,11 @@ func TestParseKeyRoundtrip(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	signers := []Signer{ed25519Signer, ecdsaSigner, rsaSigner}
+	secpSigner, err := NewSecp256k1Signer()
+	if err != nil {
+		t.Fatal(err)
+	}
+	signers := []Signer{ed25519Signer, ecdsaSigner, rsaSigner, secpSigner}
 	for _, s := range signers {
 		k := s.Public()
 		parsed, err := ParseKey(marshalKey(k))
