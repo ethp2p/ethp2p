@@ -1,6 +1,7 @@
 package quic
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"crypto/tls"
@@ -296,4 +297,35 @@ func TestInteropIPv6(t *testing.T) {
 
 	key := <-keyCh
 	require.Equal(t, quictls.ID(h.ID()), quictls.IDFromKey(key))
+}
+
+// TestInteropParallelDials: many concurrent dials to one host; each
+// ClientConfig is single-use, so this exercises per-dial state.
+func TestInteropParallelDials(t *testing.T) {
+	h := newLibp2pHost(t, "ed25519")
+	identity := newTestIdentity(t, false)
+	addr := dialAddr(t, quicAddrOf(t, h))
+
+	const n = 8
+	errs := make(chan error, n)
+	for i := 0; i < n; i++ {
+		go func() {
+			conf, keyCh := identity.ClientConfig(quictls.ID(h.ID()))
+			conn, err := quic.DialAddr(context.Background(), addr, conf, &quic.Config{})
+			if err != nil {
+				errs <- err
+				return
+			}
+			defer conn.CloseWithError(0, "")
+			key := <-keyCh
+			if !bytes.Equal(quictls.ID(h.ID()), quictls.IDFromKey(key)) {
+				errs <- fmt.Errorf("peer ID mismatch")
+				return
+			}
+			errs <- nil
+		}()
+	}
+	for i := 0; i < n; i++ {
+		require.NoError(t, <-errs)
+	}
 }
