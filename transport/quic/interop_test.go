@@ -302,7 +302,7 @@ func TestInteropParallelDials(t *testing.T) {
 
 	const n = 8
 	errs := make(chan error, n)
-	for i := 0; i < n; i++ {
+	for range n {
 		go func() {
 			conn, key, err := dial(identity, quictls.ID(h.ID()), addr)
 			if err != nil {
@@ -317,7 +317,7 @@ func TestInteropParallelDials(t *testing.T) {
 			errs <- nil
 		}()
 	}
-	for i := 0; i < n; i++ {
+	for range n {
 		require.NoError(t, <-errs)
 	}
 }
