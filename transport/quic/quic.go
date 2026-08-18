@@ -2,10 +2,12 @@
 package quic
 
 import (
+	"bytes"
 	"context"
 	"errors"
 
 	"github.com/ethp2p/ethp2p/transport"
+	quictls "github.com/ethp2p/ethp2p/transport/quic/tls"
 	"github.com/quic-go/quic-go"
 )
 
@@ -65,6 +67,9 @@ type Conn struct {
 	conn *quic.Conn
 	dir  transport.ConnDirection
 	auth transport.AuthInfo
+
+	remoteID  quictls.ID
+	remoteKey quictls.Key
 }
 
 // NewTransport creates a new QUIC transport from an underlying connection.
@@ -74,6 +79,29 @@ func NewTransport(conn *quic.Conn, dir transport.ConnDirection, auth transport.A
 
 // AuthInfo returns an independent copy of the authenticated endpoint data.
 func (t *Conn) AuthInfo() transport.AuthInfo { return t.auth.Clone() }
+
+// VerifyPeer derives the remote peer's identity from the connection's TLS
+// state and checks it against expect (nil accepts any). For outbound
+// connections the handshake already pinned the identity via ClientConfig;
+// for inbound connections this is the only identity check. Call it before
+// RemotePeer/RemoteKey.
+func (t *Conn) VerifyPeer(expect quictls.ID) error {
+	key, id, err := quictls.VerifyPeerCert(t.conn.ConnectionState().TLS.PeerCertificates)
+	if err != nil {
+		return err
+	}
+	if expect != nil && !bytes.Equal(expect, id) {
+		return quictls.ErrPeerMismatch{Expected: expect, Actual: id}
+	}
+	t.remoteID, t.remoteKey = id, key
+	return nil
+}
+
+// RemotePeer returns the verified remote peer ID.
+func (t *Conn) RemotePeer() quictls.ID { return t.remoteID }
+
+// RemoteKey returns the verified remote identity key.
+func (t *Conn) RemoteKey() quictls.Key { return t.remoteKey }
 
 // Direction returns whether this connection is inbound or outbound.
 func (t *Conn) Direction() transport.ConnDirection { return t.dir }
