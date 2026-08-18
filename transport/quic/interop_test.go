@@ -275,3 +275,25 @@ func TestInteropNoCommonALPNInbound(t *testing.T) {
 	_, err = quic.DialAddr(context.Background(), addr, cconf, &quic.Config{})
 	require.Error(t, err)
 }
+
+// TestInteropIPv6: dial a go-libp2p host listening on IPv6 loopback.
+func TestInteropIPv6(t *testing.T) {
+	probe, err := net.ListenUDP("udp6", &net.UDPAddr{IP: net.IPv6loopback})
+	if err != nil {
+		t.Skipf("IPv6 loopback unavailable: %s", err)
+	}
+	probe.Close()
+
+	h, err := libp2p.New(libp2p.ListenAddrStrings("/ip6/::1/udp/0/quic-v1"))
+	require.NoError(t, err)
+	t.Cleanup(func() { h.Close() })
+
+	identity := newTestIdentity(t, false)
+	conf, keyCh := identity.ClientConfig(quictls.ID(h.ID()))
+	conn, err := quic.DialAddr(context.Background(), dialAddr(t, quicAddrOf(t, h)), conf, &quic.Config{})
+	require.NoError(t, err)
+	defer conn.CloseWithError(0, "")
+
+	key := <-keyCh
+	require.Equal(t, quictls.ID(h.ID()), quictls.IDFromKey(key))
+}
