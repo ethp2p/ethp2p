@@ -329,3 +329,16 @@ func TestInteropParallelDials(t *testing.T) {
 		require.NoError(t, <-errs)
 	}
 }
+
+// TestInteropDialBlackhole: dialing a non-routable address fails cleanly
+// within the context timeout, without hanging.
+func TestInteropDialBlackhole(t *testing.T) {
+	identity := newTestIdentity(t, false)
+	conf, _ := identity.ClientConfig(nil)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	// 192.0.2.1 is TEST-NET-1 (RFC 5737): guaranteed non-routable.
+	_, err := quic.DialAddr(ctx, "192.0.2.1:1", conf, &quic.Config{})
+	require.Error(t, err)
+}
