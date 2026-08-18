@@ -16,7 +16,6 @@ message Bcast {
   message Handshake {
     uint32 version = 1;
     repeated string channels = 2;
-    string peer_id = 3;
   }
 
   // Subscribe requests the remote peer to include us in a channel.

@@ -311,6 +311,9 @@ func (t *blackholeTransport) SupportsDatagrams() bool            { return false 
 func (t *blackholeTransport) Close() error                       { return nil }
 func (t *blackholeTransport) ConnectionStats() (uint64, uint64)  { return 0, 0 }
 func (t *blackholeTransport) Direction() transport.ConnDirection { return transport.Outbound }
+func (t *blackholeTransport) AuthInfo() transport.AuthInfo {
+	return testAuthInfo("bench-local", "bench-remote")
+}
 
 func (t *blackholeTransport) OpenStream(_ context.Context) (transport.Stream, error) {
 	return &blackholeStream{}, nil

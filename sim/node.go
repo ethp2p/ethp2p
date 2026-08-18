@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"strconv"
 	"strings"
 	"sync"
 
@@ -42,12 +43,13 @@ type BroadcastNode struct {
 
 	logger *slog.Logger
 
-	mu       sync.Mutex
-	conns    []*quic.Conn
-	wg       sync.WaitGroup
-	closed   bool
-	baseSent int // cumulative baseline for ResetBandwidthStats
-	baseRecv int
+	mu         sync.Mutex
+	conns      []*quic.Conn
+	peerByAddr map[string]int
+	wg         sync.WaitGroup
+	closed     bool
+	baseSent   int // cumulative baseline for ResetBandwidthStats
+	baseRecv   int
 }
 
 func (n *BroadcastNode) NodeNum() int {
@@ -106,8 +108,35 @@ func (n *BroadcastNode) processIncomingConnections(ctx context.Context) {
 		n.mu.Lock()
 		n.conns = append(n.conns, c)
 		n.mu.Unlock()
-		n.engine.NotifyPeerConnected(quicTransport.NewTransport(c, transport.Inbound))
+		n.mu.Lock()
+		remote, ok := n.peerByAddr[c.RemoteAddr().String()]
+		n.mu.Unlock()
+		if !ok {
+			_ = c.CloseWithError(0, "unknown simulation peer")
+			n.logger.Error("failed to authenticate simulation peer", "addr", c.RemoteAddr())
+			continue
+		}
+		n.engine.NotifyPeerConnected(quicTransport.NewTransport(
+			c,
+			transport.Inbound,
+			simAuthInfo(n.num, remote),
+		))
 	}
+}
+
+// setPeerAddresses installs the topology-derived address-to-node mapping used
+// to authenticate inbound simulation connections. Scenario calls this before
+// Start, so a Shadow process does not depend on state from other processes.
+func (n *BroadcastNode) setPeerAddresses(peers map[int]net.Addr) {
+	byAddr := make(map[string]int, len(peers))
+	for nodeNum, addr := range peers {
+		if addr != nil {
+			byAddr[addr.String()] = nodeNum
+		}
+	}
+	n.mu.Lock()
+	n.peerByAddr = byAddr
+	n.mu.Unlock()
 }
 
 func (n *BroadcastNode) DialPeer(ctx context.Context, p int, addr net.Addr) error {
@@ -120,7 +149,11 @@ func (n *BroadcastNode) DialPeer(ctx context.Context, p int, addr net.Addr) erro
 	n.conns = append(n.conns, cu)
 	n.mu.Unlock()
 
-	n.engine.NotifyPeerConnected(quicTransport.NewTransport(cu, transport.Outbound))
+	n.engine.NotifyPeerConnected(quicTransport.NewTransport(
+		cu,
+		transport.Outbound,
+		simAuthInfo(n.num, p),
+	))
 	return nil
 }
 
@@ -168,12 +201,22 @@ func newBroadcastNode(
 	}
 
 	return &BroadcastNode{
-		num:       nodeNum,
-		quicHost:  qh,
-		engine:    engine,
-		publishFn: publishFn,
-		stopFn:    stopFn,
-		recvCh:    recvCh,
-		logger:    logger,
+		num:        nodeNum,
+		quicHost:   qh,
+		engine:     engine,
+		publishFn:  publishFn,
+		stopFn:     stopFn,
+		recvCh:     recvCh,
+		logger:     logger,
+		peerByAddr: make(map[string]int),
 	}, nil
+}
+
+func simAuthInfo(local, remote int) transport.AuthInfo {
+	localID := strconv.Itoa(local)
+	remoteID := strconv.Itoa(remote)
+	return transport.AuthInfo{
+		Local:  transport.PeerID(localID),
+		Remote: transport.PeerID(remoteID),
+	}
 }

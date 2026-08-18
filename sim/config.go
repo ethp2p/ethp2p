@@ -167,10 +167,7 @@ type StrategyFunc func(nodeNum int, conn net.PacketConn, logger *slog.Logger, ob
 // are handled here; the scheme is the only varying part.
 func ECStrategy[CI broadcast.ChunkIdent, R broadcast.Wire, P broadcast.Wire](scheme broadcast.Scheme[CI, R, P]) StrategyFunc {
 	return func(nodeNum int, conn net.PacketConn, logger *slog.Logger, obs broadcast.Observer, tw *TraceWriter) (Node, error) {
-		engine := broadcast.NewEngine(broadcast.EngineConfig{
-			PeerID:   broadcast.PeerID(fmt.Sprintf("%d", nodeNum)),
-			Observer: obs,
-		})
+		engine := broadcast.NewEngine(broadcast.EngineConfig{Observer: obs})
 		channel := broadcast.AttachChannel(engine, "broadcast", scheme)
 		recvCh := make(chan broadcast.FullMessage, 64)
 		if err := channel.Subscribe(recvCh); err != nil {
@@ -238,16 +235,16 @@ func (rc *RunConfig) NewScenario(driver string, logger *slog.Logger) (*Scenario,
 	if err != nil {
 		return nil, err
 	}
+	topo, err := rc.LoadTopology()
+	if err != nil {
+		return nil, err
+	}
 
 	var drv Driver
 	switch driver {
 	case "shadow":
 		drv = &ShadowDriver{Strategy: newNode}
 	case "simnet":
-		topo, err := rc.LoadTopology()
-		if err != nil {
-			return nil, err
-		}
 		sd := &SimnetDriver{Strategy: newNode, Topology: topo}
 		if rc.Simulation.TraceFile != "" {
 			f, err := os.Create(rc.Simulation.TraceFile)
@@ -296,5 +293,6 @@ func (rc *RunConfig) NewScenario(driver string, logger *slog.Logger) (*Scenario,
 		Driver:                drv,
 		BandwidthLogFrequency: rc.Simulation.BandwidthLogFrequency(),
 		Logger:                logger,
+		topology:              topo,
 	}, nil
 }
