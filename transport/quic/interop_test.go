@@ -3,6 +3,7 @@ package quic
 import (
 	"context"
 	"crypto/rand"
+	"crypto/tls"
 	"fmt"
 	"maps"
 	"net"
@@ -248,6 +249,28 @@ func TestInteropNoCommonALPNOutbound(t *testing.T) {
 
 	client := newTestIdentity(t, true)
 	cconf, _ := client.ClientConfig(nil)
+	addr := fmt.Sprintf("127.0.0.1:%d", udpConn.LocalAddr().(*net.UDPAddr).Port)
+	_, err = quic.DialAddr(context.Background(), addr, cconf, &quic.Config{})
+	require.Error(t, err)
+}
+
+// TestInteropNoCommonALPNInbound: a QUIC client offering only "h3" dials
+// our listener; no common ALPN, so the handshake fails on the client side.
+func TestInteropNoCommonALPNInbound(t *testing.T) {
+	identity := newTestIdentity(t, true)
+
+	udpConn, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	require.NoError(t, err)
+	defer udpConn.Close()
+	ln, err := quic.Listen(udpConn, identity.ServerConfig(), &quic.Config{})
+	require.NoError(t, err)
+	defer ln.Close()
+
+	cconf := &tls.Config{
+		MinVersion:         tls.VersionTLS13,
+		InsecureSkipVerify: true,
+		NextProtos:         []string{"h3"},
+	}
 	addr := fmt.Sprintf("127.0.0.1:%d", udpConn.LocalAddr().(*net.UDPAddr).Port)
 	_, err = quic.DialAddr(context.Background(), addr, cconf, &quic.Config{})
 	require.Error(t, err)
