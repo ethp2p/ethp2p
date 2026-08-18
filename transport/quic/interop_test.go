@@ -56,8 +56,9 @@ var libp2pKeyGens = map[string]func() (crypto.PrivKey, error){
 // interopKeyTypes is the sorted set of identity key types under test.
 var interopKeyTypes = slices.Sorted(maps.Keys(libp2pKeyGens))
 
-// newLibp2pHost builds a go-libp2p host with the given identity key type.
-func newLibp2pHost(t *testing.T, keyType string) host.Host {
+// newLibp2pHost builds a go-libp2p host with the given identity key type
+// and returns its dial address (host:port of the first QUIC address).
+func newLibp2pHost(t *testing.T, keyType string) (host.Host, string) {
 	t.Helper()
 	gen, ok := libp2pKeyGens[keyType]
 	require.True(t, ok, "unknown key type %q", keyType)
@@ -66,7 +67,7 @@ func newLibp2pHost(t *testing.T, keyType string) host.Host {
 	h, err := libp2p.New(libp2p.Identity(sk))
 	require.NoError(t, err)
 	t.Cleanup(func() { h.Close() })
-	return h
+	return h, dialAddr(t, quicAddrOf(t, h))
 }
 
 // quicAddrOf returns h's first QUIC address, skipping WebTransport addrs
@@ -97,12 +98,6 @@ func dialAddr(t *testing.T, addr ma.Multiaddr) string {
 	port, err := addr.ValueForProtocol(ma.P_UDP)
 	require.NoError(t, err)
 	return net.JoinHostPort(ip, port)
-}
-
-// dialAddrOf returns the host:port of h's first QUIC address.
-func dialAddrOf(t *testing.T, h host.Host) string {
-	t.Helper()
-	return dialAddr(t, quicAddrOf(t, h))
 }
 
 // listenQUIC starts a QUIC listener on 127.0.0.1 with the given TLS
@@ -155,10 +150,10 @@ func TestInteropDialLibp2pHost(t *testing.T) {
 	for _, keyType := range interopKeyTypes {
 		for _, advertise := range []bool{false, true} {
 			t.Run(fmt.Sprintf("%s/advertiseEthp2p=%t", keyType, advertise), func(t *testing.T) {
-				h := newLibp2pHost(t, keyType)
+				h, addr := newLibp2pHost(t, keyType)
 				identity := newTestIdentity(t, advertise)
 
-				conn := dialAndVerify(t, identity, quictls.ID(h.ID()), dialAddrOf(t, h))
+				conn := dialAndVerify(t, identity, quictls.ID(h.ID()), addr)
 				defer conn.CloseWithError(0, "")
 				// go-libp2p does not know "ethp2p_0", so the fallback ALPN must win.
 				require.Equal(t, "libp2p", conn.ConnectionState().TLS.NegotiatedProtocol)
@@ -173,7 +168,7 @@ func TestInteropAcceptLibp2pDial(t *testing.T) {
 	for _, keyType := range interopKeyTypes {
 		for _, advertise := range []bool{false, true} {
 			t.Run(fmt.Sprintf("%s/advertiseEthp2p=%t", keyType, advertise), func(t *testing.T) {
-				h := newLibp2pHost(t, keyType)
+				h, _ := newLibp2pHost(t, keyType)
 				identity := newTestIdentity(t, advertise)
 
 				ln, addr := listenQUIC(t, identity.ServerConfig())
@@ -199,10 +194,10 @@ func TestInteropAcceptLibp2pDial(t *testing.T) {
 
 // TestInteropWrongPeerID: pinning the wrong identity fails the handshake.
 func TestInteropWrongPeerID(t *testing.T) {
-	h := newLibp2pHost(t, "ed25519")
+	_, addr := newLibp2pHost(t, "ed25519")
 	identity := newTestIdentity(t, false)
 
-	_, _, err := dial(identity, quictls.ID("definitely-not-the-peer"), dialAddrOf(t, h))
+	_, _, err := dial(identity, quictls.ID("definitely-not-the-peer"), addr)
 	require.Error(t, err)
 }
 
@@ -210,7 +205,7 @@ func TestInteropWrongPeerID(t *testing.T) {
 // pinning a wrong peer ID; our certificate doesn't match, so the dial
 // fails on their side.
 func TestInteropWrongPeerIDReverse(t *testing.T) {
-	h := newLibp2pHost(t, "ed25519")
+	h, _ := newLibp2pHost(t, "ed25519")
 	identity := newTestIdentity(t, false)
 
 	_, addr := listenQUIC(t, identity.ServerConfig())
@@ -235,7 +230,7 @@ func TestInteropSamePeerIDFreshCert(t *testing.T) {
 	identity := newTestIdentity(t, false)
 	var certs [][]byte
 	for _, h := range []host.Host{h1, h2} {
-		conn := dialAndVerify(t, identity, quictls.ID(h.ID()), dialAddrOf(t, h))
+		conn := dialAndVerify(t, identity, quictls.ID(h.ID()), dialAddr(t, quicAddrOf(t, h)))
 		certs = append(certs, conn.ConnectionState().TLS.PeerCertificates[0].Raw)
 		conn.CloseWithError(0, "")
 	}
@@ -245,10 +240,10 @@ func TestInteropSamePeerIDFreshCert(t *testing.T) {
 // TestInteropClientConfigAcceptAny: ClientConfig with a nil expectation
 // accepts any identity.
 func TestInteropClientConfigAcceptAny(t *testing.T) {
-	h := newLibp2pHost(t, "ed25519")
+	h, addr := newLibp2pHost(t, "ed25519")
 	identity := newTestIdentity(t, false)
 
-	conn, key, err := dial(identity, nil, dialAddrOf(t, h))
+	conn, key, err := dial(identity, nil, addr)
 	require.NoError(t, err)
 	defer conn.CloseWithError(0, "")
 	require.Equal(t, quictls.ID(h.ID()), quictls.IDFromKey(key))
@@ -295,16 +290,15 @@ func TestInteropIPv6(t *testing.T) {
 	t.Cleanup(func() { h.Close() })
 
 	identity := newTestIdentity(t, false)
-	conn := dialAndVerify(t, identity, quictls.ID(h.ID()), dialAddrOf(t, h))
+	conn := dialAndVerify(t, identity, quictls.ID(h.ID()), dialAddr(t, quicAddrOf(t, h)))
 	defer conn.CloseWithError(0, "")
 }
 
 // TestInteropParallelDials: many concurrent dials to one host; each
 // ClientConfig is single-use, so this exercises per-dial state.
 func TestInteropParallelDials(t *testing.T) {
-	h := newLibp2pHost(t, "ed25519")
+	h, addr := newLibp2pHost(t, "ed25519")
 	identity := newTestIdentity(t, false)
-	addr := dialAddrOf(t, h)
 
 	const n = 8
 	errs := make(chan error, n)
