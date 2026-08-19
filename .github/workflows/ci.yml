@@ -3,8 +3,8 @@ name: CI
 on:
   push:
     branches: [main]
+  # no branch filter: stacked PRs target non-main bases (e.g. quictls-handshake)
   pull_request:
-    branches: [main]
 
 env:
   GO_VERSION: "1.25"
