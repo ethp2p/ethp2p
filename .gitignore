@@ -25,10 +25,9 @@ runs/
 
 sim/simcfg/simnode/simnode
 
-.notes.md
 .work/
-.gitnexus/
 ref/
 
 .claude/
-.cachebro/
+
+.rumdl_cache/
