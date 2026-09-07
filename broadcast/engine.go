@@ -3,8 +3,6 @@ package broadcast
 import (
 	"context"
 	"sync"
-
-	"github.com/ethp2p/ethp2p/transport"
 )
 
 const defaultMaxInboundChunkStreams = 5
@@ -68,22 +66,6 @@ func NewEngine(config EngineConfig) *Engine {
 	}
 	e.wg.Go(e.run)
 	return e
-}
-
-// NotifyPeerConnected is invoked by the environment to inform us when we've
-// connected to a new peer who could potentially participate in broadcast.
-// The conn is sent through the event loop, which spawns the peer's handshake
-// and run goroutines.
-//
-// Ownership of this protocol-scoped connection is passed to the Engine. When
-// compat shares the underlying QUIC connection with libp2p, closing this value
-// closes only the borrowed ethp2p view.
-func (e *Engine) NotifyPeerConnected(conn transport.Conn) {
-	select {
-	case e.eventCh <- engineEvent{kind: evPeerConnected, conn: conn}:
-	case <-e.ctx.Done():
-		conn.Close()
-	}
 }
 
 // NotifyPeerGone reports that a peer is no longer available.
@@ -195,12 +177,15 @@ func (e *Engine) handle(ev engineEvent) {
 		e.config.Observer.OnChannelDropped(ev.channelID)
 
 	case evPeerConnected:
-		p := newPeerConn(e, ev.conn)
+		p := newPeerConn(e, ev.ctx, ev.conn)
 		channels := make([]ChannelID, 0, len(e.channels))
 		for id := range e.channels {
 			channels = append(channels, id)
 		}
 		e.wg.Go(func() { p.Run(channels) })
+		if ev.bound != nil {
+			ev.bound <- p
+		}
 
 	case evPeerHandshake:
 		if ev.err != nil {

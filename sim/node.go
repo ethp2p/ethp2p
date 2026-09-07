@@ -10,9 +10,9 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/ethp2p/ethp2p"
 	"github.com/ethp2p/ethp2p/broadcast"
 	"github.com/ethp2p/ethp2p/transport"
-	quicTransport "github.com/ethp2p/ethp2p/transport/quic"
 	"github.com/quic-go/quic-go"
 )
 
@@ -35,7 +35,7 @@ type Node interface {
 type BroadcastNode struct {
 	num      int
 	quicHost QUICHost
-	engine   *broadcast.Engine
+	stack    *ethp2p.Stack
 
 	publishFn func(broadcast.MessageID, []byte) error
 	stopFn    func()
@@ -61,7 +61,7 @@ func (n *BroadcastNode) Addr() net.Addr {
 }
 
 func (n *BroadcastNode) Start(ctx context.Context) {
-	go n.processIncomingConnections(ctx)
+	n.wg.Go(func() { n.processIncomingConnections(ctx) })
 }
 
 func (n *BroadcastNode) Close() error {
@@ -74,10 +74,10 @@ func (n *BroadcastNode) Close() error {
 	n.mu.Unlock()
 
 	n.stopFn()
-	err := n.engine.Close()
-	err2 := n.quicHost.Close()
+	hostErr := n.quicHost.Close()
+	stackErr := n.stack.Close()
 	n.wg.Wait()
-	return errors.Join(err, err2)
+	return errors.Join(hostErr, stackErr)
 }
 
 func (n *BroadcastNode) Publish(messageID string, data []byte) {
@@ -116,11 +116,7 @@ func (n *BroadcastNode) processIncomingConnections(ctx context.Context) {
 			n.logger.Error("failed to authenticate simulation peer", "addr", c.RemoteAddr())
 			continue
 		}
-		n.engine.NotifyPeerConnected(quicTransport.NewTransport(
-			c,
-			transport.Inbound,
-			simAuthInfo(n.num, remote),
-		))
+		n.serveConn(c, transport.ConnDirIn, simAuthInfo(n.num, remote))
 	}
 }
 
@@ -149,12 +145,27 @@ func (n *BroadcastNode) DialPeer(ctx context.Context, p int, addr net.Addr) erro
 	n.conns = append(n.conns, cu)
 	n.mu.Unlock()
 
-	n.engine.NotifyPeerConnected(quicTransport.NewTransport(
-		cu,
-		transport.Outbound,
-		simAuthInfo(n.num, p),
-	))
+	n.serveConn(cu, transport.ConnDirOut, simAuthInfo(n.num, p))
 	return nil
+}
+
+func (n *BroadcastNode) serveConn(conn *quic.Conn, direction transport.ConnDir, auth transport.AuthInfo) {
+	n.mu.Lock()
+	if n.closed {
+		n.mu.Unlock()
+		_ = conn.CloseWithError(0, "node closed")
+		return
+	}
+	n.wg.Go(func() {
+		err := n.stack.ServeConn(context.Background(), transport.NewQUICConn(conn, direction, auth))
+		n.mu.Lock()
+		closed := n.closed
+		n.mu.Unlock()
+		if err != nil && !closed {
+			n.logger.Error("ethp2p connection ended", "err", err)
+		}
+	})
+	n.mu.Unlock()
 }
 
 func (n *BroadcastNode) BandwidthStats() (bytesSent, bytesReceived int) {
@@ -183,10 +194,10 @@ func (n *BroadcastNode) ResetBandwidthStats() (bytesSent, bytesReceived int) {
 	return ds, dr
 }
 
-// newBroadcastNode assembles a BroadcastNode from an already-configured
-// engine, channel closures, and a raw PacketConn. Used by NewECNodeFunc.
+// newBroadcastNode assembles a BroadcastNode from an initialized stack,
+// channel closures, and a raw PacketConn. Used by NewECNodeFunc.
 func newBroadcastNode(
-	engine *broadcast.Engine,
+	stack *ethp2p.Stack,
 	publishFn func(broadcast.MessageID, []byte) error,
 	stopFn func(),
 	recvCh chan broadcast.FullMessage,
@@ -196,14 +207,14 @@ func newBroadcastNode(
 ) (*BroadcastNode, error) {
 	qh, err := NewQUICHost(conn)
 	if err != nil {
-		engine.Close()
+		stack.Close()
 		return nil, fmt.Errorf("failed to create quic host: %w", err)
 	}
 
 	return &BroadcastNode{
 		num:        nodeNum,
 		quicHost:   qh,
-		engine:     engine,
+		stack:      stack,
 		publishFn:  publishFn,
 		stopFn:     stopFn,
 		recvCh:     recvCh,

@@ -15,10 +15,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ethp2p/ethp2p"
 	"github.com/ethp2p/ethp2p/broadcast"
 	"github.com/ethp2p/ethp2p/broadcast/rs"
 	"github.com/ethp2p/ethp2p/transport"
-	quicpkg "github.com/ethp2p/ethp2p/transport/quic"
 	"github.com/quic-go/quic-go"
 )
 
@@ -158,6 +158,7 @@ func generateTestTLSConfig() (*tls.Config, error) {
 
 type testNode struct {
 	host   *quicHost
+	stack  *ethp2p.Stack
 	engine *broadcast.Engine
 	obs    *testObserver
 	peerID broadcast.PeerID
@@ -168,10 +169,19 @@ func newTestNode(t *testing.T, peerID broadcast.PeerID) *testNode {
 	host := newQUICHost(t)
 	obs := newTestObserver()
 	cfg := broadcast.EngineConfig{Observer: obs}
-	engine := broadcast.NewEngine(cfg)
-	t.Cleanup(func() { engine.Close() })
+	stack := &ethp2p.Stack{
+		PeerID:          transport.PeerID(peerID),
+		Key:             testKey{},
+		BroadcastConfig: cfg,
+	}
+	if err := stack.Init(); err != nil {
+		t.Fatal(err)
+	}
+	engine := stack.BroadcastEngine()
+	t.Cleanup(func() { _ = stack.Close() })
 	return &testNode{
 		host:   host,
+		stack:  stack,
 		engine: engine,
 		obs:    obs,
 		peerID: peerID,
@@ -347,7 +357,7 @@ func starEdges(n int) []edge {
 }
 
 // connectNodes establishes QUIC connections between nodes according to
-// the edge list and notifies their engines. Blocks until all connections
+// the edge list and serves them through their stacks. Blocks until all connections
 // are established but does NOT wait for handshakes to complete.
 func connectNodes(t *testing.T, nodes []*testNode, edges []edge) {
 	t.Helper()
@@ -385,10 +395,20 @@ func connectNodes(t *testing.T, nodes []*testNode, edges []edge) {
 			Remote: transport.PeerID(to.peerID),
 		}
 		toAuth := transport.AuthInfo{Local: fromAuth.Remote, Remote: fromAuth.Local}
-		from.engine.NotifyPeerConnected(quicpkg.NewTransport(dialRaw, transport.Outbound, fromAuth))
-		to.engine.NotifyPeerConnected(quicpkg.NewTransport(acceptRaw, transport.Inbound, toAuth))
+		go from.stack.ServeConn(
+			context.Background(),
+			transport.NewQUICConn(dialRaw, transport.Outbound, fromAuth),
+		)
+		go to.stack.ServeConn(
+			context.Background(),
+			transport.NewQUICConn(acceptRaw, transport.Inbound, toAuth),
+		)
 	}
 }
+
+type testKey struct{}
+
+func (testKey) Sign([]byte) ([]byte, error) { return nil, nil }
 
 // waitForPeers polls the observer's peer subscription count for the given
 // channel until the expected count is reached.

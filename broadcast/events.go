@@ -28,6 +28,8 @@ type engineEvent struct {
 	channelID ChannelID
 	peerID    PeerID
 	conn      transport.Conn      // evPeerConnected
+	ctx       context.Context     // evPeerConnected
+	bound     chan<- *PeerConn    // evPeerConnected
 	peer      *PeerConn           // evPeerHandshake
 	channels  []ChannelID         // evPeerHandshake
 	err       error               // evPeerHandshake

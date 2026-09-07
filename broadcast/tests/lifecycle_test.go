@@ -4,6 +4,7 @@ package tests
 
 import (
 	"testing"
+	"time"
 
 	"github.com/ethp2p/ethp2p/broadcast"
 )
@@ -63,11 +64,22 @@ func TestEngineCloseCleanup(t *testing.T) {
 
 			b.obs.waitDecoded(t, channelID, "close-msg", defaultTimeout)
 
-			// Close both engines; should not hang or panic.
+			// Close one engine while its peer connection is still live. The
+			// stack must observe protocol termination and close its view.
 			thA.stop()
 			thB.stop()
-			a.engine.Close()
-			b.engine.Close()
+			engineClosed := make(chan error, 1)
+			go func() { engineClosed <- a.engine.Close() }()
+			select {
+			case err := <-engineClosed:
+				if err != nil {
+					t.Fatal(err)
+				}
+			case <-time.After(defaultTimeout):
+				t.Fatal("Engine.Close blocked on a live peer")
+			}
+			a.stack.Close()
+			b.stack.Close()
 		})
 	}
 }

@@ -306,11 +306,11 @@ type blackholeTransport struct {
 	ctx context.Context
 }
 
-func (t *blackholeTransport) SupportsStreams() bool              { return true }
-func (t *blackholeTransport) SupportsDatagrams() bool            { return false }
-func (t *blackholeTransport) Close() error                       { return nil }
-func (t *blackholeTransport) ConnectionStats() (uint64, uint64)  { return 0, 0 }
-func (t *blackholeTransport) Direction() transport.ConnDirection { return transport.Outbound }
+func (t *blackholeTransport) SupportsStreams() bool             { return true }
+func (t *blackholeTransport) SupportsDatagrams() bool           { return false }
+func (t *blackholeTransport) Close() error                      { return nil }
+func (t *blackholeTransport) ConnectionStats() (uint64, uint64) { return 0, 0 }
+func (t *blackholeTransport) Direction() transport.ConnDir      { return transport.ConnDirOut }
 func (t *blackholeTransport) AuthInfo() transport.AuthInfo {
 	return testAuthInfo("bench-local", "bench-remote")
 }
@@ -319,7 +319,7 @@ func (t *blackholeTransport) OpenStream(_ context.Context) (transport.Stream, er
 	return &blackholeStream{}, nil
 }
 
-func (t *blackholeTransport) AcceptStream(ctx context.Context) (transport.Stream, error) {
+func (t *blackholeTransport) AcceptBiStream(ctx context.Context) (transport.Stream, error) {
 	<-ctx.Done()
 	return nil, ctx.Err()
 }

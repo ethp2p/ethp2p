@@ -5,8 +5,6 @@ import (
 	"time"
 
 	bcastpb "github.com/ethp2p/ethp2p/broadcast/pb"
-	"github.com/ethp2p/ethp2p/protocol"
-	protopb "github.com/ethp2p/ethp2p/protocol/pb"
 	"github.com/ethp2p/ethp2p/transport"
 )
 
@@ -19,38 +17,66 @@ const (
 	sessCodeReconstructed uint64 = 0x01
 )
 
-// runAcceptLoop accepts inbound unidirectional streams and dispatches them
-// by protocol type. Both SESS and CHUNK streams are handled in per-stream
-// goroutines. CHUNK streams are bounded by chunkSem.
-func (p *PeerConn) runAcceptLoop() {
-	defer p.cancel()
-	for {
-		s, err := p.conn.AcceptUniStream(p.ctx)
-		if err != nil {
-			return
-		}
-		prot, err := protocol.ReadSelector(s)
-		if err != nil {
-			s.CancelRead(0)
-			continue
-		}
-		switch prot {
-		case protopb.Protocol_PROTOCOL_SESS:
-			p.wg.Go(func() { p.runInboundSession(s) })
-		case protopb.Protocol_PROTOCOL_CHUNK:
-			select {
-			case p.chunkSem <- struct{}{}:
-				p.wg.Go(func() {
-					defer func() { <-p.chunkSem }()
-					p.processChunk(s)
-				})
-			default:
-				s.CancelRead(0)
-			}
-		default:
-			s.CancelRead(0)
-		}
+func (p *PeerConn) acceptBcast(stream transport.ReceiveStream) {
+	if !p.bcastAccepted.CompareAndSwap(false, true) {
+		stream.CancelRead(0)
+		return
 	}
+	select {
+	case p.bcastIn <- stream:
+	case <-p.ctx.Done():
+		stream.CancelRead(0)
+	}
+}
+
+func (p *PeerConn) acceptSession(stream transport.ReceiveStream) {
+	if !p.awaitHandshake(stream) {
+		return
+	}
+	p.handlersMu.Lock()
+	defer p.handlersMu.Unlock()
+	if !p.ready {
+		stream.CancelRead(0)
+		return
+	}
+	p.wg.Go(func() { p.runInboundSession(stream) })
+}
+
+func (p *PeerConn) acceptChunk(stream transport.ReceiveStream) {
+	if !p.awaitHandshake(stream) {
+		return
+	}
+	p.handlersMu.Lock()
+	defer p.handlersMu.Unlock()
+	if !p.ready {
+		stream.CancelRead(0)
+		return
+	}
+	select {
+	case p.chunkSem <- struct{}{}:
+		p.wg.Go(func() {
+			defer func() { <-p.chunkSem }()
+			p.processChunk(stream)
+		})
+	case <-p.ctx.Done():
+		stream.CancelRead(0)
+	}
+}
+
+func (p *PeerConn) awaitHandshake(stream transport.ReceiveStream) bool {
+	if !p.bcastAccepted.Load() {
+		stream.CancelRead(0)
+		return false
+	}
+	select {
+	case <-p.handshakeDone:
+		if p.handshakeOK {
+			return true
+		}
+	case <-p.ctx.Done():
+	}
+	stream.CancelRead(0)
+	return false
 }
 
 // runInboundSession reads frames from an inbound SESS stream.

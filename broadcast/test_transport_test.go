@@ -56,18 +56,18 @@ func newHighCapTransport(ctx context.Context) *testTransport {
 	}
 }
 
-func (t *testTransport) SupportsStreams() bool              { return true }
-func (t *testTransport) SupportsDatagrams() bool            { return true }
-func (t *testTransport) Close() error                       { return nil }
-func (t *testTransport) ConnectionStats() (uint64, uint64)  { return 0, 0 }
-func (t *testTransport) Direction() transport.ConnDirection { return transport.Outbound }
-func (t *testTransport) AuthInfo() transport.AuthInfo       { return t.auth.Clone() }
+func (t *testTransport) SupportsStreams() bool             { return true }
+func (t *testTransport) SupportsDatagrams() bool           { return true }
+func (t *testTransport) Close() error                      { return nil }
+func (t *testTransport) ConnectionStats() (uint64, uint64) { return 0, 0 }
+func (t *testTransport) Direction() transport.ConnDir      { return transport.ConnDirOut }
+func (t *testTransport) AuthInfo() transport.AuthInfo      { return t.auth }
 
 func (t *testTransport) OpenStream(ctx context.Context) (transport.Stream, error) {
 	return &testStream{send: t.streamSend, recv: t.streamRecv, ctx: t.ctx}, nil
 }
 
-func (t *testTransport) AcceptStream(ctx context.Context) (transport.Stream, error) {
+func (t *testTransport) AcceptBiStream(context.Context) (transport.Stream, error) {
 	return &testStream{send: t.streamSend, recv: t.streamRecv, ctx: t.ctx}, nil
 }
 
@@ -75,7 +75,7 @@ func (t *testTransport) OpenUniStream(ctx context.Context) (transport.SendStream
 	return &testStream{send: t.streamSend, recv: t.streamRecv, ctx: t.ctx}, nil
 }
 
-func (t *testTransport) AcceptUniStream(ctx context.Context) (transport.ReceiveStream, error) {
+func (t *testTransport) AcceptUniStream(context.Context) (transport.ReceiveStream, error) {
 	return &testStream{send: t.streamSend, recv: t.streamRecv, ctx: t.ctx}, nil
 }
 
@@ -182,14 +182,16 @@ func newTestBcastStreams(ctx context.Context) (transport.SendStream, transport.R
 func registerTestPeer(e *Engine, id PeerID, conn transport.Conn, version ProtocolVersion, channels []ChannelID) {
 	bcastOut, bcastIn := newTestBcastStreams(e.ctx)
 	p := &PeerConn{
-		id:      id,
-		version: version,
-		conn:    conn,
-		ctrlOut: bcastOut,
-		ctrlIn:  bcastIn,
-		ctrlQ:   make(chan peerCtrlEvent, ctrlQCap),
-		wakeCh:  make(chan struct{}, 1),
-		engine:  e,
+		id:            id,
+		version:       version,
+		conn:          conn,
+		ctrlOut:       bcastOut,
+		ctrlIn:        bcastIn,
+		ctrlQ:         make(chan peerCtrlEvent, ctrlQCap),
+		wakeCh:        make(chan struct{}, 1),
+		engine:        e,
+		done:          make(chan struct{}),
+		handshakeDone: make(chan struct{}),
 	}
 	p.ctx, p.cancel = context.WithCancel(e.ctx)
 	slotCh := make(chan slotUpdate, slotUpdateCap)

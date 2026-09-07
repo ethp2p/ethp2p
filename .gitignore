@@ -28,6 +28,6 @@ sim/simcfg/simnode/simnode
 .work/
 ref/
 
-.claude/
 
 .rumdl_cache/
+.DS_Store

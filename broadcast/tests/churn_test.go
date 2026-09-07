@@ -33,9 +33,9 @@ func TestPeerDisconnectMidSession(t *testing.T) {
 			waitForPeers(t, b.obs, channelID, 1, defaultTimeout)
 			waitForPeers(t, c.obs, channelID, 1, defaultTimeout)
 
-			// Disconnect B by closing its engine. The deferred thB.stop()
+			// Disconnect B by closing its stack. The deferred thB.stop()
 			// handles channel cleanup after context cancellation.
-			b.engine.Close()
+			b.stack.Close()
 
 			// A publishes; C should still receive.
 			payload := testPayload(4096)
