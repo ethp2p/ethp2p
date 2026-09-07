@@ -7,10 +7,13 @@ import (
 	"log/slog"
 	"net"
 	"os"
+	"strconv"
 	"time"
 
+	"github.com/ethp2p/ethp2p"
 	"github.com/ethp2p/ethp2p/broadcast"
 	"github.com/ethp2p/ethp2p/broadcast/rs"
+	"github.com/ethp2p/ethp2p/transport"
 	"gopkg.in/yaml.v3"
 )
 
@@ -167,15 +170,23 @@ type StrategyFunc func(nodeNum int, conn net.PacketConn, logger *slog.Logger, ob
 // are handled here; the scheme is the only varying part.
 func ECStrategy[CI broadcast.ChunkIdent, R broadcast.Wire, P broadcast.Wire](scheme broadcast.Scheme[CI, R, P]) StrategyFunc {
 	return func(nodeNum int, conn net.PacketConn, logger *slog.Logger, obs broadcast.Observer, tw *TraceWriter) (Node, error) {
-		engine := broadcast.NewEngine(broadcast.EngineConfig{Observer: obs})
+		stack := &ethp2p.Stack{
+			PeerID:          transport.PeerID(strconv.Itoa(nodeNum)),
+			Key:             simKey{},
+			BroadcastConfig: broadcast.EngineConfig{Observer: obs},
+		}
+		if err := stack.Init(); err != nil {
+			return nil, fmt.Errorf("initialize stack: %w", err)
+		}
+		engine := stack.BroadcastEngine()
 		channel := broadcast.AttachChannel(engine, "broadcast", scheme)
 		recvCh := make(chan broadcast.FullMessage, 64)
 		if err := channel.Subscribe(recvCh); err != nil {
-			engine.Close()
+			stack.Close()
 			return nil, fmt.Errorf("failed to subscribe: %w", err)
 		}
 		return newBroadcastNode(
-			engine,
+			stack,
 			func(mid broadcast.MessageID, data []byte) error { return channel.Publish(mid, data) },
 			channel.Stop,
 			recvCh,
@@ -183,6 +194,10 @@ func ECStrategy[CI broadcast.ChunkIdent, R broadcast.Wire, P broadcast.Wire](sch
 		)
 	}
 }
+
+type simKey struct{}
+
+func (simKey) Sign([]byte) ([]byte, error) { return nil, nil }
 
 // GossipsubStrategy returns a StrategyFunc that creates gossipsub nodes.
 func GossipsubStrategy() StrategyFunc {

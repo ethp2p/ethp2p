@@ -1,0 +1,320 @@
+package transport
+
+import (
+	"bytes"
+	"fmt"
+	"io"
+	"sync"
+	"testing"
+	"time"
+)
+
+func TestEthp2pNegotiationRoutesBothProtocols(t *testing.T) {
+	ctx := testContext(t)
+	_, clientLib, clientEth, _ := newEndpoint(t)
+	_, serverLib, serverEth, serverPC := newEndpoint(t)
+	clientListener := listen(t, clientLib, clientEth)
+	serverListener := listen(t, serverLib, serverEth)
+
+	clientEthConn, err := clientEth.Dial(ctx, serverPC.LocalAddr(), serverEth.PeerID())
+	if err != nil {
+		t.Fatal(err)
+	}
+	clientLibConn, err := clientListener.Accept(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	serverLibConn, err := serverListener.Accept(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	serverEthConn, err := serverEth.Accept(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	libPayload := []byte("/multistream/1.0.0\n")
+	libWire := frame(libPayload)
+	libOut, err := clientLibConn.OpenStreamSync(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := libOut.Write(libWire); err != nil {
+		t.Fatal(err)
+	}
+	libIn, err := serverLibConn.AcceptStream(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gotLib := make([]byte, len(libWire))
+	if _, err := io.ReadFull(libIn, gotLib); err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(gotLib, libWire) {
+		t.Fatalf("libp2p stream = %x, want %x", gotLib, libWire)
+	}
+
+	ethWire := append(frame([]byte{1}), 'o', 'k')
+	ethOut, err := clientEthConn.OpenStream(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ethOut.Write(ethWire); err != nil {
+		t.Fatal(err)
+	}
+	ethIn, err := serverEthConn.AcceptBiStream(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gotEth := make([]byte, len(ethWire))
+	if _, err := io.ReadFull(ethIn, gotEth); err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(gotEth, ethWire) {
+		t.Fatalf("ethp2p stream = %x, want original %x", gotEth, ethWire)
+	}
+
+	uniPayload := []byte("unidirectional")
+	uniOut, err := clientEthConn.OpenUniStream(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := uniOut.Write(uniPayload); err != nil {
+		t.Fatal(err)
+	}
+	if err := uniOut.Close(); err != nil {
+		t.Fatal(err)
+	}
+	uniIn, err := serverEthConn.AcceptUniStream(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gotUni, err := io.ReadAll(uniIn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(gotUni, uniPayload) {
+		t.Fatalf("ethp2p unidirectional stream = %x, want %x", gotUni, uniPayload)
+	}
+}
+
+// bidi is the common stream surface for echo and round-trip on either view.
+type bidi interface {
+	io.Reader
+	io.Writer
+	Close() error
+	SetDeadline(time.Time) error
+}
+
+// TestSimultaneousStreamsOnBothViews exercises open, write, read, and close
+// on the libp2p and ethp2p views of one shared connection at the same time,
+// initiated from both ends, plus unidirectional streams on ethp2p.
+func TestSimultaneousStreamsOnBothViews(t *testing.T) {
+	ctx := testContext(t)
+	_, clientLib, clientEth, _ := newEndpoint(t)
+	_, serverLib, serverEth, serverPC := newEndpoint(t)
+	clientListener := listen(t, clientLib, clientEth)
+	serverListener := listen(t, serverLib, serverEth)
+
+	clientEthConn, err := clientEth.Dial(ctx, serverPC.LocalAddr(), serverEth.PeerID())
+	if err != nil {
+		t.Fatal(err)
+	}
+	clientLibConn, err := clientListener.Accept(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	serverLibConn, err := serverListener.Accept(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	serverEthConn, err := serverEth.Accept(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Four concurrent streams per view keeps delivery bursts within the
+	// per-view queue capacity (deliveryQueueLen), which resets excess.
+	const streams = 4
+	payloadLen := 64 << 10
+	deadline := time.Now().Add(4 * time.Second)
+
+	var wg sync.WaitGroup
+	errs := make(chan error, 128)
+	fail := func(err error) {
+		if err != nil {
+			errs <- err
+		}
+	}
+
+	// echo reads a stream to FIN, writes the payload back, and closes.
+	// The spawning goroutine owns the WaitGroup counter.
+	echo := func(s bidi) {
+		fail(s.SetDeadline(deadline))
+		got, err := io.ReadAll(s)
+		if err != nil {
+			fail(err)
+			return
+		}
+		if _, err := s.Write(got); err != nil {
+			fail(err)
+			return
+		}
+		fail(s.Close())
+	}
+
+	// roundTrip writes a payload, closes, and verifies the echo.
+	roundTrip := func(s bidi, payload []byte) {
+		fail(s.SetDeadline(deadline))
+		if _, err := s.Write(payload); err != nil {
+			fail(err)
+			return
+		}
+		if err := s.Close(); err != nil {
+			fail(err)
+			return
+		}
+		got, err := io.ReadAll(s)
+		if err != nil {
+			fail(err)
+			return
+		}
+		if !bytes.Equal(got, payload) {
+			fail(fmt.Errorf("echo = %d bytes, want %d", len(got), len(payload)))
+		}
+	}
+
+	// Receiving side: accept and echo concurrently on both views, from
+	// both ends.
+	for range streams {
+		wg.Add(4)
+		go func() {
+			defer wg.Done()
+			s, err := serverLibConn.AcceptStream(ctx)
+			if err != nil {
+				fail(err)
+				return
+			}
+			echo(s)
+		}()
+		go func() {
+			defer wg.Done()
+			s, err := serverEthConn.AcceptBiStream(ctx)
+			if err != nil {
+				fail(err)
+				return
+			}
+			echo(s)
+		}()
+		go func() {
+			defer wg.Done()
+			s, err := clientLibConn.AcceptStream(ctx)
+			if err != nil {
+				fail(err)
+				return
+			}
+			echo(s)
+		}()
+		go func() {
+			defer wg.Done()
+			s, err := clientEthConn.AcceptBiStream(ctx)
+			if err != nil {
+				fail(err)
+				return
+			}
+			echo(s)
+		}()
+	}
+
+	// Sending side: round-trip streams opened from both ends on both
+	// views. Every bidi stream is routed by its first length-delimited
+	// frame: a payload starting with '/' goes to libp2p, anything else to
+	// ethp2p, so the wires carry the routing frame.
+	for i := range streams {
+		libWire := frame(append([]byte("/echo/"), bytes.Repeat([]byte{byte(i)}, payloadLen)...))
+		ethWire := frame(append([]byte{byte(i)}, bytes.Repeat([]byte{0xaa}, payloadLen)...))
+		wg.Add(4)
+		go func() {
+			defer wg.Done()
+			s, err := clientLibConn.OpenStreamSync(ctx)
+			if err != nil {
+				fail(err)
+				return
+			}
+			roundTrip(s, libWire)
+		}()
+		go func() {
+			defer wg.Done()
+			s, err := clientEthConn.OpenStream(ctx)
+			if err != nil {
+				fail(err)
+				return
+			}
+			roundTrip(s, ethWire)
+		}()
+		go func() {
+			defer wg.Done()
+			s, err := serverLibConn.OpenStreamSync(ctx)
+			if err != nil {
+				fail(err)
+				return
+			}
+			roundTrip(s, libWire)
+		}()
+		go func() {
+			defer wg.Done()
+			s, err := serverEthConn.OpenStream(ctx)
+			if err != nil {
+				fail(err)
+				return
+			}
+			roundTrip(s, ethWire)
+		}()
+	}
+
+	// Unidirectional streams route to ethp2p on the receiving side only;
+	// exercise open, write, close against receive and read.
+	// Accept order is arbitrary, so every unidirectional stream carries
+	// the same payload.
+	payload := bytes.Repeat([]byte{0x55}, payloadLen)
+	for range streams {
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			s, err := clientEthConn.OpenUniStream(ctx)
+			if err != nil {
+				fail(err)
+				return
+			}
+			fail(s.SetWriteDeadline(deadline))
+			if _, err := s.Write(payload); err != nil {
+				fail(err)
+				return
+			}
+			fail(s.Close())
+		}()
+		go func() {
+			defer wg.Done()
+			s, err := serverEthConn.AcceptUniStream(ctx)
+			if err != nil {
+				fail(err)
+				return
+			}
+			fail(s.SetReadDeadline(deadline))
+			got, err := io.ReadAll(s)
+			if err != nil {
+				fail(err)
+				return
+			}
+			if !bytes.Equal(got, payload) {
+				fail(fmt.Errorf("unidirectional echo = %d bytes, want %d", len(got), len(payload)))
+			}
+		}()
+	}
+
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		t.Error(err)
+	}
+}

@@ -178,13 +178,15 @@ func testPeer(peerID PeerID) *PeerConn {
 	_ = cancel
 	bcastOut, _ := newTestBcastStreams(ctx)
 	return &PeerConn{
-		id:      peerID,
-		conn:    newHighCapTransport(context.Background()),
-		ctrlOut: bcastOut,
-		ctrlQ:   make(chan peerCtrlEvent, ctrlQCap),
-		wakeCh:  make(chan struct{}, 1),
-		ctx:     ctx,
-		cancel:  cancel,
+		id:            peerID,
+		conn:          newHighCapTransport(context.Background()),
+		ctrlOut:       bcastOut,
+		ctrlQ:         make(chan peerCtrlEvent, ctrlQCap),
+		wakeCh:        make(chan struct{}, 1),
+		ctx:           ctx,
+		cancel:        cancel,
+		done:          make(chan struct{}),
+		handshakeDone: make(chan struct{}),
 	}
 }
 

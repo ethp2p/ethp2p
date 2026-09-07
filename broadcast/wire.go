@@ -49,4 +49,3 @@ func ReadFrame(r io.Reader, msg proto.Message) error {
 	}
 	return nil
 }
-

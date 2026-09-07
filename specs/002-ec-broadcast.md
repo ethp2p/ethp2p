@@ -149,24 +149,22 @@ It results in better parallelization and flow control, and more compact signalin
 We can also lean into QUIC features to optimize further via stream prioritization
 and congestion control fine-tuning.
 
-To identify the stream type, every stream opens with a protocol selector:
-a Protobuf message containing a single enum field identifying the stream type: `BCAST`, `SESS`,
-or `CHUNK`.
-The selector appears once at the start of the stream.
-Streams with unknown selectors are cancelled.
+To identify the stream type, every stream opens with a registered protocol
+codepoint encoded as a Protobuf unsigned varint. An unsigned-varint frame
+length comes before the codepoint. The shared QUIC dispatcher consumes that
+frame length and leaves the codepoint unread for ethp2p.
 
-```protobuf
-enum Protocol {
-  PROTOCOL_UNSPECIFIED  = 0;
-  PROTOCOL_BCAST        = 1;
-  PROTOCOL_SESS         = 2;
-  PROTOCOL_CHUNK        = 3;
-}
+The ethp2p stack registers these stable broadcast codepoints during startup:
 
-message Selector {
-  Protocol protocol = 1;
-}
-```
+| Codepoint | Protocol |
+| --------: | -------- |
+| `0x01`    | `BCAST`  |
+| `0x02`    | `SESS`   |
+| `0x03`    | `CHUNK`  |
+
+Codepoint `0` is invalid. Codepoint `0x2f` is reserved because its encoded byte
+is `/`, which the shared QUIC dispatcher routes to libp2p. Streams with
+unregistered codepoints are cancelled.
 
 ## 4. BCAST: control protocol
 
@@ -251,16 +249,16 @@ so the framework SHOULD retroactively enroll new subscribers into active session
 // state inline); subsequent frames are Update.
 message Sess {
   oneof frame {
-    Open session_open = 1;
+    Open   session_open   = 1;
     Update routing_update = 2;
   }
 
   // Open is the first frame on a SESS stream, establishing the session.
   message Open {
-    string channel = 1;
+    string channel    = 1;
     string message_id = 2;
-    bytes preamble = 3;
-    bytes initial_update = 4;
+    bytes  preamble   = 3;
+    bytes  initial_update = 4;
   }
 
   // Update carries an opaque routing state update (e.g. bitmap, have list).
@@ -389,7 +387,7 @@ It never transitions backward.
 ```text
                          TakeChunk returns          Decode succeeds
   ┌────────────┐         complete=true         ┌──────────┐            ┌───────────────┐
-  │ Consuming  │ ───────────────────────────→ │ Decoding │ ────────→ │ Reconstructed │
+  │ Consuming  │ ────────────────────────────→ │ Decoding │ ─────────→ │ Reconstructed │
   └────────────┘                               └──────────┘            └───────────────┘
 
   Origin sessions start here:

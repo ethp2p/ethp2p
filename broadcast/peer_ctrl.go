@@ -5,7 +5,6 @@ import (
 
 	bcastpb "github.com/ethp2p/ethp2p/broadcast/pb"
 	"github.com/ethp2p/ethp2p/protocol"
-	protopb "github.com/ethp2p/ethp2p/protocol/pb"
 	"github.com/ethp2p/ethp2p/transport"
 )
 
@@ -28,10 +27,9 @@ type slotUpdate struct {
 	slot <-chan peerSendChunk // nil = slot removed
 }
 
-// runCtrlReader reads all control messages from the peer's inbound
-// BCAST stream (bcastIn) and dispatches them. PeerConn.Close() closes
-// the transport, which unblocks the blocking read. On read error, cancels
-// the peer context to cascade shutdown to all goroutines.
+// runCtrlReader reads and dispatches control messages from the peer's inbound
+// BCAST stream. On read error, it stops the peer. Stack then closes the
+// connection, which releases any other blocked stream reads.
 func (p *PeerConn) runCtrlReader() {
 	defer p.cancel()
 	var msg bcastpb.Bcast
@@ -157,7 +155,7 @@ func (p *PeerConn) handleSessionOpen(e peerOpenSession, sessions map[sessionKey]
 		p.cancel()
 		return
 	}
-	if err := protocol.WriteSelector(s, protopb.Protocol_PROTOCOL_SESS); err != nil {
+	if err := protocol.WriteSelector(s, sessionCodepoint); err != nil {
 		s.CancelWrite(0)
 		p.cancel()
 		return
@@ -268,7 +266,7 @@ func (p *PeerConn) doSendChunk(e peerSendChunk) (int, error) {
 
 	s.SetWriteDeadline(time.Now().Add(chunkWriteTimeout))
 
-	if err := protocol.WriteSelector(s, protopb.Protocol_PROTOCOL_CHUNK); err != nil {
+	if err := protocol.WriteSelector(s, chunkCodepoint); err != nil {
 		s.CancelWrite(0)
 		return 0, ErrChunkWriteFail
 	}

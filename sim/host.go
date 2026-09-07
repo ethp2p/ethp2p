@@ -49,12 +49,20 @@ func (q *QUICHost) Dial(ctx context.Context, addr net.Addr, conf *quic.Config) (
 	if conf == nil {
 		conf = q.Config.Clone()
 	}
-	return q.Transport.Dial(ctx, addr, tlsConf, conf)
+	raw, err := q.Transport.Dial(ctx, addr, tlsConf, conf)
+	if err != nil {
+		return nil, err
+	}
+	return raw, nil
 }
 
 // Accept accepts a new connection.
 func (q *QUICHost) Accept(ctx context.Context) (*quic.Conn, error) {
-	return q.Listener.Accept(ctx)
+	raw, err := q.Listener.Accept(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return raw, nil
 }
 
 func (q *QUICHost) Close() error {
