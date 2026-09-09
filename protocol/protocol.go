@@ -1,234 +1,150 @@
 package protocol
 
 import (
-	"context"
 	"encoding/binary"
 	"errors"
 	"fmt"
 	"io"
 	"slices"
-	"sync"
-
-	"github.com/ethp2p/ethp2p/transport"
-	"google.golang.org/protobuf/encoding/protowire"
 )
+
+// MaxSelectors bounds the number of selectors in one connection advertisement.
+const MaxSelectors = 1024
 
 var (
-	ErrInvalidDescriptor = errors.New("invalid protocol descriptor")
-	ErrReservedCodepoint = errors.New("reserved protocol codepoint")
-	ErrCodepointInUse    = errors.New("protocol codepoint already registered")
-	ErrNameInUse         = errors.New("protocol name already registered")
-	ErrInvalidHandler    = errors.New("invalid protocol handler")
+	ErrReservedSelector = errors.New("reserved protocol selector")
+	ErrInvalidSelectors = errors.New("invalid protocol selector list")
+	ErrTooManySelectors = errors.New("too many protocol selectors")
 )
 
-// Codepoint identifies an ethp2p stream protocol on the wire.
-type Codepoint uint64
+// Selector identifies an ethp2p stream protocol on the wire.
+type Selector uint64
 
-// Descriptor describes one registered stream protocol.
-type Descriptor struct {
-	Codepoint Codepoint
-	Name      string
-}
-
-// Handlers accepts inbound streams for one protocol on one connection. A
-// handler takes ownership of its stream and may apply subsystem backpressure.
-type Handlers struct {
-	AcceptBi  func(transport.Stream)
-	AcceptUni func(transport.ReceiveStream)
-}
-
-// ConnectionHandlers holds one subsystem's handlers and lifetime for one
-// connection.
-type ConnectionHandlers struct {
-	ByCodepoint map[Codepoint]Handlers
-	Done        <-chan struct{}
-	Close       func()
-}
-
-// Set describes one subsystem's protocols and binds their handlers to one
-// connection.
-type Set struct {
-	Descriptors []Descriptor
-	Bind        func(context.Context, transport.Conn) (ConnectionHandlers, error)
-}
-
-// Registry holds the protocol sets enabled by one ethp2p stack. Its zero value
-// is ready to use.
-type Registry struct {
-	mu     sync.RWMutex
-	byCode map[Codepoint]Descriptor
-	sets   []Set
-}
-
-// Register adds a protocol set to the registry.
-func (r *Registry) Register(set Set) error {
-	if len(set.Descriptors) == 0 {
-		return fmt.Errorf("%w: empty set", ErrInvalidDescriptor)
-	}
-	if set.Bind == nil {
-		return fmt.Errorf("%w: nil bind function", ErrInvalidHandler)
-	}
-
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	for i, descriptor := range set.Descriptors {
-		if descriptor.Name == "" {
-			return fmt.Errorf("%w: empty name", ErrInvalidDescriptor)
-		}
-		if err := validateCodepoint(descriptor.Codepoint); err != nil {
-			return err
-		}
-		for codepoint, registered := range r.byCode {
-			if codepoint == descriptor.Codepoint {
-				return fmt.Errorf("%w: %d is %q", ErrCodepointInUse, descriptor.Codepoint, registered.Name)
-			}
-			if registered.Name == descriptor.Name {
-				return fmt.Errorf("%w: %q uses %d", ErrNameInUse, descriptor.Name, codepoint)
-			}
-		}
-		for _, pending := range set.Descriptors[i+1:] {
-			if pending.Codepoint == descriptor.Codepoint {
-				return fmt.Errorf("%w: %d appears twice", ErrCodepointInUse, descriptor.Codepoint)
-			}
-			if pending.Name == descriptor.Name {
-				return fmt.Errorf("%w: %q appears twice", ErrNameInUse, descriptor.Name)
-			}
-		}
-	}
-	if r.byCode == nil {
-		r.byCode = make(map[Codepoint]Descriptor)
-	}
-	descriptors := slices.Clone(set.Descriptors)
-	for _, descriptor := range descriptors {
-		r.byCode[descriptor.Codepoint] = descriptor
-	}
-	set.Descriptors = descriptors
-	r.sets = append(r.sets, set)
-	return nil
-}
-
-// Bind binds every registered set to conn and returns its flat route table.
-func (r *Registry) Bind(ctx context.Context, conn transport.Conn) (*Routes, error) {
-	r.mu.RLock()
-	sets := slices.Clone(r.sets)
-	r.mu.RUnlock()
-
-	routes := &Routes{
-		byCode: make(map[Codepoint]Handlers),
-		done:   make(chan struct{}),
-		closed: make(chan struct{}),
-	}
-	for _, set := range sets {
-		bound, err := set.Bind(ctx, conn)
-		if err != nil {
-			routes.Close()
-			return nil, err
-		}
-		if bound.Done != nil {
-			routes.watch(bound.Done)
-		}
-		if bound.Close != nil {
-			routes.close = append(routes.close, bound.Close)
-		}
-		declared := make(map[Codepoint]struct{}, len(set.Descriptors))
-		for _, descriptor := range set.Descriptors {
-			declared[descriptor.Codepoint] = struct{}{}
-			handler, ok := bound.ByCodepoint[descriptor.Codepoint]
-			if !ok || handler.AcceptBi == nil && handler.AcceptUni == nil {
-				routes.Close()
-				return nil, fmt.Errorf("%w: %s", ErrInvalidHandler, descriptor.Name)
-			}
-			routes.byCode[descriptor.Codepoint] = handler
-		}
-		for codepoint := range bound.ByCodepoint {
-			if _, ok := declared[codepoint]; !ok {
-				routes.Close()
-				return nil, fmt.Errorf("%w: undeclared codepoint %d", ErrInvalidHandler, codepoint)
-			}
-		}
-	}
-	return routes, nil
-}
-
-// Routes holds the handlers bound to one connection.
-type Routes struct {
-	byCode   map[Codepoint]Handlers
-	done     chan struct{}
-	closed   chan struct{}
-	close    []func()
-	doneOnce sync.Once
-	once     sync.Once
-	watchers sync.WaitGroup
-}
-
-// Lookup returns the handlers bound to codepoint.
-func (r *Routes) Lookup(codepoint Codepoint) (Handlers, bool) {
-	handler, ok := r.byCode[codepoint]
-	return handler, ok
-}
-
-// Done closes when a bound protocol set stops using the connection.
-func (r *Routes) Done() <-chan struct{} {
-	return r.done
-}
-
-// Close releases every bound protocol set in reverse order.
-func (r *Routes) Close() {
-	r.once.Do(func() {
-		close(r.closed)
-		r.watchers.Wait()
-		r.signalDone()
-		for i := len(r.close) - 1; i >= 0; i-- {
-			r.close[i]()
-		}
-	})
-}
-
-func (r *Routes) watch(done <-chan struct{}) {
-	r.watchers.Go(func() {
-		select {
-		case <-done:
-			r.signalDone()
-		case <-r.closed:
-		}
-	})
-}
-
-func (r *Routes) signalDone() {
-	r.doneOnce.Do(func() { close(r.done) })
-}
-
-// WriteSelector writes one Protobuf unsigned-varint codepoint at the start of
-// a stream. The selected protocol applies to the rest of the stream.
-func WriteSelector(w io.Writer, codepoint Codepoint) error {
-	if err := validateCodepoint(codepoint); err != nil {
+// WriteSelector writes one unsigned-varint selector. The selected protocol
+// applies to the rest of the stream; this function does not add a length
+// prefix or close w.
+func WriteSelector(w io.Writer, selector Selector) error {
+	if err := validateSelector(selector); err != nil {
 		return err
 	}
 
-	selector := protowire.AppendVarint(nil, uint64(codepoint))
-
-	n, err := w.Write(selector)
-	if err == nil && n != len(selector) {
+	encoded := binary.AppendUvarint(nil, uint64(selector))
+	n, err := w.Write(encoded)
+	if err == nil && n != len(encoded) {
 		return io.ErrShortWrite
 	}
 	return err
 }
 
-// ReadSelector reads the stream's initial unsigned-varint codepoint. It validates
-// the encoding only; the caller resolves the codepoint to a handler. If r buffers
-// reads, the handler must continue reading through r to retain protocol data.
-func ReadSelector(r io.ByteReader) (Codepoint, error) {
+// ReadSelector reads one unsigned-varint selector. Selector policy is resolved
+// by the caller, so this codec operation deliberately accepts reserved values.
+func ReadSelector(r io.ByteReader) (Selector, error) {
 	value, err := binary.ReadUvarint(r)
-	return Codepoint(value), err
+	return Selector(value), err
 }
 
-func validateCodepoint(codepoint Codepoint) error {
-	switch codepoint {
+// Canonical returns selectors in ascending order without duplicates. The
+// returned slice does not share backing storage with selectors.
+func Canonical(selectors []Selector) []Selector {
+	canonical := slices.Clone(selectors)
+	slices.Sort(canonical)
+	return slices.Compact(canonical)
+}
+
+// Intersect returns the common selectors in ascending order. a and b must
+// already be canonical (ascending and duplicate-free).
+func Intersect(a, b []Selector) []Selector {
+	intersection := make([]Selector, 0, min(len(a), len(b)))
+	for i, j := 0, 0; i < len(a) && j < len(b); {
+		switch {
+		case a[i] < b[j]:
+			i++
+		case a[i] > b[j]:
+			j++
+		default:
+			intersection = append(intersection, a[i])
+			i++
+			j++
+		}
+	}
+	return intersection
+}
+
+// WriteSelectors writes a strictly ascending, duplicate-free selector list as
+// consecutive unsigned varints. It validates the complete list before writing
+// anything, and never closes w.
+func WriteSelectors(w io.Writer, selectors []Selector) error {
+	if err := validateSelectors(selectors); err != nil {
+		return err
+	}
+	if len(selectors) == 0 {
+		return nil
+	}
+
+	encoded := make([]byte, 0, len(selectors)*binary.MaxVarintLen64)
+	for _, selector := range selectors {
+		encoded = binary.AppendUvarint(encoded, uint64(selector))
+	}
+	n, err := w.Write(encoded)
+	if err == nil && n != len(encoded) {
+		return io.ErrShortWrite
+	}
+	return err
+}
+
+// ReadSelectors reads consecutive unsigned-varint selectors until a clean EOF
+// marks the end of the advertisement. Advertisements must be strictly
+// ascending, duplicate-free, within MaxSelectors, and must not contain values
+// reserved by the stream protocol.
+func ReadSelectors(r io.ByteReader) ([]Selector, error) {
+	selectors := make([]Selector, 0)
+	for {
+		value, err := binary.ReadUvarint(r)
+		// Only an exact EOF denotes a clean end; ReadUvarint may propagate
+		// a wrapped EOF after consuming part of an unterminated varint.
+		if err == io.EOF {
+			return selectors, nil
+		}
+		if err != nil {
+			return nil, err
+		}
+		if len(selectors) >= MaxSelectors {
+			return nil, fmt.Errorf("%w: maximum is %d", ErrTooManySelectors, MaxSelectors)
+		}
+
+		selector := Selector(value)
+		if err := validateSelector(selector); err != nil {
+			return nil, err
+		}
+		if len(selectors) > 0 && selector <= selectors[len(selectors)-1] {
+			return nil, fmt.Errorf("%w: selectors must be strictly ascending", ErrInvalidSelectors)
+		}
+		selectors = append(selectors, selector)
+	}
+}
+
+func validateSelector(selector Selector) error {
+	switch selector {
 	case 0:
-		return fmt.Errorf("%w: 0", ErrReservedCodepoint)
-	case Codepoint('/'):
-		return fmt.Errorf("%w: %d conflicts with libp2p", ErrReservedCodepoint, codepoint)
+		return fmt.Errorf("%w: 0", ErrReservedSelector)
+	case Selector('/'):
+		return fmt.Errorf("%w: %d conflicts with libp2p", ErrReservedSelector, selector)
 	default:
 		return nil
 	}
+}
+
+func validateSelectors(selectors []Selector) error {
+	if len(selectors) > MaxSelectors {
+		return fmt.Errorf("%w: maximum is %d", ErrTooManySelectors, MaxSelectors)
+	}
+	for i, selector := range selectors {
+		if err := validateSelector(selector); err != nil {
+			return err
+		}
+		if i > 0 && selector <= selectors[i-1] {
+			return fmt.Errorf("%w: selectors must be strictly ascending", ErrInvalidSelectors)
+		}
+	}
+	return nil
 }

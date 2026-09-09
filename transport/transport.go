@@ -39,7 +39,7 @@ const (
 const connQueueLen = 16
 
 // TransportShared owns a QUIC endpoint shared by libp2p and ethp2p.
-// The application hands it to the ethp2p stack, which closes it on shutdown.
+// The application owns its shutdown; ethp2p.Stack only borrows its connections.
 // A closed transport cannot be restarted.
 type TransportShared struct {
 	raw        *quic.Transport
@@ -55,7 +55,7 @@ type TransportShared struct {
 	ethQ chan Conn
 
 	// attached records the sides that have attached.
-	attached uint32
+	attached atomic.Uint32
 
 	// Listener startup is attempted once, including on failure.
 	// lnOnce synchronizes access to lnErr between concurrent attaches.
@@ -107,7 +107,7 @@ func (t *TransportShared) Ethp2p() *TransportEth { return &TransportEth{t} }
 
 // Close stops listening, closes all connections, and waits for transport
 // goroutines to exit. It does not close the supplied packet connection.
-// Repeated calls are safe. The ethp2p stack owns this call on shutdown.
+// Repeated calls are safe. The application owns this call on shutdown.
 // Closing [TransportEth] has the same effect; [TransportLib.Close] is a no-op.
 func (t *TransportShared) Close() error { return t.shutdown() }
 
@@ -117,7 +117,7 @@ func (t *TransportShared) attach(side side) (claimed bool, err error) {
 	if t.ctx.Err() != nil {
 		return false, errClosed
 	}
-	claimed = atomic.OrUint32(&t.attached, uint32(side))&uint32(side) == 0
+	claimed = t.attached.Or(uint32(side))&uint32(side) == 0
 	return claimed, t.ensureListener()
 }
 
@@ -157,7 +157,7 @@ func (t *TransportShared) acceptLoop(ln *quic.Listener) {
 		case AlpnLibp2p:
 			// peer is legacy: the libp2p view is the whole connection
 			select {
-			case t.libQ <- &exclusiveConnLib{raw}:
+			case t.libQ <- raw:
 			default:
 				_ = raw.CloseWithError(appFailure, errClosed.Error())
 			}

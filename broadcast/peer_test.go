@@ -47,12 +47,12 @@ func TestHandshakeUsesAuthenticatedPeerIDs(t *testing.T) {
 	leftResult := make(chan result, 1)
 	rightResult := make(chan result, 1)
 	go func() {
-		got, _, _, err := left.handshake(ctx, nil)
-		leftResult <- result{peer: got, err: err}
+		_, _, err := left.handshake(ctx, nil)
+		leftResult <- result{peer: left.ID(), err: err}
 	}()
 	go func() {
-		got, _, _, err := right.handshake(ctx, nil)
-		rightResult <- result{peer: got, err: err}
+		_, _, err := right.handshake(ctx, nil)
+		rightResult <- result{peer: right.ID(), err: err}
 	}()
 	routeErr := make(chan error, 2)
 	routeBcast := func(peer *PeerConn, conn *testTransport) {
@@ -67,8 +67,8 @@ func TestHandshakeUsesAuthenticatedPeerIDs(t *testing.T) {
 			routeErr <- err
 			return
 		}
-		if codepoint != bcastCodepoint {
-			routeErr <- fmt.Errorf("codepoint = %d, want %d", codepoint, bcastCodepoint)
+		if codepoint != BCAST {
+			routeErr <- fmt.Errorf("selector = %d, want %d", codepoint, BCAST)
 			return
 		}
 		peer.acceptBcast(bufferedReceiveStream{ReceiveStream: stream, reader: reader})
@@ -107,7 +107,7 @@ func TestHandshakeRequiresAuthenticatedPeerIDs(t *testing.T) {
 		ctx,
 		&uniHandshakeTransport{testTransport: raw},
 	)
-	if _, _, _, err := peer.handshake(ctx, nil); err == nil {
+	if _, _, err := peer.handshake(ctx, nil); err == nil {
 		t.Fatal("handshake accepted empty authenticated identity")
 	}
 }

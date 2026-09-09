@@ -10,9 +10,13 @@ import (
 )
 
 const (
-	// deliveryQueueLen bounds streams classified but not yet handed over.
+	// deliveryQueueLen bounds bidirectional streams classified but not yet handed over.
 	// Delivery is expected immediate, so this is just a safety buffer.
 	deliveryQueueLen = 4
+	// uniDeliveryQueueLen absorbs short bursts while the application consumes
+	// streams. Sixteen is a burst allowance, not a limit on accepted traffic:
+	// a full queue pauses acceptance until delivery or connection shutdown.
+	uniDeliveryQueueLen = 16
 	// maxPendingStreamsPerConn limits concurrent stream classifications.
 	// Fragmentation, packet loss, or a stalled peer can delay classification;
 	// the bound limits resources held by streams awaiting their first bytes.
@@ -31,14 +35,14 @@ type sharedConn struct {
 	// View-closed bitfield over sideLibp2p|sideEthp2p. The raw connection
 	// closes once both views are closed, so closing one view never kills
 	// the other. Accessed atomically.
-	closed uint32
+	closed atomic.Uint32
 }
 
 // closeSide releases one view and closes the connection when both are released.
 func (s *sharedConn) closeSide(want side, code quic.ApplicationErrorCode, reason string) {
-	// OrUint32 returns the pre-OR value. RMW atomicity means no other close
+	// Or returns the pre-OR value. RMW atomicity means no other close
 	// can land between its read and write, so old|want is the post-OR value.
-	if atomic.OrUint32(&s.closed, uint32(want))|uint32(want) == uint32(sideLibp2p|sideEthp2p) {
+	if s.closed.Or(uint32(want))|uint32(want) == uint32(sideLibp2p|sideEthp2p) {
 		_ = s.conn.CloseWithError(code, reason)
 	}
 }
@@ -54,7 +58,7 @@ func (t *TransportShared) split(raw *quic.Conn) *sharedConn {
 		sem:       make(chan struct{}, maxPendingStreamsPerConn),
 		libp2pBi:  make(chan *quic.Stream, deliveryQueueLen),
 		ethp2pBi:  make(chan *quic.Stream, deliveryQueueLen),
-		ethp2pUni: make(chan *quic.ReceiveStream, deliveryQueueLen),
+		ethp2pUni: make(chan *quic.ReceiveStream, uniDeliveryQueueLen),
 	}
 	for range maxPendingStreamsPerConn {
 		sc.sem <- struct{}{}
@@ -126,6 +130,9 @@ func (r *sharedConn) drainBidi(wg *sync.WaitGroup) {
 }
 
 // drainUni routes all incoming unidirectional streams to ethp2p; libp2p uses none.
+// A full queue holds at most one additional accepted stream here and stops
+// acceptance, leaving QUIC to enforce stream and flow-control limits. This
+// wait does not occupy bidirectional classifier slots.
 func (r *sharedConn) drainUni() {
 	ctx := r.conn.Context()
 
@@ -142,8 +149,6 @@ func (r *sharedConn) drainUni() {
 		case <-ctx.Done():
 			// connection was closed, no stream-level cleanup needed
 			return
-		default:
-			stream.CancelRead(streamReset)
 		}
 	}
 }

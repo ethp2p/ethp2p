@@ -18,6 +18,13 @@ const (
 )
 
 func (p *PeerConn) acceptBcast(stream transport.ReceiveStream) {
+	if stream == nil {
+		return
+	}
+	if p.ctx != nil && p.ctx.Err() != nil {
+		stream.CancelRead(0)
+		return
+	}
 	if !p.bcastAccepted.CompareAndSwap(false, true) {
 		stream.CancelRead(0)
 		return
@@ -39,7 +46,17 @@ func (p *PeerConn) acceptSession(stream transport.ReceiveStream) {
 		stream.CancelRead(0)
 		return
 	}
-	p.wg.Go(func() { p.runInboundSession(stream) })
+	select {
+	case p.sessionSem <- struct{}{}:
+		p.wg.Go(func() {
+			defer func() { <-p.sessionSem }()
+			p.runInboundSession(stream)
+		})
+	case <-p.ctx.Done():
+		stream.CancelRead(0)
+	default:
+		stream.CancelRead(0)
+	}
 }
 
 func (p *PeerConn) acceptChunk(stream transport.ReceiveStream) {
@@ -64,10 +81,6 @@ func (p *PeerConn) acceptChunk(stream transport.ReceiveStream) {
 }
 
 func (p *PeerConn) awaitHandshake(stream transport.ReceiveStream) bool {
-	if !p.bcastAccepted.Load() {
-		stream.CancelRead(0)
-		return false
-	}
 	select {
 	case <-p.handshakeDone:
 		if p.handshakeOK {
@@ -84,6 +97,10 @@ func (p *PeerConn) awaitHandshake(stream transport.ReceiveStream) bool {
 // subsequent frames are RoutingUpdate. EOF signals the peer has
 // reconstructed (completed).
 func (p *PeerConn) runInboundSession(s transport.ReceiveStream) {
+	stop := onCancel(p.ctx, func() { s.CancelRead(0) })
+	defer stop()
+	defer s.CancelRead(0)
+
 	// Read the first frame: must be SessionOpen.
 	var frame bcastpb.Sess
 	if err := ReadFrame(s, &frame); err != nil {
@@ -121,8 +138,7 @@ func (p *PeerConn) runInboundSession(s transport.ReceiveStream) {
 	for {
 		frame.Reset()
 		if err := ReadFrame(s, &frame); err != nil {
-			var re *transport.StreamResetError
-			if errors.As(err, &re) && re.Code == sessCodeReconstructed {
+			if re, ok := errors.AsType[*transport.StreamResetError](err); ok && re.Code == sessCodeReconstructed {
 				select {
 				case ch <- channelPeerReconstructed{messageID: messageID, peerID: p.id}:
 				case <-p.ctx.Done():
@@ -143,12 +159,13 @@ func (p *PeerConn) runInboundSession(s transport.ReceiveStream) {
 }
 
 func (p *PeerConn) processChunk(s transport.ReceiveStream) {
-	// TODO(raulk): s.Reset() on failure and timeout?
-	//
 	s.SetReadDeadline(time.Now().Add(chunkReadTimeout))
 
 	var frame bcastpb.Chunk_Header
-	if err := ReadFrame(s, &frame); err != nil {
+	stop := onCancel(p.ctx, func() { s.CancelRead(0) })
+	err := ReadFrame(s, &frame)
+	stop()
+	if err != nil || p.ctx.Err() != nil {
 		s.CancelRead(0)
 		return
 	}

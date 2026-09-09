@@ -16,8 +16,8 @@ import (
 // dispatch path: drainPolls -> sendChunk -> PeerConn slot enqueue.
 //
 // Each iteration adds one chunk to the strategy's poll queue and calls
-// drainPolls, then waits for it to be pushed to all peer outbound
-// queues. The countingStrategy counts dispatches atomically.
+// drainPolls, then processes completions from every peer. The benchmark owns
+// session state, matching the production channel's single-goroutine ownership.
 func BenchmarkSessionDispatchFanout(b *testing.B) {
 	for _, numPeers := range []int{1, 10, 50} {
 		b.Run(fmt.Sprintf("peers=%d", numPeers), func(b *testing.B) {
@@ -27,12 +27,7 @@ func BenchmarkSessionDispatchFanout(b *testing.B) {
 }
 
 func benchmarkSessionDispatchFanout(b *testing.B, numPeers int) {
-	var committed atomic.Int64
-	strat := &countingStrategy{
-		committed: &committed,
-		numPeers:  numPeers,
-		peers:     make(map[PeerID]struct{}),
-	}
+	strat := &dispatchStrategy{}
 
 	channelInbox := make(chan channelEvent, 4096)
 
@@ -41,15 +36,15 @@ func benchmarkSessionDispatchFanout(b *testing.B, numPeers int) {
 		id:     "bench-channel",
 		scheme: Scheme[*testChunk, *testRouting, *testPreamble]{
 			NewCI: func() *testChunk { return &testChunk{} },
-			NewR:  func() *testRouting { r := testRouting{}; return &r },
+			NewR:  func() *testRouting { return &testRouting{} },
 		},
 		inbox: channelInbox,
-		ctx:   context.Background(),
+		ctx:   b.Context(),
 	}
 	s := tr.newSession("bench-msg", []byte("preamble"), false, strat)
 	defer s.Close()
 
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(b.Context())
 	defer cancel()
 
 	peerIDs := make([]PeerID, numPeers)
@@ -92,30 +87,9 @@ func benchmarkSessionDispatchFanout(b *testing.B, numPeers int) {
 		}(peer)
 	}
 
-	// Wait for all peers to be attached.
-	spinUntil(func() bool {
-		return committed.Load() >= int64(numPeers)
-	})
-	committed.Store(0)
-
-	// Drain channel inbox in background, feeding send completions back to the session.
-	go func() {
-		for {
-			select {
-			case evt := <-channelInbox:
-				if sc, ok := evt.(channelChunkSent); ok {
-					s.handleSendComplete(sc.peerID, sc.handle, sc.err, sc.size)
-				}
-			case <-ctx.Done():
-				return
-			}
-		}
-	}()
-
-	b.ResetTimer()
 	b.ReportAllocs()
 
-	for i := range b.N {
+	for i := 0; b.Loop(); i++ {
 		// Enqueue a dispatch for each peer.
 		for _, pid := range peerIDs {
 			strat.pollQueue = append(strat.pollQueue, ChunkDispatch[*testChunk]{
@@ -125,18 +99,21 @@ func benchmarkSessionDispatchFanout(b *testing.B, numPeers int) {
 			})
 		}
 		s.drainPolls()
-		// Wait for all peers to have this chunk committed.
-		target := int64((i + 1) * numPeers)
-		spinUntil(func() bool {
-			return committed.Load() >= target
-		})
+		for range numPeers {
+			event := <-channelInbox
+			completion, ok := event.(channelChunkSent)
+			if !ok {
+				b.Fatalf("unexpected completion event %T", event)
+			}
+			s.handleSendComplete(completion.peerID, completion.handle, completion.err, completion.size)
+		}
 	}
 }
 
 // BenchmarkOutboundLoopChunkThroughput measures the raw throughput of
 // PeerConn's outbound loop processing chunk send events via chunk slots.
 func BenchmarkOutboundLoopChunkThroughput(b *testing.B) {
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(b.Context())
 	defer cancel()
 
 	conn := &blackholeTransport{ctx: ctx}
@@ -187,6 +164,7 @@ func BenchmarkOutboundLoopChunkThroughput(b *testing.B) {
 	b.ReportAllocs()
 
 	sessionDone := make(chan struct{})
+	// The completion drain below is timed too; b.Loop would stop timing first.
 	for i := range b.N {
 		chunkOutbox <- peerSendChunk{
 			peerID:      "bench-peer",
@@ -224,73 +202,60 @@ func BenchmarkSubscriptionChurn(b *testing.B) {
 	channel := AttachChannel[*testChunk, *testRouting, *testPreamble](engine, "bench-channel", scheme)
 	defer channel.Stop()
 
-	b.ResetTimer()
 	b.ReportAllocs()
 
-	for i := range b.N {
+	for i := 0; b.Loop(); i++ {
 		pid := PeerID(fmt.Sprintf("churn-%d", i))
-		conn, _ := newTestTransportPair(context.Background())
-		registerTestPeer(engine, pid, conn, ProtocolVersion(1), []ChannelID{"bench-channel"})
-		engine.NotifyPeerGone(pid)
+		conn, _ := newTestTransportPair(b.Context())
+		peer := registerTestPeer(engine, pid, conn, ProtocolVersion(1), []ChannelID{"bench-channel"})
+		engine.notifyPeerGone(peer)
 	}
 }
 
-// countingStrategy is a minimal Strategy for benchmarks. It returns
-// chunks from a pre-filled poll queue and counts dispatches atomically
-// for lock-free synchronization.
-type countingStrategy struct {
-	committed *atomic.Int64
-	numPeers  int
-	peers     map[PeerID]struct{}
+// dispatchStrategy returns chunks from a pre-filled benchmark poll queue.
+type dispatchStrategy struct {
 	pollQueue []ChunkDispatch[*testChunk]
 }
 
-func (cs *countingStrategy) HaveChunk(_ *testChunk) bool { return false }
-func (cs *countingStrategy) VerifyChunk(_ PeerID, _ *testChunk, _ []byte) Verdict {
+func (cs *dispatchStrategy) HaveChunk(_ *testChunk) bool { return false }
+func (cs *dispatchStrategy) VerifyChunk(_ PeerID, _ *testChunk, _ []byte) Verdict {
 	return VerdictAccepted
 }
-func (cs *countingStrategy) Verified() <-chan VerifyResult[*testChunk] { return nil }
-func (cs *countingStrategy) DedupKey(_ *testChunk) []byte              { return nil }
-func (cs *countingStrategy) AttachPeer(peer PeerID, _ *PeerSessionStats) {
-	cs.peers[peer] = struct{}{}
-	cs.committed.Add(1) // signal that peer is attached
-}
+func (cs *dispatchStrategy) Verified() <-chan VerifyResult[*testChunk] { return nil }
+func (cs *dispatchStrategy) DedupKey(_ *testChunk) []byte              { return nil }
+func (cs *dispatchStrategy) AttachPeer(PeerID, *PeerSessionStats)      {}
+func (cs *dispatchStrategy) DetachPeer(PeerID, bool)                   {}
 
-func (cs *countingStrategy) DetachPeer(peer PeerID, _ bool) {
-	delete(cs.peers, peer)
-}
-
-func (cs *countingStrategy) TakeChunk(_ PeerID, _ *testChunk, _ []byte, _ *DedupCancel) (Verdict, bool, error) {
+func (cs *dispatchStrategy) TakeChunk(_ PeerID, _ *testChunk, _ []byte, _ *DedupCancel) (Verdict, bool, error) {
 	return VerdictAccepted, false, nil
 }
 
-func (cs *countingStrategy) Decode() ([]byte, error) { return nil, nil }
+func (cs *dispatchStrategy) Decode() ([]byte, error) { return nil, nil }
 
-func (cs *countingStrategy) RoutingUpdate(_ PeerID, _ *testRouting) ([]ChunkHandle, error) {
+func (cs *dispatchStrategy) RoutingUpdate(_ PeerID, _ *testRouting) ([]ChunkHandle, error) {
 	return nil, nil
 }
 
-func (cs *countingStrategy) PollChunks() []ChunkDispatch[*testChunk] {
+func (cs *dispatchStrategy) PollChunks() []ChunkDispatch[*testChunk] {
 	if len(cs.pollQueue) == 0 {
 		return nil
 	}
 	chunks := cs.pollQueue
 	cs.pollQueue = nil
-	cs.committed.Add(int64(len(chunks)))
 	return chunks
 }
 
-func (cs *countingStrategy) PollRouting(force bool) (*testRouting, bool) {
+func (cs *dispatchStrategy) PollRouting(force bool) (*testRouting, bool) {
 	return nil, false
 }
 
-func (cs *countingStrategy) ChunkSent(_ PeerID, _ ChunkHandle, _ error) {}
+func (cs *dispatchStrategy) ChunkSent(_ PeerID, _ ChunkHandle, _ error) {}
 
-func (cs *countingStrategy) Progress() (have, need int) { return 0, 0 }
+func (cs *dispatchStrategy) Progress() (have, need int) { return 0, 0 }
 
-func (cs *countingStrategy) Work() <-chan struct{} { return nil }
+func (cs *dispatchStrategy) Work() <-chan struct{} { return nil }
 
-func (cs *countingStrategy) Close() error { return nil }
+func (cs *dispatchStrategy) Close() error { return nil }
 
 // spinUntil busy-waits for the condition, yielding the processor between checks.
 func spinUntil(cond func() bool) {

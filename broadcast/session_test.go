@@ -185,7 +185,6 @@ func testPeer(peerID PeerID) *PeerConn {
 		wakeCh:        make(chan struct{}, 1),
 		ctx:           ctx,
 		cancel:        cancel,
-		done:          make(chan struct{}),
 		handshakeDone: make(chan struct{}),
 	}
 }

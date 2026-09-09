@@ -28,10 +28,17 @@ type slotUpdate struct {
 }
 
 // runCtrlReader reads and dispatches control messages from the peer's inbound
-// BCAST stream. On read error, it stops the peer. Stack then closes the
-// connection, which releases any other blocked stream reads.
+// BCAST stream. On read error, it stops this broadcast binding. The borrowed
+// connection remains owned by the application; stream cancellation is limited
+// to streams owned by this binding.
 func (p *PeerConn) runCtrlReader() {
 	defer p.cancel()
+	if !p.awaitHandshake(p.ctrlIn) {
+		return
+	}
+	stop := onCancel(p.ctx, func() { p.ctrlIn.CancelRead(0) })
+	defer stop()
+	defer p.ctrlIn.CancelRead(0)
 	var msg bcastpb.Bcast
 	for {
 		msg.Reset()
@@ -41,11 +48,11 @@ func (p *PeerConn) runCtrlReader() {
 		switch {
 		case msg.GetChannelSubscribe() != nil:
 			channelID := ChannelID(msg.GetChannelSubscribe().Channel)
-			p.engine.onPeerSubscribed(p.id, channelID)
+			p.engine.onPeerSubscribed(p, channelID)
 
 		case msg.GetChannelUnsubscribe() != nil:
 			channelID := ChannelID(msg.GetChannelUnsubscribe().Channel)
-			p.engine.onPeerUnsubscribed(p.id, channelID)
+			p.engine.onPeerUnsubscribed(p, channelID)
 
 		default:
 			// Unknown message type; skip.
@@ -59,6 +66,14 @@ const slotUpdateCap = 32
 // subscribe/unsubscribe. It owns the sessions map and SESS stream writes.
 func (p *PeerConn) runCtrlLoop(slotCh chan<- slotUpdate) {
 	sessions := make(map[sessionKey]*peerSessionState)
+	defer func() {
+		p.ctrlOut.CancelWrite(0)
+		for _, session := range sessions {
+			if session.sessOut != nil {
+				session.sessOut.CancelWrite(0)
+			}
+		}
+	}()
 	for {
 		select {
 		case ctrl := <-p.ctrlQ:
@@ -155,7 +170,9 @@ func (p *PeerConn) handleSessionOpen(e peerOpenSession, sessions map[sessionKey]
 		p.cancel()
 		return
 	}
-	if err := protocol.WriteSelector(s, sessionCodepoint); err != nil {
+	stop := onCancel(p.ctx, func() { s.CancelWrite(0) })
+	defer stop()
+	if err := protocol.WriteSelector(s, SESS); err != nil {
 		s.CancelWrite(0)
 		p.cancel()
 		return
@@ -190,6 +207,8 @@ func (p *PeerConn) handleSessionOpen(e peerOpenSession, sessions map[sessionKey]
 // writeCtrl writes a control frame to the outbound BCAST stream. On
 // failure, cancels the peer context so all goroutines shut down.
 func (p *PeerConn) writeCtrl(msg *bcastpb.Bcast) error {
+	stop := onCancel(p.ctx, func() { p.ctrlOut.CancelWrite(0) })
+	defer stop()
 	if err := WriteFrame(p.ctrlOut, msg); err != nil {
 		p.cancel()
 		return err
@@ -203,6 +222,9 @@ func (p *PeerConn) handleSendRoutingUpdate(e peerSendRouting, sessions map[sessi
 	if ss == nil || ss.sessOut == nil {
 		return
 	}
+	stream := ss.sessOut
+	stop := onCancel(p.ctx, func() { stream.CancelWrite(0) })
+	defer stop()
 	frame := &bcastpb.Sess{Frame: &bcastpb.Sess_RoutingUpdate{RoutingUpdate: &bcastpb.Sess_Update{
 		Data: e.update,
 	}}}
@@ -265,8 +287,10 @@ func (p *PeerConn) doSendChunk(e peerSendChunk) (int, error) {
 	}
 
 	s.SetWriteDeadline(time.Now().Add(chunkWriteTimeout))
+	stop := onCancel(p.ctx, func() { s.CancelWrite(0) })
+	defer stop()
 
-	if err := protocol.WriteSelector(s, chunkCodepoint); err != nil {
+	if err := protocol.WriteSelector(s, CHUNK); err != nil {
 		s.CancelWrite(0)
 		return 0, ErrChunkWriteFail
 	}

@@ -7,13 +7,11 @@ import (
 	"log/slog"
 	"net"
 	"os"
-	"strconv"
 	"time"
 
 	"github.com/ethp2p/ethp2p"
 	"github.com/ethp2p/ethp2p/broadcast"
 	"github.com/ethp2p/ethp2p/broadcast/rs"
-	"github.com/ethp2p/ethp2p/transport"
 	"gopkg.in/yaml.v3"
 )
 
@@ -166,27 +164,37 @@ func (rc *RunConfig) LoadTopology() (Topology, error) {
 type StrategyFunc func(nodeNum int, conn net.PacketConn, logger *slog.Logger, obs broadcast.Observer, tw *TraceWriter) (Node, error)
 
 // ECStrategy returns a StrategyFunc that creates broadcast nodes using
-// the given erasure coding scheme. Engine, channel, and subscription setup
-// are handled here; the scheme is the only varying part.
+// the given erasure coding scheme. The application owns the stack, engine,
+// transport endpoint, and all serving goroutines.
 func ECStrategy[CI broadcast.ChunkIdent, R broadcast.Wire, P broadcast.Wire](scheme broadcast.Scheme[CI, R, P]) StrategyFunc {
 	return func(nodeNum int, conn net.PacketConn, logger *slog.Logger, obs broadcast.Observer, tw *TraceWriter) (Node, error) {
-		stack := &ethp2p.Stack{
-			PeerID:          transport.PeerID(strconv.Itoa(nodeNum)),
-			Key:             simKey{},
-			BroadcastConfig: broadcast.EngineConfig{Observer: obs},
+		stack := new(ethp2p.Stack)
+		subsystem, err := stack.RegisterSubsystem("broadcast", broadcast.BCAST, broadcast.SESS, broadcast.CHUNK)
+		if err != nil {
+			return nil, fmt.Errorf("register broadcast subsystem: %w", err)
 		}
-		if err := stack.Init(); err != nil {
-			return nil, fmt.Errorf("initialize stack: %w", err)
+		peers := make(chan *ethp2p.Peer, 64)
+		streams := make(chan ethp2p.StreamEvent, 1024)
+		if err := subsystem.NotifyPeers(peers); err != nil {
+			return nil, fmt.Errorf("configure broadcast peer notifications: %w", err)
 		}
-		engine := stack.BroadcastEngine()
+		if err := subsystem.NotifyStreams(streams); err != nil {
+			return nil, fmt.Errorf("configure broadcast stream notifications: %w", err)
+		}
+
+		engine := broadcast.NewEngine(broadcast.EngineConfig{Observer: obs})
 		channel := broadcast.AttachChannel(engine, "broadcast", scheme)
 		recvCh := make(chan broadcast.FullMessage, 64)
 		if err := channel.Subscribe(recvCh); err != nil {
-			stack.Close()
+			channel.Stop()
+			_ = engine.Close()
 			return nil, fmt.Errorf("failed to subscribe: %w", err)
 		}
 		return newBroadcastNode(
 			stack,
+			engine,
+			peers,
+			streams,
 			func(mid broadcast.MessageID, data []byte) error { return channel.Publish(mid, data) },
 			channel.Stop,
 			recvCh,
@@ -194,10 +202,6 @@ func ECStrategy[CI broadcast.ChunkIdent, R broadcast.Wire, P broadcast.Wire](sch
 		)
 	}
 }
-
-type simKey struct{}
-
-func (simKey) Sign([]byte) ([]byte, error) { return nil, nil }
 
 // GossipsubStrategy returns a StrategyFunc that creates gossipsub nodes.
 func GossipsubStrategy() StrategyFunc {

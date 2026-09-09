@@ -3,6 +3,7 @@ package broadcast
 import (
 	"context"
 
+	ethp2p "github.com/ethp2p/ethp2p"
 	bcastpb "github.com/ethp2p/ethp2p/broadcast/pb"
 	"github.com/ethp2p/ethp2p/transport"
 )
@@ -16,7 +17,8 @@ type engineEventKind uint8
 const (
 	evChannelCreated engineEventKind = iota + 1
 	evChannelRemoved
-	evPeerConnected
+	evPeerEvent
+	evStreamEvent
 	evPeerHandshake
 	evPeerGone
 	evPeerSubscribed
@@ -26,11 +28,9 @@ const (
 type engineEvent struct {
 	kind      engineEventKind
 	channelID ChannelID
-	peerID    PeerID
-	conn      transport.Conn      // evPeerConnected
-	ctx       context.Context     // evPeerConnected
-	bound     chan<- *PeerConn    // evPeerConnected
-	peer      *PeerConn           // evPeerHandshake
+	appPeer   *ethp2p.Peer        // evPeerEvent
+	stream    ethp2p.StreamEvent  // evStreamEvent
+	peer      *PeerConn           // handshake, departure, and subscription events
 	channels  []ChannelID         // evPeerHandshake
 	err       error               // evPeerHandshake
 	inbox     chan<- channelEvent // evChannelCreated

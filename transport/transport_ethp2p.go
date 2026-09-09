@@ -6,8 +6,8 @@ import (
 )
 
 // TransportEth provides ethp2p connections on a shared endpoint.
-// It promotes [TransportShared.Close] because the ethp2p stack owns shutdown
-// of the entire endpoint, including libp2p connections.
+// It promotes [TransportShared.Close], so closing this view shuts down the
+// entire endpoint, including libp2p connections. The application owns that call.
 type TransportEth struct{ *TransportShared }
 
 // PeerID returns the local identity.
@@ -52,7 +52,7 @@ func (t *TransportEth) Dial(ctx context.Context, addr net.Addr, expect PeerID) (
 		// If its queue is full, close the connection because no view is
 		// returned to the caller.
 		select {
-		case t.libQ <- &exclusiveConnLib{raw}:
+		case t.libQ <- raw:
 		default:
 			_ = raw.CloseWithError(appFailure, errClosed.Error())
 		}

@@ -2,12 +2,14 @@ package broadcast
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"maps"
 	"sync"
 	"sync/atomic"
 	"time"
 
+	ethp2p "github.com/ethp2p/ethp2p"
 	bcastpb "github.com/ethp2p/ethp2p/broadcast/pb"
 	"github.com/ethp2p/ethp2p/protocol"
 	"github.com/ethp2p/ethp2p/transport"
@@ -16,18 +18,30 @@ import (
 const (
 	handshakeTimeout = 10 * time.Second
 	ctrlQCap         = 16
+	streamQueueCap   = 64
 )
 
-// PeerConn holds the broadcast state for one connected remote peer. Stack owns
-// the connection and closes it after PeerConn signals that it has stopped.
+// PeerConn holds the broadcast state for one connected remote peer.
+// The application owns the borrowed connection; PeerConn only owns streams
+// handed to this broadcast binding and never closes the connection itself.
 type PeerConn struct {
-	engine  *Engine
+	engine *Engine
+	// peer is the stable root connection identity. It is separate from id
+	// because reconnects can reuse an authenticated peer ID.
+	peer    *ethp2p.Peer
 	id      PeerID
 	version ProtocolVersion
 	conn    transport.Conn
 
 	bcastAccepted atomic.Bool
 	bcastIn       chan transport.ReceiveStream
+	// The bounded handoff queues keep a stream that arrives before the BCAST
+	// handshake from blocking the engine's event actor. Dedicated loops wait for
+	// handshake completion and then start the owned stream readers.
+	sessionIn chan transport.ReceiveStream
+	chunkIn   chan transport.ReceiveStream
+	// handshakeDone publishes the engine's channel bindings, not just the
+	// completed wire handshake. Readers must wait before looking up channels.
 	handshakeDone chan struct{}
 	handshakeOnce sync.Once
 	handshakeOK   bool
@@ -54,15 +68,16 @@ type PeerConn struct {
 	// The outbound loop wakes and iterates all slots.
 	wakeCh chan struct{}
 
-	// chunkSem bounds concurrent inbound chunk stream processing.
-	chunkSem chan struct{}
+	// These semaphores bound concurrent inbound readers. Chunk readers hand
+	// payloads to sessions; SESS readers keep a slot for the stream's lifetime.
+	// Excess SESS streams are reset rather than creating unbounded goroutines.
+	chunkSem   chan struct{}
+	sessionSem chan struct{}
 
 	ctx    context.Context
 	cancel context.CancelFunc
 	wg     sync.WaitGroup
-	done   chan struct{}
 
-	stopOnce  sync.Once
 	closeOnce sync.Once
 }
 
@@ -79,14 +94,35 @@ func newPeerConn(engine *Engine, bindCtx context.Context, conn transport.Conn) *
 		ctrlQ:         make(chan peerCtrlEvent, ctrlQCap),
 		wakeCh:        make(chan struct{}, 1),
 		chunkSem:      make(chan struct{}, engine.config.maxInboundChunkStreams()),
+		sessionSem:    make(chan struct{}, streamQueueCap),
 		bcastIn:       make(chan transport.ReceiveStream, 1),
+		sessionIn:     make(chan transport.ReceiveStream, streamQueueCap),
+		chunkIn:       make(chan transport.ReceiveStream, streamQueueCap),
 		handshakeDone: make(chan struct{}),
-		done:          make(chan struct{}),
 		engine:        engine,
 		ctx:           ctx,
 		cancel:        cancel,
 	}
+	if conn != nil {
+		p.id = PeerID(conn.AuthInfo().Remote)
+	}
 	return p
+}
+
+// onCancel joins an in-flight cancellation before returning stream ownership.
+// In particular, a CHUNK header reader must not leave a callback that can reset
+// the stream after handing its payload to a session.
+func onCancel(ctx context.Context, cancel func()) func() {
+	done := make(chan struct{})
+	stop := context.AfterFunc(ctx, func() {
+		defer close(done)
+		cancel()
+	})
+	return func() {
+		if !stop() {
+			<-done
+		}
+	}
 }
 
 // channelInboxFor returns the channel event channel for the given channel, or nil.
@@ -128,55 +164,157 @@ func (p *PeerConn) UnbindChannel(channelID ChannelID) {
 // It blocks until the peer is closed or the context is cancelled.
 // ourChannels is the engine's channel list captured at spawn time.
 func (p *PeerConn) Run(ourChannels []ChannelID) error {
-	defer p.stop()
+	defer func() {
+		p.stop()
+		p.handlersMu.Lock()
+		p.ready = false
+		p.handlersMu.Unlock()
+		p.wg.Wait()
+		// Handshake may have succeeded just as Close canceled the context,
+		// before the control loops could take ownership of these streams.
+		if p.ctrlIn != nil {
+			p.ctrlIn.CancelRead(0)
+		}
+		if p.ctrlOut != nil {
+			p.ctrlOut.CancelWrite(0)
+		}
+		p.engine.notifyPeerGone(p)
+	}()
+
+	// These loops start before handshake so a SESS or CHUNK notification may
+	// wait for BCAST without preventing the BCAST notification from arriving.
+	// Close uses this same lock to prohibit new workers before joining them.
+	p.handlersMu.Lock()
+	if err := p.ctx.Err(); err != nil {
+		p.handlersMu.Unlock()
+		return err
+	}
+	p.wg.Go(p.runSessionAcceptLoop)
+	p.wg.Go(p.runChunkAcceptLoop)
+	p.handlersMu.Unlock()
 
 	hsCtx, hsCancel := context.WithTimeout(p.ctx, handshakeTimeout)
 	defer hsCancel()
 
-	peerID, version, channels, err := p.handshake(hsCtx, ourChannels)
+	version, channels, err := p.handshake(hsCtx, ourChannels)
+	hsCancel()
 	if err != nil {
 		p.finishHandshake(false)
 		p.engine.onPeerHandshake(p, nil, err)
 		return fmt.Errorf("handshake: %w", err)
 	}
 
-	p.id = peerID
 	p.version = version
 
 	// Start ctrl and data loops before any session attachment/control
 	// events can arrive via ctrlQ. The slot channel connects them:
 	// ctrl notifies data when chunk slots appear or disappear.
+	p.handlersMu.Lock()
+	if err := p.ctx.Err(); err != nil {
+		p.handlersMu.Unlock()
+		return err
+	}
 	slotCh := make(chan slotUpdate, slotUpdateCap)
 	p.wg.Go(func() { p.runCtrlLoop(slotCh) })
 	p.wg.Go(func() { p.runDataLoop(slotCh) })
 	p.wg.Go(p.runCtrlReader)
-	p.handlersMu.Lock()
 	p.ready = true
 	p.handlersMu.Unlock()
-	p.finishHandshake(true)
 
 	p.engine.onPeerHandshake(p, channels, nil)
 	<-p.ctx.Done()
-	p.handlersMu.Lock()
-	p.ready = false
-	p.handlersMu.Unlock()
-	p.wg.Wait()
-
-	// All goroutines exited; notify engine so it can unbind the peer
-	// from channels and clean up.
-	p.engine.NotifyPeerGone(p.id)
 	return nil
+}
+
+func (p *PeerConn) runSessionAcceptLoop() {
+	for {
+		select {
+		case stream := <-p.sessionIn:
+			if stream != nil {
+				p.acceptSession(stream)
+			}
+		case <-p.ctx.Done():
+			return
+		}
+	}
+}
+
+func (p *PeerConn) runChunkAcceptLoop() {
+	for {
+		select {
+		case stream := <-p.chunkIn:
+			if stream != nil {
+				p.acceptChunk(stream)
+			}
+		case <-p.ctx.Done():
+			return
+		}
+	}
+}
+
+// enqueueStream transfers an incoming stream from the root Stack adapter to
+// the stream-class loop. Queues are bounded so unread streams cannot grow
+// without limit under a peer-controlled stream burst.
+func (p *PeerConn) enqueueStream(selector protocol.Selector, stream transport.ReceiveStream) {
+	if stream == nil {
+		return
+	}
+	if p.ctx.Err() != nil {
+		stream.CancelRead(0)
+		return
+	}
+	switch selector {
+	case BCAST:
+		p.acceptBcast(stream)
+	case SESS:
+		select {
+		case p.sessionIn <- stream:
+		case <-p.ctx.Done():
+			stream.CancelRead(0)
+		default:
+			stream.CancelRead(0)
+		}
+	case CHUNK:
+		select {
+		case p.chunkIn <- stream:
+		case <-p.ctx.Done():
+			stream.CancelRead(0)
+		default:
+			stream.CancelRead(0)
+		}
+	default:
+		stream.CancelRead(0)
+	}
+}
+
+func (p *PeerConn) disposeQueuedStreams() {
+	// Engine calls Close on the same actor that enqueues streams. Run only
+	// reports completion; draining here therefore cannot race a final enqueue.
+	for _, streams := range []chan transport.ReceiveStream{p.bcastIn, p.sessionIn, p.chunkIn} {
+		for streams != nil {
+			select {
+			case stream := <-streams:
+				if stream != nil {
+					stream.CancelRead(0)
+				}
+			default:
+				streams = nil
+			}
+		}
+	}
 }
 
 // handshake performs a symmetric handshake: both sides concurrently open
 // their outbound BCAST stream (write BCAST preamble + Handshake) and
 // accept the peer's inbound BCAST stream (read BCAST preamble + Handshake).
-// Non-BCAST streams that arrive during handshake are cancelled.
-func (p *PeerConn) handshake(ctx context.Context, ourChannels []ChannelID) (PeerID, ProtocolVersion, []ChannelID, error) {
+// Data-stream queues wait independently for this handshake to complete.
+func (p *PeerConn) handshake(ctx context.Context, ourChannels []ChannelID) (ProtocolVersion, []ChannelID, error) {
 	auth := p.conn.AuthInfo()
 	if auth.Local == "" || auth.Remote == "" {
-		return "", 0, nil, fmt.Errorf("authenticated peer ID is empty")
+		return 0, nil, fmt.Errorf("authenticated peer ID is empty")
 	}
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
 	channelStrings := make([]string, len(ourChannels))
 	for i, t := range ourChannels {
 		channelStrings[i] = string(t)
@@ -195,93 +333,78 @@ func (p *PeerConn) handshake(ctx context.Context, ourChannels []ChannelID) (Peer
 		stream transport.SendStream
 		err    error
 	}
-	type readResult struct {
-		hs  *bcastpb.Bcast_Handshake
-		s   transport.ReceiveStream
-		err error
-	}
-
 	writeCh := make(chan writeResult, 1)
-	readCh := make(chan readResult, 1)
 
-	// Writer: open bcastOut, write BCAST preamble + Handshake.
+	// Send while reading, and join the writer on every exit. A failed half
+	// cancels the other half's stream I/O without closing the connection.
 	go func() {
-		s, err := p.conn.OpenUniStream(ctx)
-		if err != nil {
-			writeCh <- writeResult{err: err}
+		var result writeResult
+		defer func() {
+			if result.err != nil {
+				cancel()
+			}
+			writeCh <- result
+		}()
+		result.stream, result.err = p.conn.OpenUniStream(ctx)
+		if result.err != nil {
 			return
 		}
-		if err := protocol.WriteSelector(s, bcastCodepoint); err != nil {
-			s.CancelWrite(0)
-			writeCh <- writeResult{err: fmt.Errorf("write bcast selector: %w", err)}
-			return
+		stop := onCancel(ctx, func() { result.stream.CancelWrite(0) })
+		result.err = protocol.WriteSelector(result.stream, BCAST)
+		if result.err == nil {
+			result.err = WriteFrame(result.stream, hsMsg)
 		}
-		if err := WriteFrame(s, hsMsg); err != nil {
-			s.CancelWrite(0)
-			writeCh <- writeResult{err: fmt.Errorf("write handshake: %w", err)}
-			return
+		stop()
+		if result.err == nil {
+			result.err = ctx.Err()
 		}
-		writeCh <- writeResult{stream: s}
 	}()
 
-	// Reader: wait for Stack to route the peer's BCAST stream, then read its
-	// handshake.
-	go func() {
-		var s transport.ReceiveStream
-		select {
-		case s = <-p.bcastIn:
-		case <-ctx.Done():
-			readCh <- readResult{err: ctx.Err()}
-			return
+	var incoming transport.ReceiveStream
+	var response bcastpb.Bcast
+	var readErr error
+	select {
+	case incoming = <-p.bcastIn:
+		stop := onCancel(ctx, func() { incoming.CancelRead(0) })
+		readErr = ReadFrame(incoming, &response)
+		stop()
+		if readErr == nil {
+			readErr = ctx.Err()
 		}
-		resp := &bcastpb.Bcast{}
-		if err := ReadFrame(s, resp); err != nil {
-			s.CancelRead(0)
-			readCh <- readResult{err: fmt.Errorf("read handshake: %w", err)}
-			return
-		}
-		hs := resp.GetPeerHandshake()
-		if hs == nil {
-			s.CancelRead(0)
-			readCh <- readResult{err: ErrUnexpectedMsgType}
-			return
-		}
-		readCh <- readResult{hs: hs, s: s}
-	}()
-
-	// Wait for both sides to complete.
-	var wr writeResult
-	var rr readResult
-	for i := 0; i < 2; i++ {
-		select {
-		case wr = <-writeCh:
-			if wr.err != nil {
-				return "", 0, nil, wr.err
-			}
-		case rr = <-readCh:
-			if rr.err != nil {
-				return "", 0, nil, rr.err
-			}
-		case <-ctx.Done():
-			return "", 0, nil, ctx.Err()
-		}
+	case <-ctx.Done():
+		readErr = ctx.Err()
 	}
-
-	peerVersion, err := validateProtocolVersion(rr.hs.Version)
+	if readErr == nil && response.GetPeerHandshake() == nil {
+		readErr = ErrUnexpectedMsgType
+	}
+	if readErr != nil {
+		cancel()
+	}
+	written := <-writeCh
+	err := errors.Join(readErr, written.err)
+	var peerVersion uint32
+	if err == nil {
+		peerVersion, err = validateProtocolVersion(response.GetPeerHandshake().Version)
+	}
 	if err != nil {
-		wr.stream.CancelWrite(0)
-		rr.s.CancelRead(0)
-		return "", 0, nil, err
+		if written.stream != nil {
+			written.stream.CancelWrite(0)
+		}
+		if incoming != nil {
+			incoming.CancelRead(0)
+		}
+		return 0, nil, err
 	}
 
-	p.ctrlOut = wr.stream
-	p.ctrlIn = rr.s
+	p.ctrlOut = written.stream
+	p.ctrlIn = incoming
 
-	remoteChannels := make([]ChannelID, len(rr.hs.Channels))
-	for i, t := range rr.hs.Channels {
+	channels := response.GetPeerHandshake().Channels
+	remoteChannels := make([]ChannelID, len(channels))
+	for i, t := range channels {
 		remoteChannels[i] = ChannelID(t)
 	}
-	return PeerID(auth.Remote), ProtocolVersion(peerVersion), remoteChannels, nil
+	return ProtocolVersion(peerVersion), remoteChannels, nil
 }
 
 // Close stops the peer and waits for its broadcast goroutines.
@@ -292,15 +415,13 @@ func (p *PeerConn) Close() {
 		p.ready = false
 		p.handlersMu.Unlock()
 		p.wg.Wait()
+		p.disposeQueuedStreams()
 	})
 }
 
 func (p *PeerConn) stop() {
-	p.stopOnce.Do(func() {
-		p.cancel()
-		p.finishHandshake(false)
-		close(p.done)
-	})
+	p.cancel()
+	p.finishHandshake(false)
 }
 
 func (p *PeerConn) finishHandshake(ok bool) {
@@ -316,10 +437,7 @@ func (p *PeerConn) ID() PeerID {
 }
 
 func validateProtocolVersion(peerVersion uint32) (uint32, error) {
-	v := peerVersion
-	if v > ProtocolV1 {
-		v = ProtocolV1
-	}
+	v := min(peerVersion, ProtocolV1)
 	if v != ProtocolV1 {
 		return 0, ErrProtocolMismatch
 	}

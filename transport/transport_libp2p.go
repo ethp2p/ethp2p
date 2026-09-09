@@ -44,7 +44,7 @@ func (t *TransportLib) Dial(ctx context.Context, addr net.Addr, tlsConf *tls.Con
 		_ = raw.CloseWithError(appFailure, "unsupported negotiated protocol")
 		return nil, fmt.Errorf("unsupported negotiated protocol %q", state.TLS.NegotiatedProtocol)
 	}
-	return &exclusiveConnLib{raw}, nil
+	return raw, nil
 }
 
 // ReadNonQUICPacket reads the next non-QUIC packet from the shared endpoint.
@@ -57,7 +57,7 @@ func (t *TransportLib) WriteTo(payload []byte, addr net.Addr) (int, error) {
 	return t.raw.WriteTo(payload, addr)
 }
 
-// Close is a no-op returning nil. The ethp2p stack owns endpoint shutdown;
+// Close is a no-op returning nil. The application owns endpoint shutdown;
 // libp2p must not close the shared endpoint while ethp2p still uses it.
 // Use [TransportShared.Close] to stop the endpoint.
 func (*TransportLib) Close() error { return nil }

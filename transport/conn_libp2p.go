@@ -8,18 +8,12 @@ import (
 	"github.com/quic-go/quic-go"
 )
 
-var (
-	_ quicreuse.QUICConn = (*connLib)(nil)
-	_ quicreuse.QUICConn = (*exclusiveConnLib)(nil)
-)
+var _ quicreuse.QUICConn = (*connLib)(nil)
 
 // connLib is the libp2p view of a split QUIC connection. It receives only
 // streams classified as libp2p while sharing outbound operations with the
 // ethp2p view.
 type connLib sharedConn
-
-// exclusiveConnLib is a libp2p-only QUIC connection.
-type exclusiveConnLib struct{ *quic.Conn }
 
 func (c *connLib) AcceptStream(ctx context.Context) (*quic.Stream, error) {
 	select {
@@ -51,15 +45,3 @@ func (c *connLib) ConnectionState() quic.ConnectionState {
 func (c *connLib) Context() context.Context { return c.conn.Context() }
 func (c *connLib) LocalAddr() net.Addr      { return c.conn.LocalAddr() }
 func (c *connLib) RemoteAddr() net.Addr     { return c.conn.RemoteAddr() }
-
-// As refuses access to the raw connection because sharedConn owns inbound
-// stream acceptance.
-func (c *connLib) As(any) bool { return false }
-
-func (c *exclusiveConnLib) As(target any) bool {
-	if raw, ok := target.(**quic.Conn); ok {
-		*raw = c.Conn
-		return true
-	}
-	return false
-}

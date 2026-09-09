@@ -27,8 +27,8 @@ func assertSharedALPN(t *testing.T, conn quicreuse.QUICConn) {
 
 func assertRawALPN(t *testing.T, conn quicreuse.QUICConn, want string) {
 	t.Helper()
-	var raw *quic.Conn
-	if !conn.As(&raw) || raw == nil {
+	raw, ok := conn.(*quic.Conn)
+	if !ok {
 		t.Fatalf("connection does not expose a raw QUIC connection")
 	}
 	if got := raw.ConnectionState().TLS.NegotiatedProtocol; got != string(want) {

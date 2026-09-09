@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -36,6 +37,11 @@ type BroadcastNode struct {
 	num      int
 	quicHost QUICHost
 	stack    *ethp2p.Stack
+	engine   *broadcast.Engine
+	peers    chan *ethp2p.Peer
+	streams  chan ethp2p.StreamEvent
+	appCtx   context.Context
+	cancel   context.CancelFunc
 
 	publishFn func(broadcast.MessageID, []byte) error
 	stopFn    func()
@@ -44,10 +50,12 @@ type BroadcastNode struct {
 	logger *slog.Logger
 
 	mu         sync.Mutex
-	conns      []*quic.Conn
+	conns      []transport.Conn
 	peerByAddr map[string]int
 	wg         sync.WaitGroup
 	closed     bool
+	closeOnce  sync.Once
+	closeErr   error
 	baseSent   int // cumulative baseline for ResetBandwidthStats
 	baseRecv   int
 }
@@ -61,23 +69,54 @@ func (n *BroadcastNode) Addr() net.Addr {
 }
 
 func (n *BroadcastNode) Start(ctx context.Context) {
-	n.wg.Go(func() { n.processIncomingConnections(ctx) })
-}
-
-func (n *BroadcastNode) Close() error {
+	acceptCtx, cancel := context.WithCancel(n.appCtx)
+	stop := context.AfterFunc(ctx, cancel)
 	n.mu.Lock()
 	if n.closed {
 		n.mu.Unlock()
-		return nil
+		stop()
+		cancel()
+		return
 	}
-	n.closed = true
+	n.wg.Go(func() {
+		defer stop()
+		defer cancel()
+		n.processIncomingConnections(acceptCtx)
+	})
 	n.mu.Unlock()
+}
 
-	n.stopFn()
-	hostErr := n.quicHost.Close()
-	stackErr := n.stack.Close()
-	n.wg.Wait()
-	return errors.Join(hostErr, stackErr)
+func (n *BroadcastNode) Close() error {
+	n.closeOnce.Do(func() {
+		n.mu.Lock()
+		n.closed = true
+		cancel := n.cancel
+		conns := slices.Clone(n.conns)
+		n.mu.Unlock()
+
+		// The application owns the context, connection views, endpoint, and
+		// serving goroutines. Cancel first, then close every connection view and
+		// the endpoint so all pending Stack and QUIC I/O can return.
+		cancel()
+		var closeErr error
+		for _, conn := range conns {
+			closeErr = errors.Join(closeErr, conn.Close())
+		}
+		hostErr := n.quicHost.Close()
+		n.wg.Wait()
+
+		// Stack does not own delivered streams. The serving goroutines have stopped,
+		// so no producer can enqueue another event; dispose of the events that were
+		// already queued before stopping the worker and its internal event loop.
+		drainStreamEvents(n.streams)
+		drainPeers(n.peers)
+		n.stopFn()
+		engineErr := n.engine.Close()
+		closeErr = errors.Join(closeErr, hostErr, engineErr)
+
+		n.closeErr = closeErr
+	})
+	return n.closeErr
 }
 
 func (n *BroadcastNode) Publish(messageID string, data []byte) {
@@ -105,9 +144,6 @@ func (n *BroadcastNode) processIncomingConnections(ctx context.Context) {
 			}
 			return
 		}
-		n.mu.Lock()
-		n.conns = append(n.conns, c)
-		n.mu.Unlock()
 		n.mu.Lock()
 		remote, ok := n.peerByAddr[c.RemoteAddr().String()]
 		n.mu.Unlock()
@@ -141,23 +177,23 @@ func (n *BroadcastNode) DialPeer(ctx context.Context, p int, addr net.Addr) erro
 		return err
 	}
 
-	n.mu.Lock()
-	n.conns = append(n.conns, cu)
-	n.mu.Unlock()
-
 	n.serveConn(cu, transport.ConnDirOut, simAuthInfo(n.num, p))
 	return nil
 }
 
 func (n *BroadcastNode) serveConn(conn *quic.Conn, direction transport.ConnDir, auth transport.AuthInfo) {
+	ethConn := transport.NewQUICConn(conn, direction, auth)
 	n.mu.Lock()
 	if n.closed {
 		n.mu.Unlock()
-		_ = conn.CloseWithError(0, "node closed")
+		_ = ethConn.Close()
 		return
 	}
+	n.conns = append(n.conns, ethConn)
+	appCtx := n.appCtx
 	n.wg.Go(func() {
-		err := n.stack.ServeConn(context.Background(), transport.NewQUICConn(conn, direction, auth))
+		err := n.stack.ServeConn(appCtx, ethConn)
+		_ = ethConn.Close()
 		n.mu.Lock()
 		closed := n.closed
 		n.mu.Unlock()
@@ -176,9 +212,9 @@ func (n *BroadcastNode) BandwidthStats() (bytesSent, bytesReceived int) {
 
 func (n *BroadcastNode) rawBandwidth() (sent, received int) {
 	for _, c := range n.conns {
-		s := c.ConnectionStats()
-		sent += int(s.BytesSent)
-		received += int(s.BytesReceived)
+		tx, rx := c.ConnectionStats()
+		sent += int(tx)
+		received += int(rx)
 	}
 	return sent, received
 }
@@ -194,10 +230,13 @@ func (n *BroadcastNode) ResetBandwidthStats() (bytesSent, bytesReceived int) {
 	return ds, dr
 }
 
-// newBroadcastNode assembles a BroadcastNode from an initialized stack,
-// channel closures, and a raw PacketConn. Used by NewECNodeFunc.
+// newBroadcastNode assembles a BroadcastNode from its registered stack,
+// broadcast worker, channel closures, and raw PacketConn. Used by ECStrategy.
 func newBroadcastNode(
 	stack *ethp2p.Stack,
+	engine *broadcast.Engine,
+	peers chan *ethp2p.Peer,
+	streams chan ethp2p.StreamEvent,
 	publishFn func(broadcast.MessageID, []byte) error,
 	stopFn func(),
 	recvCh chan broadcast.FullMessage,
@@ -207,20 +246,61 @@ func newBroadcastNode(
 ) (*BroadcastNode, error) {
 	qh, err := NewQUICHost(conn)
 	if err != nil {
-		stack.Close()
+		stopFn()
+		_ = engine.Close()
 		return nil, fmt.Errorf("failed to create quic host: %w", err)
 	}
+	appCtx, cancel := context.WithCancel(context.Background())
 
-	return &BroadcastNode{
+	n := &BroadcastNode{
 		num:        nodeNum,
 		quicHost:   qh,
 		stack:      stack,
+		engine:     engine,
+		peers:      peers,
+		streams:    streams,
+		appCtx:     appCtx,
+		cancel:     cancel,
 		publishFn:  publishFn,
 		stopFn:     stopFn,
 		recvCh:     recvCh,
 		logger:     logger,
 		peerByAddr: make(map[string]int),
-	}, nil
+	}
+	n.wg.Go(func() {
+		if err := engine.Serve(appCtx, peers, streams); err != nil && !errors.Is(err, context.Canceled) {
+			n.logger.Error("broadcast engine ended", "err", err)
+		}
+	})
+	return n, nil
+}
+
+func drainStreamEvents(streams <-chan ethp2p.StreamEvent) {
+	for {
+		select {
+		case event := <-streams:
+			if event.Stream == nil {
+				continue
+			}
+			if stream, ok := event.Stream.(transport.Stream); ok {
+				_ = stream.Reset()
+				continue
+			}
+			event.Stream.CancelRead(0)
+		default:
+			return
+		}
+	}
+}
+
+func drainPeers(peers <-chan *ethp2p.Peer) {
+	for {
+		select {
+		case <-peers:
+		default:
+			return
+		}
+	}
 }
 
 func simAuthInfo(local, remote int) transport.AuthInfo {

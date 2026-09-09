@@ -87,7 +87,7 @@ func NewQUICConn(raw *quic.Conn, direction ConnDir, auth AuthInfo) Conn {
 		sem:       make(chan struct{}, maxPendingStreamsPerConn),
 		libp2pBi:  make(chan *quic.Stream, deliveryQueueLen),
 		ethp2pBi:  make(chan *quic.Stream, deliveryQueueLen),
-		ethp2pUni: make(chan *quic.ReceiveStream, deliveryQueueLen),
+		ethp2pUni: make(chan *quic.ReceiveStream, uniDeliveryQueueLen),
 	}
 	for range maxPendingStreamsPerConn {
 		sc.sem <- struct{}{}

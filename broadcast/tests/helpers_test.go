@@ -11,6 +11,7 @@ import (
 	"errors"
 	"math/big"
 	"net"
+	"slices"
 	"sync"
 	"testing"
 	"time"
@@ -66,6 +67,9 @@ type quicHost struct {
 	addr     net.Addr
 	tlsConf  *tls.Config
 	quicConf *quic.Config
+
+	closeOnce sync.Once
+	closeErr  error
 }
 
 func newQUICHost(t *testing.T) *quicHost {
@@ -123,11 +127,14 @@ func (h *quicHost) accept(ctx context.Context) (*quic.Conn, error) {
 }
 
 func (h *quicHost) close() error {
-	return errors.Join(
-		h.listener.Close(),
-		h.tr.Close(),
-		h.tr.Conn.Close(),
-	)
+	h.closeOnce.Do(func() {
+		h.closeErr = errors.Join(
+			h.listener.Close(),
+			h.tr.Close(),
+			h.tr.Conn.Close(),
+		)
+	})
+	return h.closeErr
 }
 
 func generateTestTLSConfig() (*tls.Config, error) {
@@ -157,11 +164,23 @@ func generateTestTLSConfig() (*tls.Config, error) {
 // --- Test node ---
 
 type testNode struct {
-	host   *quicHost
-	stack  *ethp2p.Stack
-	engine *broadcast.Engine
-	obs    *testObserver
-	peerID broadcast.PeerID
+	host    *quicHost
+	stack   *ethp2p.Stack
+	engine  *broadcast.Engine
+	obs     *testObserver
+	peerID  broadcast.PeerID
+	peers   chan *ethp2p.Peer
+	streams chan ethp2p.StreamEvent
+
+	ctx    context.Context
+	cancel context.CancelFunc
+
+	mu       sync.Mutex
+	conns    []transport.Conn
+	wg       sync.WaitGroup
+	closed   bool
+	closeErr error
+	once     sync.Once
 }
 
 func newTestNode(t *testing.T, peerID broadcast.PeerID) *testNode {
@@ -169,23 +188,59 @@ func newTestNode(t *testing.T, peerID broadcast.PeerID) *testNode {
 	host := newQUICHost(t)
 	obs := newTestObserver()
 	cfg := broadcast.EngineConfig{Observer: obs}
-	stack := &ethp2p.Stack{
-		PeerID:          transport.PeerID(peerID),
-		Key:             testKey{},
-		BroadcastConfig: cfg,
-	}
-	if err := stack.Init(); err != nil {
+	stack := new(ethp2p.Stack)
+	subsystem, err := stack.RegisterSubsystem("broadcast", broadcast.BCAST, broadcast.SESS, broadcast.CHUNK)
+	if err != nil {
 		t.Fatal(err)
 	}
-	engine := stack.BroadcastEngine()
-	t.Cleanup(func() { _ = stack.Close() })
-	return &testNode{
-		host:   host,
-		stack:  stack,
-		engine: engine,
-		obs:    obs,
-		peerID: peerID,
+	peers := make(chan *ethp2p.Peer, 64)
+	streams := make(chan ethp2p.StreamEvent, 1024)
+	if err := subsystem.NotifyPeers(peers); err != nil {
+		t.Fatal(err)
 	}
+	if err := subsystem.NotifyStreams(streams); err != nil {
+		t.Fatal(err)
+	}
+	engine := broadcast.NewEngine(cfg)
+	ctx, cancel := context.WithCancel(t.Context())
+	n := &testNode{
+		host:    host,
+		stack:   stack,
+		engine:  engine,
+		obs:     obs,
+		peerID:  peerID,
+		peers:   peers,
+		streams: streams,
+		ctx:     ctx,
+		cancel:  cancel,
+	}
+	n.wg.Go(func() { _ = engine.Serve(ctx, peers, streams) })
+	t.Cleanup(func() { _ = n.Close() })
+	return n
+}
+
+func (n *testNode) Close() error {
+	n.once.Do(func() {
+		n.mu.Lock()
+		n.closed = true
+		conns := slices.Clone(n.conns)
+		n.mu.Unlock()
+
+		n.cancel()
+		var closeErr error
+		for _, conn := range conns {
+			closeErr = errors.Join(closeErr, conn.Close())
+		}
+		closeErr = errors.Join(closeErr, n.host.close())
+		n.wg.Wait()
+
+		drainQueuedStreams(n.streams)
+		drainQueuedPeers(n.peers)
+		closeErr = errors.Join(closeErr, n.engine.Close())
+
+		n.closeErr = closeErr
+	})
+	return n.closeErr
 }
 
 // --- Observer ---
@@ -202,6 +257,8 @@ type testObserver struct {
 	decoded  map[observerKey]chan struct{}
 	disposed map[observerKey]chan struct{}
 	created  map[observerKey]chan struct{}
+	received map[observerKey]int
+	errors   []broadcast.ChunkProcessError
 
 	// peerSubs tracks per-channel peer sets from OnPeerSubscribed/OnPeerUnsubscribed/OnPeerGone.
 	peerSubs map[broadcast.ChannelID]map[broadcast.PeerID]struct{}
@@ -212,6 +269,7 @@ func newTestObserver() *testObserver {
 		decoded:  make(map[observerKey]chan struct{}),
 		disposed: make(map[observerKey]chan struct{}),
 		created:  make(map[observerKey]chan struct{}),
+		received: make(map[observerKey]int),
 		peerSubs: make(map[broadcast.ChannelID]map[broadcast.PeerID]struct{}),
 	}
 }
@@ -273,6 +331,18 @@ func (o *testObserver) OnPeerSubscribed(peerID broadcast.PeerID, channelID broad
 	o.peerSubs[channelID][peerID] = struct{}{}
 }
 
+func (o *testObserver) OnChunkRcvd(_ broadcast.PeerID, channelID broadcast.ChannelID, messageID broadcast.MessageID, _ broadcast.Verdict) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	o.received[observerKey{channelID, messageID}]++
+}
+
+func (o *testObserver) OnChunkError(err broadcast.ChunkProcessError) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	o.errors = append(o.errors, err)
+}
+
 func (o *testObserver) OnPeerUnsubscribed(peerID broadcast.PeerID, channelID broadcast.ChannelID) {
 	o.mu.Lock()
 	defer o.mu.Unlock()
@@ -309,7 +379,15 @@ func (o *testObserver) waitDecoded(t *testing.T, channelID broadcast.ChannelID, 
 	select {
 	case <-ch:
 	case <-time.After(timeout):
-		t.Fatalf("timeout waiting for decode of %s/%s", channelID, messageID)
+		o.mu.Lock()
+		defer o.mu.Unlock()
+		started := false
+		select {
+		case <-o.created[key]:
+			started = true
+		default:
+		}
+		t.Fatalf("timeout waiting for decode of %s/%s: started=%t received=%d errors=%v", channelID, messageID, started, o.received[key], o.errors)
 	}
 }
 
@@ -361,7 +439,7 @@ func starEdges(n int) []edge {
 // are established but does NOT wait for handshakes to complete.
 func connectNodes(t *testing.T, nodes []*testNode, edges []edge) {
 	t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
 	defer cancel()
 
 	for _, e := range edges {
@@ -372,15 +450,12 @@ func connectNodes(t *testing.T, nodes []*testNode, edges []edge) {
 		var dialErr, acceptErr error
 		var wg sync.WaitGroup
 
-		wg.Add(2)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			dialRaw, dialErr = from.host.dial(ctx, to.host.addr)
-		}()
-		go func() {
-			defer wg.Done()
+		})
+		wg.Go(func() {
 			acceptRaw, acceptErr = to.host.accept(ctx)
-		}()
+		})
 		wg.Wait()
 
 		if dialErr != nil {
@@ -395,20 +470,55 @@ func connectNodes(t *testing.T, nodes []*testNode, edges []edge) {
 			Remote: transport.PeerID(to.peerID),
 		}
 		toAuth := transport.AuthInfo{Local: fromAuth.Remote, Remote: fromAuth.Local}
-		go from.stack.ServeConn(
-			context.Background(),
-			transport.NewQUICConn(dialRaw, transport.Outbound, fromAuth),
-		)
-		go to.stack.ServeConn(
-			context.Background(),
-			transport.NewQUICConn(acceptRaw, transport.Inbound, toAuth),
-		)
+		from.serveConn(dialRaw, transport.ConnDirOut, fromAuth)
+		to.serveConn(acceptRaw, transport.ConnDirIn, toAuth)
 	}
 }
 
-type testKey struct{}
+func (n *testNode) serveConn(raw *quic.Conn, direction transport.ConnDir, auth transport.AuthInfo) {
+	conn := transport.NewQUICConn(raw, direction, auth)
+	n.mu.Lock()
+	if n.closed {
+		n.mu.Unlock()
+		_ = conn.Close()
+		return
+	}
+	n.conns = append(n.conns, conn)
+	ctx := n.ctx
+	n.wg.Go(func() {
+		_ = n.stack.ServeConn(ctx, conn)
+		_ = conn.Close()
+	})
+	n.mu.Unlock()
+}
 
-func (testKey) Sign([]byte) ([]byte, error) { return nil, nil }
+func drainQueuedStreams(streams <-chan ethp2p.StreamEvent) {
+	for {
+		select {
+		case event := <-streams:
+			if event.Stream == nil {
+				continue
+			}
+			if stream, ok := event.Stream.(transport.Stream); ok {
+				_ = stream.Reset()
+				continue
+			}
+			event.Stream.CancelRead(0)
+		default:
+			return
+		}
+	}
+}
+
+func drainQueuedPeers(peers <-chan *ethp2p.Peer) {
+	for {
+		select {
+		case <-peers:
+		default:
+			return
+		}
+	}
+}
 
 // waitForPeers polls the observer's peer subscription count for the given
 // channel until the expected count is reached.

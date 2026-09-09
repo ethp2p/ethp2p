@@ -7,13 +7,15 @@
 // # Shared QUIC transport
 //
 // [NewShared] wraps a packet connection. Lend [TransportShared.Libp2p] to
-// libp2p through quicreuse.ConnManager.LendTransport and pass the shared
-// transport to ethp2p.Stack. The first [TransportLib.Listen] or
-// [TransportEth.Accept] starts listening.
+// libp2p through quicreuse.ConnManager.LendTransport. The application passes
+// connections from [TransportEth.Accept] and [TransportEth.Dial] to
+// ethp2p.Stack.ServeConn. The first [TransportLib.Listen] or [TransportEth.Accept]
+// starts listening.
 //
-// Close the ethp2p stack before libp2p. [TransportShared.Close] closes all
+// The application owns endpoint shutdown. [TransportShared.Close] closes all
 // connections and stops listening; [TransportLib.Close] and its listener's
-// Close are no-ops. The caller must also close the supplied packet connection.
+// Close are no-ops. Stack.ServeConn only borrows connections and never closes
+// the endpoint. The caller must also close the supplied packet connection.
 // On a shared connection, closing one view releases only that view; the
 // underlying QUIC connection closes when both views are released.
 //

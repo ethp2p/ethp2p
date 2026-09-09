@@ -133,8 +133,8 @@ func TestSimultaneousStreamsOnBothViews(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Four concurrent streams per view keeps delivery bursts within the
-	// per-view queue capacity (deliveryQueueLen), which resets excess.
+	// Four concurrent streams per view keeps bidi delivery bursts within
+	// their queue capacity (deliveryQueueLen), which resets excess.
 	const streams = 4
 	payloadLen := 64 << 10
 	deadline := time.Now().Add(4 * time.Second)
@@ -148,7 +148,7 @@ func TestSimultaneousStreamsOnBothViews(t *testing.T) {
 	}
 
 	// echo reads a stream to FIN, writes the payload back, and closes.
-	// The spawning goroutine owns the WaitGroup counter.
+	// Each caller runs in a goroutine tracked by wg.
 	echo := func(s bidi) {
 		fail(s.SetDeadline(deadline))
 		got, err := io.ReadAll(s)
@@ -187,43 +187,38 @@ func TestSimultaneousStreamsOnBothViews(t *testing.T) {
 	// Receiving side: accept and echo concurrently on both views, from
 	// both ends.
 	for range streams {
-		wg.Add(4)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			s, err := serverLibConn.AcceptStream(ctx)
 			if err != nil {
 				fail(err)
 				return
 			}
 			echo(s)
-		}()
-		go func() {
-			defer wg.Done()
+		})
+		wg.Go(func() {
 			s, err := serverEthConn.AcceptBiStream(ctx)
 			if err != nil {
 				fail(err)
 				return
 			}
 			echo(s)
-		}()
-		go func() {
-			defer wg.Done()
+		})
+		wg.Go(func() {
 			s, err := clientLibConn.AcceptStream(ctx)
 			if err != nil {
 				fail(err)
 				return
 			}
 			echo(s)
-		}()
-		go func() {
-			defer wg.Done()
+		})
+		wg.Go(func() {
 			s, err := clientEthConn.AcceptBiStream(ctx)
 			if err != nil {
 				fail(err)
 				return
 			}
 			echo(s)
-		}()
+		})
 	}
 
 	// Sending side: round-trip streams opened from both ends on both
@@ -233,43 +228,38 @@ func TestSimultaneousStreamsOnBothViews(t *testing.T) {
 	for i := range streams {
 		libWire := frame(append([]byte("/echo/"), bytes.Repeat([]byte{byte(i)}, payloadLen)...))
 		ethWire := frame(append([]byte{byte(i)}, bytes.Repeat([]byte{0xaa}, payloadLen)...))
-		wg.Add(4)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			s, err := clientLibConn.OpenStreamSync(ctx)
 			if err != nil {
 				fail(err)
 				return
 			}
 			roundTrip(s, libWire)
-		}()
-		go func() {
-			defer wg.Done()
+		})
+		wg.Go(func() {
 			s, err := clientEthConn.OpenStream(ctx)
 			if err != nil {
 				fail(err)
 				return
 			}
 			roundTrip(s, ethWire)
-		}()
-		go func() {
-			defer wg.Done()
+		})
+		wg.Go(func() {
 			s, err := serverLibConn.OpenStreamSync(ctx)
 			if err != nil {
 				fail(err)
 				return
 			}
 			roundTrip(s, libWire)
-		}()
-		go func() {
-			defer wg.Done()
+		})
+		wg.Go(func() {
 			s, err := serverEthConn.OpenStream(ctx)
 			if err != nil {
 				fail(err)
 				return
 			}
 			roundTrip(s, ethWire)
-		}()
+		})
 	}
 
 	// Unidirectional streams route to ethp2p on the receiving side only;
@@ -278,9 +268,7 @@ func TestSimultaneousStreamsOnBothViews(t *testing.T) {
 	// the same payload.
 	payload := bytes.Repeat([]byte{0x55}, payloadLen)
 	for range streams {
-		wg.Add(2)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			s, err := clientEthConn.OpenUniStream(ctx)
 			if err != nil {
 				fail(err)
@@ -292,9 +280,8 @@ func TestSimultaneousStreamsOnBothViews(t *testing.T) {
 				return
 			}
 			fail(s.Close())
-		}()
-		go func() {
-			defer wg.Done()
+		})
+		wg.Go(func() {
 			s, err := serverEthConn.AcceptUniStream(ctx)
 			if err != nil {
 				fail(err)
@@ -309,7 +296,7 @@ func TestSimultaneousStreamsOnBothViews(t *testing.T) {
 			if !bytes.Equal(got, payload) {
 				fail(fmt.Errorf("unidirectional echo = %d bytes, want %d", len(got), len(payload)))
 			}
-		}()
+		})
 	}
 
 	wg.Wait()

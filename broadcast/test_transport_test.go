@@ -1,6 +1,7 @@
 package broadcast
 
 import (
+	"bytes"
 	"context"
 	"io"
 	"time"
@@ -144,8 +145,7 @@ func (s *testStream) Write(p []byte) (int, error) {
 	if s.closed {
 		return 0, io.ErrClosedPipe
 	}
-	cp := make([]byte, len(p))
-	copy(cp, p)
+	cp := bytes.Clone(p)
 	select {
 	case s.send <- cp:
 		return len(p), nil
@@ -178,8 +178,9 @@ func newTestBcastStreams(ctx context.Context) (transport.SendStream, transport.R
 }
 
 // registerTestPeer constructs a PeerConn and injects it into the Engine via
-// onPeerHandshake, which is the real event loop pathway.
-func registerTestPeer(e *Engine, id PeerID, conn transport.Conn, version ProtocolVersion, channels []ChannelID) {
+// onPeerHandshake, which is the real event loop pathway. The returned binding
+// lets callers identify the same peer in a subsequent cleanup event.
+func registerTestPeer(e *Engine, id PeerID, conn transport.Conn, version ProtocolVersion, channels []ChannelID) *PeerConn {
 	bcastOut, bcastIn := newTestBcastStreams(e.ctx)
 	p := &PeerConn{
 		id:            id,
@@ -190,7 +191,6 @@ func registerTestPeer(e *Engine, id PeerID, conn transport.Conn, version Protoco
 		ctrlQ:         make(chan peerCtrlEvent, ctrlQCap),
 		wakeCh:        make(chan struct{}, 1),
 		engine:        e,
-		done:          make(chan struct{}),
 		handshakeDone: make(chan struct{}),
 	}
 	p.ctx, p.cancel = context.WithCancel(e.ctx)
@@ -198,4 +198,5 @@ func registerTestPeer(e *Engine, id PeerID, conn transport.Conn, version Protoco
 	go p.runCtrlLoop(slotCh)
 	go p.runDataLoop(slotCh)
 	e.onPeerHandshake(p, channels, nil)
+	return p
 }
