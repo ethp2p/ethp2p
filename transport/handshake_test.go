@@ -6,13 +6,13 @@ import (
 )
 
 // The handshake verify callback is the single place that authenticates a remote
-// certificate, and it records the result into a per-connection identity slot so
-// Conn.RemotePeerID does not re-derive it. These tests pin that contract: the
-// slot is filled on success and left empty on failure, which is what keeps
-// authentication to exactly one certificate parse and one signature check per
-// connection.
+// certificate, and it records the resulting key into a per-connection identity
+// slot so Conn.RemotePeerID derives the peer ID from it rather than
+// re-authenticating. These tests pin that contract: the slot is filled on
+// success and left empty on failure, which is what keeps authentication to one
+// certificate parse and one signature check per connection.
 
-func TestVerifyRecordsPeerIDInSlot(t *testing.T) {
+func TestVerifyRecordsRemoteKeyInSlot(t *testing.T) {
 	ours, err := newHandshaker(testKey(t))
 	if err != nil {
 		t.Fatal(err)
@@ -22,15 +22,22 @@ func TestVerifyRecordsPeerIDInSlot(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	slot := &identitySlot{}
+	slot := &remoteIdentitySlot{}
 	config := ours.dialConfig(slot, theirs.peerID)
 
 	raw := theirs.config.Certificates[0].Certificate[0]
 	if err := config.VerifyPeerCertificate([][]byte{raw}, nil); err != nil {
 		t.Fatalf("verify rejected a valid certificate: %v", err)
 	}
-	if slot.id != theirs.peerID {
-		t.Fatalf("slot id = %x, want %x", slot.id, theirs.peerID)
+	if slot.key == nil {
+		t.Fatal("slot holds no key after a valid handshake")
+	}
+	// The peer ID must be derivable from the stored key alone.
+	if got := slot.key.PeerID(); got != theirs.peerID {
+		t.Fatalf("peer ID derived from slot key = %x, want %x", got, theirs.peerID)
+	}
+	if got := verifiedIdentity(slot.key).peerID(); got != theirs.peerID {
+		t.Fatalf("remoteIdentity peer ID = %x, want %x", got, theirs.peerID)
 	}
 }
 
@@ -48,7 +55,7 @@ func TestVerifyLeavesSlotEmptyOnMismatch(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	slot := &identitySlot{}
+	slot := &remoteIdentitySlot{}
 	// Pin a peer identity that does not match the certificate presented.
 	config := ours.dialConfig(slot, unexpected.peerID)
 
@@ -58,8 +65,8 @@ func TestVerifyLeavesSlotEmptyOnMismatch(t *testing.T) {
 	if !errors.As(err, &mismatch) {
 		t.Fatalf("verify error = %v, want ErrPeerMismatch", err)
 	}
-	if slot.id != "" {
-		t.Fatalf("slot holds %x after a failed handshake, want empty", slot.id)
+	if slot.key != nil {
+		t.Fatalf("slot holds a key after a failed handshake: %x", slot.key.PeerID())
 	}
 }
 

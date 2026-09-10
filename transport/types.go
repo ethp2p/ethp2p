@@ -75,7 +75,7 @@ func NewQUICConn(raw *quic.Conn, remote PeerID) Conn {
 	// Routing ends when raw closes; this adapter does not wait for its
 	// dispatchers.
 	var wg sync.WaitGroup
-	sc := newSharedConn(raw, &wg, remote)
+	sc := newSharedConn(raw, &wg, suppliedIdentity(remote))
 
 	// Single-view adapter: the libp2p view never exists, so mark it done at
 	// birth. Its code never wins; the ethp2p view always closes last.

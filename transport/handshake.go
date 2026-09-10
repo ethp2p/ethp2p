@@ -38,20 +38,23 @@ type handshaker struct {
 	config    tls.Config
 }
 
-// identitySlot is the per-connection rendezvous between the handshake verify
-// callback, which derives the peer identity, and the dial or accept path, which
-// needs it. The callback runs during the handshake and the reader runs only
-// after the handshake completes, so the write happens-before the read without
-// further synchronization.
+// remoteIdentitySlot is the per-connection rendezvous between the handshake
+// verify callback, which authenticates the remote key, and the dial or accept
+// path, which reads it back. The callback runs during the handshake and the
+// reader runs only after the handshake completes, so the write happens-before
+// the read without further synchronization.
+//
+// The slot holds the public key rather than a peer ID because the key is the
+// authenticated value and the peer ID is derived from it.
 //
 // The dial path owns its slot as a local variable. The accept path has nothing
 // local that spans both the TLS configuration and the accepted connection, so
 // it carries its slot on the connection context instead.
-type identitySlot struct{ id PeerID }
+type remoteIdentitySlot struct{ key *PubKey }
 
-// identityContextKey is the connection-context key under which NewShared's
+// remoteIdentityContextKey is the connection-context key under which NewShared's
 // ConnContext hook installs the accept-side slot.
-type identityContextKey struct{}
+type remoteIdentityContextKey struct{}
 
 // newHandshaker configures TLS 1.3 for key, preferring ethp2p over libp2p.
 func newHandshaker(key *PrivKey) (*handshaker, error) {
@@ -78,9 +81,9 @@ func newHandshaker(key *PrivKey) (*handshaker, error) {
 }
 
 // dialConfig returns the TLS configuration for one dial, recording the
-// authenticated peer identity into slot. A nonempty expect pins the server
+// authenticated remote key into slot. A nonempty expect pins the server
 // identity, failing the handshake on mismatch.
-func (h *handshaker) dialConfig(slot *identitySlot, expect PeerID) *tls.Config {
+func (h *handshaker) dialConfig(slot *remoteIdentitySlot, expect PeerID) *tls.Config {
 	return h.verify(slot, expect)
 }
 
@@ -92,7 +95,7 @@ func (h *handshaker) serverConfig() *tls.Config {
 	return &tls.Config{
 		NextProtos: []string{AlpnLibp2p},
 		GetConfigForClient: func(info *tls.ClientHelloInfo) (*tls.Config, error) {
-			slot, _ := info.Context().Value(identityContextKey{}).(*identitySlot)
+			slot, _ := info.Context().Value(remoteIdentityContextKey{}).(*remoteIdentitySlot)
 			return h.verify(slot, ""), nil
 		},
 	}
@@ -104,16 +107,16 @@ func (h *handshaker) serverConfig() *tls.Config {
 //
 // It is the security boundary for inbound and outbound handshakes: the peer
 // identity is trustworthy because this callback rejected the connection
-// otherwise, and it is derived here exactly once per connection. A nil slot
-// costs a second derivation when the identity is read back.
-func (h *handshaker) verify(slot *identitySlot, expect PeerID) *tls.Config {
+// otherwise, and it is authenticated here exactly once per connection. A nil
+// slot costs a second authentication when the identity is read back.
+func (h *handshaker) verify(slot *remoteIdentitySlot, expect PeerID) *tls.Config {
 	config := h.config.Clone()
 	config.VerifyPeerCertificate = func(rawCerts [][]byte, _ [][]*x509.Certificate) error {
 		chain, err := parseChain(rawCerts)
 		if err != nil {
 			return err
 		}
-		_, actual, err := authenticate(chain)
+		key, actual, err := authenticate(chain)
 		if err != nil {
 			return err
 		}
@@ -121,7 +124,7 @@ func (h *handshaker) verify(slot *identitySlot, expect PeerID) *tls.Config {
 			return ErrPeerMismatch{Expected: expect, Actual: actual}
 		}
 		if slot != nil {
-			slot.id = actual
+			slot.key = key
 		}
 		return nil
 	}
