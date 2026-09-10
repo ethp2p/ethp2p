@@ -36,21 +36,18 @@ func assertRawALPN(t *testing.T, conn quicreuse.QUICConn, want string) {
 	}
 }
 
-func assertAuth(t *testing.T, conn Conn, local, remote PeerID, direction ConnDir) {
+// assertPeer checks the identity reported for the remote endpoint. The local
+// identity belongs to the endpoint rather than the connection, and the remote
+// peer ID is derived from the authenticated certificate, so there is no
+// separate public-key assertion left to make here.
+func assertPeer(t *testing.T, conn Conn, remote PeerID) {
 	t.Helper()
-	got := conn.AuthInfo()
-	if got.Local != local || got.Remote != remote {
-		t.Fatalf("auth = %+v, want local %q remote %q", got, local, remote)
-	}
-	if got := conn.Direction(); got != direction {
-		t.Fatalf("direction = %d, want %d", got, direction)
-	}
-	if got.RemoteKey == nil || got.RemoteKey.PeerID() != remote {
-		t.Fatalf("remote public key does not match peer %x", remote)
+	if got := conn.RemotePeerID(); got != remote {
+		t.Fatalf("remote peer ID = %x, want %x", got, remote)
 	}
 }
 
-func newEndpoint(t *testing.T) (*SharedTransport, *Libp2pTransport, *Transport, *net.UDPConn) {
+func newEndpoint(t *testing.T) (*SharedTransport, quicreuse.QUICTransport, *Ethp2pTransport, *net.UDPConn) {
 	t.Helper()
 	packetConn := testPacketConn(t)
 	shared, err := NewShared(testKey(t), packetConn)
@@ -65,7 +62,7 @@ func newEndpoint(t *testing.T) (*SharedTransport, *Libp2pTransport, *Transport, 
 	return shared, libp2p, ethp2p, packetConn
 }
 
-func listen(t *testing.T, libp2p *Libp2pTransport, ethp2p *Transport) quicreuse.QUICListener {
+func listen(t *testing.T, libp2p quicreuse.QUICTransport, ethp2p *Ethp2pTransport) quicreuse.QUICListener {
 	t.Helper()
 	listener, err := libp2p.Listen(ethp2p.handshaker.serverConfig(), &quic.Config{})
 	if err != nil {

@@ -16,7 +16,8 @@ type testTransport struct {
 	dataSend   chan []byte
 	dataRecv   chan []byte
 	ctx        context.Context
-	auth       transport.AuthInfo
+	// remote is the peer identity reported for this connection.
+	remote transport.PeerID
 }
 
 func newTestTransportPair(ctx context.Context) (*testTransport, *testTransport) {
@@ -33,7 +34,7 @@ func newTestTransportPair(ctx context.Context) (*testTransport, *testTransport) 
 		dataSend:   data1to2,
 		dataRecv:   data2to1,
 		ctx:        ctx,
-		auth:       testAuthInfo("test-left", "test-right"),
+		remote:     "test-right",
 	}
 	t2 := &testTransport{
 		streamSend: stream2to1,
@@ -41,7 +42,7 @@ func newTestTransportPair(ctx context.Context) (*testTransport, *testTransport) 
 		dataSend:   data2to1,
 		dataRecv:   data1to2,
 		ctx:        ctx,
-		auth:       testAuthInfo("test-right", "test-left"),
+		remote:     "test-left",
 	}
 	return t1, t2
 }
@@ -53,7 +54,7 @@ func newHighCapTransport(ctx context.Context) *testTransport {
 		dataSend:   make(chan []byte, 4096),
 		dataRecv:   make(chan []byte, 4096),
 		ctx:        ctx,
-		auth:       testAuthInfo("test-local", "test-remote"),
+		remote:     "test-remote",
 	}
 }
 
@@ -61,8 +62,7 @@ func (t *testTransport) SupportsStreams() bool             { return true }
 func (t *testTransport) SupportsDatagrams() bool           { return true }
 func (t *testTransport) Close() error                      { return nil }
 func (t *testTransport) ConnectionStats() (uint64, uint64) { return 0, 0 }
-func (t *testTransport) Direction() transport.ConnDir      { return transport.ConnDirOut }
-func (t *testTransport) AuthInfo() transport.AuthInfo      { return t.auth }
+func (t *testTransport) RemotePeerID() transport.PeerID    { return t.remote }
 
 func (t *testTransport) OpenStream(ctx context.Context) (transport.Stream, error) {
 	return &testStream{send: t.streamSend, recv: t.streamRecv, ctx: t.ctx}, nil
@@ -103,13 +103,6 @@ func (t *testTransport) RecvDatagram(ctx context.Context) ([]byte, error) {
 }
 
 var _ transport.Conn = (*testTransport)(nil)
-
-func testAuthInfo(local, remote PeerID) transport.AuthInfo {
-	return transport.AuthInfo{
-		Local:  transport.PeerID(local),
-		Remote: transport.PeerID(remote),
-	}
-}
 
 // testStream implements transport.Stream for in-process testing.
 type testStream struct {

@@ -465,18 +465,13 @@ func connectNodes(t *testing.T, nodes []*testNode, edges []edge) {
 			t.Fatalf("accept %d->%d: %v", e.from, e.to, acceptErr)
 		}
 
-		fromAuth := transport.AuthInfo{
-			Local:  transport.PeerID(from.peerID),
-			Remote: transport.PeerID(to.peerID),
-		}
-		toAuth := transport.AuthInfo{Local: fromAuth.Remote, Remote: fromAuth.Local}
-		from.serveConn(dialRaw, transport.ConnDirOut, fromAuth)
-		to.serveConn(acceptRaw, transport.ConnDirIn, toAuth)
+		from.serveConn(dialRaw, transport.PeerID(to.peerID))
+		to.serveConn(acceptRaw, transport.PeerID(from.peerID))
 	}
 }
 
-func (n *testNode) serveConn(raw *quic.Conn, direction transport.ConnDir, auth transport.AuthInfo) {
-	conn := transport.NewQUICConn(raw, direction, auth)
+func (n *testNode) serveConn(raw *quic.Conn, remote transport.PeerID) {
+	conn := transport.NewQUICConn(raw, remote)
 	n.mu.Lock()
 	if n.closed {
 		n.mu.Unlock()

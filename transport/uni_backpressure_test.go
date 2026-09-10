@@ -101,18 +101,19 @@ func newQUICPair(t *testing.T, incomingUni int64) (Conn, Conn) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	clientTLS := clientIdentity.newHandshake(serverIdentity.peerID)
-	serverTLS := serverIdentity.newHandshake(clientIdentity.peerID)
+	clientSlot, serverSlot := &identitySlot{}, &identitySlot{}
+	clientTLS := clientIdentity.dialConfig(clientSlot, serverIdentity.peerID)
+	serverTLS := serverIdentity.dialConfig(serverSlot, clientIdentity.peerID)
 	clientTransport := &quic.Transport{Conn: testPacketConn(t)}
 	serverTransport := &quic.Transport{Conn: testPacketConn(t)}
 	t.Cleanup(func() { _ = clientTransport.Close() })
 	t.Cleanup(func() { _ = serverTransport.Close() })
-	listener, err := serverTransport.Listen(&serverTLS.config, &quic.Config{MaxIncomingUniStreams: incomingUni})
+	listener, err := serverTransport.Listen(serverTLS, &quic.Config{MaxIncomingUniStreams: incomingUni})
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = listener.Close() })
-	clientRaw, err := clientTransport.Dial(ctx, serverTransport.Conn.LocalAddr(), &clientTLS.config, &quic.Config{})
+	clientRaw, err := clientTransport.Dial(ctx, serverTransport.Conn.LocalAddr(), clientTLS, &quic.Config{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -122,5 +123,5 @@ func newQUICPair(t *testing.T, incomingUni int64) (Conn, Conn) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = serverRaw.CloseWithError(0, "test done") })
-	return NewQUICConn(clientRaw, ConnDirOut, clientTLS.auth), NewQUICConn(serverRaw, ConnDirIn, serverTLS.auth)
+	return NewQUICConn(clientRaw, clientSlot.id), NewQUICConn(serverRaw, serverSlot.id)
 }

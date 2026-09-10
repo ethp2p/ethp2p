@@ -40,22 +40,28 @@ func (t *Libp2pTransport) Listen(_ *tls.Config, _ *quic.Config) (quicreuse.QUICL
 	return &libp2pListener{transport: t.SharedTransport, queue: t.libQ}, nil
 }
 
-// Dial opens a libp2p-only connection using tlsConf. It rejects any other ALPN
-// and ignores the supplied QUIC configuration.
+// Dial opens a libp2p-only connection using tlsConf. It ignores the supplied
+// QUIC configuration. tlsConf is cloned rather than mutated, so the caller's
+// configuration is left untouched.
 func (t *Libp2pTransport) Dial(ctx context.Context, addr net.Addr, tlsConf *tls.Config, _ *quic.Config) (quicreuse.QUICConn, error) {
-	// this dial was requested by libp2p
-	//
-	// libp2p handles peer ID authentication inside the VerifyPeerCertificate
-	// closure, so we refrain from authenticating in our end and delegate
-	// that responsibility to libp2p.
+	if t.ctx.Err() != nil {
+		return nil, errClosed
+	}
 
-	hs := t.handshaker.newHandshake("")
+	// This dial was requested by libp2p. libp2p authenticates the peer ID inside
+	// its own VerifyPeerCertificate callback, so chain ours after it rather than
+	// replacing it, and leave that responsibility with libp2p.
+	slot := &identitySlot{}
+	ours := t.handshaker.dialConfig(slot, "")
 	theirs := tlsConf.VerifyPeerCertificate
+	tlsConf = tlsConf.Clone()
 	tlsConf.VerifyPeerCertificate = func(rawCerts [][]byte, verifiedChains [][]*x509.Certificate) error {
-		if err := theirs(rawCerts, verifiedChains); err != nil {
-			return err
+		if theirs != nil {
+			if err := theirs(rawCerts, verifiedChains); err != nil {
+				return err
+			}
 		}
-		return hs.config.VerifyPeerCertificate(rawCerts, verifiedChains)
+		return ours.VerifyPeerCertificate(rawCerts, verifiedChains)
 	}
 
 	raw, err := t.raw.Dial(ctx, addr, tlsConf, quicConfig.Clone())
@@ -63,18 +69,17 @@ func (t *Libp2pTransport) Dial(ctx context.Context, addr net.Addr, tlsConf *tls.
 		return nil, err
 	}
 
-	alpn := raw.ConnectionState().TLS.NegotiatedProtocol
-	if alpn == AlpnEthp2p {
-		// this is a modern ethp2p peer.
-		// in addition to returning the connection to libp2p,
-		// we also feed it to ethp2p.
-		// If its queue is full, do no block, just return the libp2p end.
-		// TODO review this behaviour
-		sc := newSharedConn(raw)
-
+	if raw.ConnectionState().TLS.NegotiatedProtocol == AlpnEthp2p {
+		// A modern ethp2p peer: return the connection to libp2p and offer the
+		// ethp2p view to the local ethp2p side. The dispatchers must start even
+		// when nobody claims that view, or no stream is ever classified.
+		sc := newSharedConn(raw, &t.wg, slot.id)
 		select {
-		case t.ethQ <- &ethp2pConn{sharedConn: sc}:
+		case t.ethQ <- sc.ethp2p():
 		default:
+			// ethp2p is not accepting. Release the unclaimed view so the raw
+			// connection still closes when libp2p closes its own view.
+			sc.closeSide(sideEthp2p, appNoError, "unclaimed")
 		}
 		return sc.libp2p(), nil
 	}
@@ -108,7 +113,7 @@ type libp2pListener struct {
 	queue     chan quicreuse.QUICConn
 }
 
-// Accept waits for a libp2p connection, including those dialed by TransportEth.
+// Accept waits for a libp2p connection, including those dialed by Ethp2pTransport.
 func (l *libp2pListener) Accept(ctx context.Context) (quicreuse.QUICConn, error) {
 	t := l.transport
 	select {
@@ -127,9 +132,9 @@ func (l *libp2pListener) Accept(ctx context.Context) (quicreuse.QUICConn, error)
 // Addr returns the local address of the shared endpoint.
 func (l *libp2pListener) Addr() net.Addr { return l.transport.raw.Conn.LocalAddr() }
 
-// Close is a no-op. Use [SharedTransport.Close] to stop listening.
+// Close is rejected. Use [SharedTransport.Close] to stop listening.
 func (l *libp2pListener) Close() error {
-	return fmt.Errorf("listener close rejected due to shared transport: close TransportShared instead")
+	return fmt.Errorf("listener close rejected due to shared transport: close SharedTransport instead")
 }
 
 //

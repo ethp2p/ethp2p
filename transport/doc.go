@@ -8,35 +8,38 @@
 //
 // [NewShared] wraps a packet connection. Lend [SharedTransport.Libp2p] to
 // libp2p through quicreuse.ConnManager.LendTransport. The application passes
-// connections from [Transport.Accept] and [Transport.Dial] to
-// ethp2p.Stack.ServeConn. The first [Libp2pTransport.Listen] or [Transport.Accept]
-// starts listening.
+// connections from [Ethp2pTransport.Accept] and [Ethp2pTransport.Dial] to
+// ethp2p.Stack.ServeConn. The first [Libp2pTransport.Listen] or
+// [Ethp2pTransport.Accept] starts listening.
 //
 // The application owns endpoint shutdown. [SharedTransport.Close] closes all
-// connections and stops listening; [Libp2pTransport.Close] and its listener's
-// Close are no-ops. Stack.ServeConn only borrows connections and never closes
-// the endpoint. The caller must also close the supplied packet connection.
-// On a shared connection, closing one view releases only that view; the
-// underlying QUIC connection closes when both views are released.
+// connections and stops listening; [Libp2pTransport.Close] is a no-op and its
+// listener rejects Close, because libp2p must not stop the shared endpoint
+// while ethp2p still uses it. Stack.ServeConn only borrows connections and
+// never closes the endpoint. The caller must also close the supplied packet
+// connection. On a shared connection, closing one view releases only that view;
+// the underlying QUIC connection closes when both views are released.
 //
 // # Connection negotiation
 //
-// [Transport.Dial] and the shared listener prefer ethp2p_0 over libp2p.
+// [Ethp2pTransport.Dial] and the shared listener prefer ethp2p_0 over libp2p.
 // Connections negotiating ethp2p_0 expose both views. Connections negotiating
-// libp2p are libp2p-only; TransportEth.Dial returns [ErrDialLegacyPeer] and
+// libp2p are libp2p-only; [Ethp2pTransport.Dial] returns [ErrDialLegacyPeer] and
 // offers the connection to the libp2p listener. [Libp2pTransport.Dial] uses the
 // caller's TLS configuration and accepts only libp2p.
 //
 // # TLS authentication
 //
-// The shared listener and [Transport.Dial] authenticate secp256k1 identities
+// The shared listener and [Ethp2pTransport.Dial] authenticate secp256k1 identities
 // using the libp2p TLS certificate format. Dial can require a specific [PeerID].
-// [Conn.AuthInfo] exposes the authenticated identities and remote public key.
-// [NewQUICConn] instead trusts caller-supplied authentication metadata.
+// The handshake verify callback is the security boundary; [Conn.RemotePeerID]
+// reads back the identity it authenticated from the connection's TLS state.
+// [NewQUICConn] instead accepts caller-supplied identity for connections that
+// carry no ethp2p certificate.
 //
 // # Connection views
 //
-// TransportLib presents a shared connection to libp2p with the libp2p ALPN.
+// [Libp2pTransport] presents a shared connection to libp2p with the libp2p ALPN.
 // One dispatcher owns inbound stream acceptance on each shared connection,
 // so neither stack accepts directly from the underlying QUIC connection.
 // Both views can open outbound streams on that connection.

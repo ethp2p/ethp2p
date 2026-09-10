@@ -8,7 +8,7 @@ import (
 )
 
 var (
-	// ErrDialLegacyPeer reports that [TransportEth.Dial] authenticated the
+	// ErrDialLegacyPeer reports that [Ethp2pTransport.Dial] authenticated the
 	// peer but negotiated libp2p instead of ethp2p_0.
 	ErrDialLegacyPeer = errors.New("peer dialed by ethp2p is legacy")
 

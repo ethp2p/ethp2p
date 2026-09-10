@@ -152,7 +152,7 @@ func (n *BroadcastNode) processIncomingConnections(ctx context.Context) {
 			n.logger.Error("failed to authenticate simulation peer", "addr", c.RemoteAddr())
 			continue
 		}
-		n.serveConn(c, transport.ConnDirIn, simAuthInfo(n.num, remote))
+		n.serveConn(c, simPeerID(remote))
 	}
 }
 
@@ -177,12 +177,12 @@ func (n *BroadcastNode) DialPeer(ctx context.Context, p int, addr net.Addr) erro
 		return err
 	}
 
-	n.serveConn(cu, transport.ConnDirOut, simAuthInfo(n.num, p))
+	n.serveConn(cu, simPeerID(p))
 	return nil
 }
 
-func (n *BroadcastNode) serveConn(conn *quic.Conn, direction transport.ConnDir, auth transport.AuthInfo) {
-	ethConn := transport.NewQUICConn(conn, direction, auth)
+func (n *BroadcastNode) serveConn(conn *quic.Conn, remote transport.PeerID) {
+	ethConn := transport.NewQUICConn(conn, remote)
 	n.mu.Lock()
 	if n.closed {
 		n.mu.Unlock()
@@ -303,11 +303,9 @@ func drainPeers(peers <-chan *ethp2p.Peer) {
 	}
 }
 
-func simAuthInfo(local, remote int) transport.AuthInfo {
-	localID := strconv.Itoa(local)
-	remoteID := strconv.Itoa(remote)
-	return transport.AuthInfo{
-		Local:  transport.PeerID(localID),
-		Remote: transport.PeerID(remoteID),
-	}
+// simPeerID renders a simulation node number as the peer identity reported for
+// a connection. Simulation hosts authenticate by address rather than by
+// certificate, so NewQUICConn carries the identity as caller-supplied metadata.
+func simPeerID(node int) transport.PeerID {
+	return transport.PeerID(strconv.Itoa(node))
 }

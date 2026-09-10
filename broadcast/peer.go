@@ -104,7 +104,7 @@ func newPeerConn(engine *Engine, bindCtx context.Context, conn transport.Conn) *
 		cancel:        cancel,
 	}
 	if conn != nil {
-		p.id = PeerID(conn.AuthInfo().Remote)
+		p.id = PeerID(conn.RemotePeerID())
 	}
 	return p
 }
@@ -309,8 +309,7 @@ func (p *PeerConn) disposeQueuedStreams() {
 // accept the peer's inbound BCAST stream (read BCAST preamble + Handshake).
 // Data-stream queues wait independently for this handshake to complete.
 func (p *PeerConn) handshake(ctx context.Context, ourChannels []ChannelID) (ProtocolVersion, []ChannelID, error) {
-	auth := p.conn.AuthInfo()
-	if auth.Local == "" || auth.Remote == "" {
+	if p.conn.RemotePeerID() == "" {
 		return 0, nil, fmt.Errorf("authenticated peer ID is empty")
 	}
 	ctx, cancel := context.WithCancel(ctx)

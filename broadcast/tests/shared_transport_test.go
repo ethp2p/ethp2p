@@ -17,7 +17,7 @@ import (
 
 // TestSharedTransportBroadcastRoundTrip exercises the broadcast stack over
 // the production shared transport. The regular integration helpers use a raw
-// QUIC host, so this test specifically covers authenticated TransportEth
+// QUIC host, so this test specifically covers authenticated Ethp2pTransport
 // connections and the production five-stream unidirectional limit.
 func TestSharedTransportBroadcastRoundTrip(t *testing.T) {
 	for _, ss := range strategies {
@@ -28,9 +28,9 @@ func TestSharedTransportBroadcastRoundTrip(t *testing.T) {
 			defer cancel()
 
 			type sharedNode struct {
-				shared  *transport.TransportShared
+				shared  *transport.SharedTransport
 				packet  *net.UDPConn
-				eth     *transport.TransportEth
+				eth     *transport.Ethp2pTransport
 				stack   *ethp2p.Stack
 				engine  *broadcast.Engine
 				obs     *testObserver
@@ -156,15 +156,13 @@ func TestSharedTransportBroadcastRoundTrip(t *testing.T) {
 			a.conn = dialed.conn
 			b.conn = bConn
 
-			if auth := a.conn.AuthInfo(); auth.Local != transport.PeerID(a.eth.PeerID()) ||
-				auth.Remote != transport.PeerID(b.eth.PeerID()) || auth.RemoteKey == nil ||
-				a.conn.Direction() != transport.ConnDirOut {
-				t.Fatalf("dialed auth = %+v", auth)
+			// The local identity belongs to the endpoint, so only the remote
+			// identity is asserted on the connection.
+			if got := a.conn.RemotePeerID(); got != transport.PeerID(b.eth.PeerID()) {
+				t.Fatalf("dialed remote peer ID = %x, want %x", got, b.eth.PeerID())
 			}
-			if auth := b.conn.AuthInfo(); auth.Local != transport.PeerID(b.eth.PeerID()) ||
-				auth.Remote != transport.PeerID(a.eth.PeerID()) || auth.RemoteKey == nil ||
-				b.conn.Direction() != transport.ConnDirIn {
-				t.Fatalf("accepted auth = %+v", auth)
+			if got := b.conn.RemotePeerID(); got != transport.PeerID(a.eth.PeerID()) {
+				t.Fatalf("accepted remote peer ID = %x, want %x", got, a.eth.PeerID())
 			}
 
 			for _, node := range []*sharedNode{a, b} {

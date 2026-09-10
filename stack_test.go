@@ -26,7 +26,7 @@ const (
 
 type testEndpoint struct {
 	shared *transport.SharedTransport
-	eth    *transport.Transport
+	eth    *transport.Ethp2pTransport
 	packet *net.UDPConn
 }
 
@@ -57,7 +57,7 @@ func newTestEndpoint(t *testing.T) *testEndpoint {
 	}
 	endpoint := &testEndpoint{shared: shared, eth: shared.Ethp2p(), packet: packet}
 	t.Cleanup(func() {
-		// TransportShared deliberately does not own the packet connection.
+		// SharedTransport deliberately does not own the packet connection.
 		_ = endpoint.shared.Close()
 		_ = endpoint.packet.Close()
 	})

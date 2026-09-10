@@ -7,32 +7,14 @@ import (
 	"github.com/quic-go/quic-go"
 )
 
-var _ Conn = (*ethp2pConn)(nil)
-
 // PeerID is the binary multihash representation used by libp2p peer.ID. A
 // PeerID is not the human-readable base-encoded form of that multihash.
 type PeerID string
 
-// AuthInfo identifies both ends of an ethp2p connection and carries the
-// identity key authenticated for the remote endpoint. NewShared derives these
-// values from secp256k1 identity keys; NewQUICConn trusts caller-supplied values.
-
-// TODO now that we have the ethp2p.Stack which holds our local identity,
-// drop local peer from AuthInfo. And the remote PeerID can be obtained from the
-// PubKey, so drop the field too.
-type AuthInfo struct {
-	// Local is the identity derived from the key passed to NewShared,
-	// or supplied by the caller of NewQUICConn.
-	Local PeerID
-	// Remote is the identity bound to the remote TLS certificate.
-	Remote PeerID
-	// RemoteKey is the public key authenticated for the remote endpoint.
-	// It is nil for conns built by NewQUICConn unless the caller supplies it.
-	RemoteKey *PubKey
-}
-
 // ConnDir records which endpoint sent the first QUIC packet. Its zero
-// value is ConnDirOut.
+// value is ConnDirOut. No Conn reports it: the dialing side already knows
+// whether it dialed or accepted, and the connection manager carries the
+// direction alongside the connection it owns.
 type ConnDir int
 
 const (
@@ -74,36 +56,29 @@ type Conn interface {
 	// includes retransmissions. The received count includes duplicate stream
 	// data. Neither count includes UDP framing.
 	ConnectionStats() (bytesSent, bytesReceived uint64)
-	// Direction reports which endpoint initiated the QUIC connection.
-	Direction() ConnDir
-	// AuthInfo returns the connection's authenticated identities, including
-	// the remote public key. NewQUICConn returns the caller-supplied metadata.
-	AuthInfo() AuthInfo
+	// RemotePeerID returns the identity authenticated for the remote endpoint,
+	// or the caller-supplied identity for connections built by NewQUICConn. It
+	// returns the empty PeerID when the connection carries neither. The local
+	// identity belongs to the owning endpoint, not to the connection.
+	RemotePeerID() PeerID
 }
 
 // NewQUICConn routes streams from an already-authenticated QUIC connection and
-// returns its ethp2p view. It trusts auth without verification. The caller must
-// not accept streams directly from raw. Closing the returned view closes raw.
-func NewQUICConn(raw *quic.Conn, direction ConnDir, auth AuthInfo) Conn {
-	var wg sync.WaitGroup // Routing ends when raw closes; this adapter does not wait.
-	sc := &sharedConn{
-		conn:      raw,
-		sem:       make(chan struct{}, maxPendingStreamsPerConn),
-		libp2pBi:  make(chan *quic.Stream, deliveryQueueLen),
-		ethp2pBi:  make(chan *quic.Stream, deliveryQueueLen),
-		ethp2pUni: make(chan *quic.ReceiveStream, uniDeliveryQueueLen),
-	}
-	for range maxPendingStreamsPerConn {
-		sc.sem <- struct{}{}
-	}
-	wg.Go(func() { sc.drainBidi(&wg) })
-	wg.Go(sc.drainUni)
+// returns its ethp2p view. The caller must not accept streams directly from raw.
+// Closing the returned view closes raw.
+//
+// remote is the identity reported for the remote endpoint, used when the
+// connection carries no ethp2p TLS certificate to derive one from. Passing the
+// empty PeerID falls back to the certificate, which is only meaningful for a
+// connection that did complete an ethp2p handshake.
+func NewQUICConn(raw *quic.Conn, remote PeerID) Conn {
+	// Routing ends when raw closes; this adapter does not wait for its
+	// dispatchers.
+	var wg sync.WaitGroup
+	sc := newSharedConn(raw, &wg, remote)
 
 	// Single-view adapter: the libp2p view never exists, so mark it done at
 	// birth. Its code never wins; the ethp2p view always closes last.
 	_ = sc.libp2p().CloseWithError(appNoError, "closed")
-	ethp2p := sc.ethp2p()
-	ethp2p.dir = direction
-	ethp2p.auth = auth
-	return ethp2p
+	return sc.ethp2p()
 }

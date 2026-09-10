@@ -36,7 +36,7 @@ const (
 
 type side uint32
 
-// Side bitmasks for TransportShared.attached and sharedConn.closed.
+// Side bitmasks for SharedTransport.attached and sharedConn.closed.
 const (
 	sideLibp2p side = 1 << iota
 	sideEthp2p
@@ -96,11 +96,11 @@ func NewShared(key *PrivKey, packetConn net.PacketConn) (*SharedTransport, error
 		ethQ:       make(chan Conn, connQueueLen),
 	}
 
-	// ConnContext attaches one handshake instance to every incoming
-	// connection's context. We memoize the identity of the peer during
-	// the accept handshake. Not used for outbound connections.
+	// ConnContext installs the per-connection identity slot that the verify
+	// callback fills during the accept handshake and acceptLoop reads back.
+	// It is not used for dialed connections, which own their slot locally.
 	t.raw.ConnContext = func(ctx context.Context, _ *quic.ClientInfo) (context.Context, error) {
-		return context.WithValue(ctx, handshakeContextKey{}, &handshake{}), nil
+		return context.WithValue(ctx, identityContextKey{}, &identitySlot{}), nil
 	}
 	return t, nil
 }
@@ -153,11 +153,6 @@ func (t *SharedTransport) acceptLoop(ln *quic.Listener) {
 			return
 		}
 
-		hs, ok := raw.Context().Value(handshakeContextKey{}).(*handshake)
-		if !ok {
-			slog.Warn("unexpectedly missing handshake context")
-		}
-
 		state := raw.ConnectionState()
 		switch state.TLS.NegotiatedProtocol {
 		case AlpnLibp2p:
@@ -168,10 +163,8 @@ func (t *SharedTransport) acceptLoop(ln *quic.Listener) {
 				_ = raw.CloseWithError(appFailure, errClosed.Error())
 			}
 		case AlpnEthp2p:
-			sc := newSharedConn(raw)
+			sc := newSharedConn(raw, &t.wg, acceptedPeerID(raw))
 			ethp2p := sc.ethp2p()
-			ethp2p.dir = ConnDirIn
-			ethp2p.auth = hs.auth
 			libp2p := sc.libp2p()
 			// Dispose the ethp2p view first so a double drop closes the raw
 			// connection with the libp2p failure code rather than a clean
@@ -193,6 +186,17 @@ func (t *SharedTransport) acceptLoop(ln *quic.Listener) {
 	}
 }
 
+// acceptedPeerID returns the identity derived during the accept handshake. An
+// empty result means the slot was missing or unfilled, and the identity is
+// re-derived on first use instead.
+func acceptedPeerID(raw *quic.Conn) PeerID {
+	slot, _ := raw.Context().Value(identityContextKey{}).(*identitySlot)
+	if slot == nil {
+		return ""
+	}
+	return slot.id
+}
+
 // shutdown cancels transport waits and closes the endpoint before joining
 // its goroutines. Closing the endpoint unblocks stream acceptance and
 // classification on every connection, including views still queued for delivery.
@@ -210,6 +214,9 @@ func (t *SharedTransport) shutdown() error {
 type sharedConn struct {
 	conn *quic.Conn
 	sem  chan struct{}
+	// wg owns every goroutine started for this connection, so transport
+	// shutdown waits for the dispatchers and their classifiers.
+	wg *sync.WaitGroup
 
 	// outboxes for classified incoming streams
 	libp2pBi  chan *quic.Stream
@@ -220,16 +227,25 @@ type sharedConn struct {
 	// closes once both views are closed, so closing one view never kills
 	// the other. Accessed atomically.
 	closed atomic.Uint32
+
+	// resolveID memoizes the remote identity, preferring the identity the
+	// handshake already derived. It only falls back to parsing the peer
+	// certificate from the connection's TLS state when none was supplied.
+	resolveID func() (PeerID, error)
 }
 
-// newSharedConn splits an ethp2p_0 connection into the shared state backing
-// its two views. Callers build the views with ethp2p() and libp2p() and stamp
-// the view metadata themselves. The caller owns the goroutine lifecycle:
-// everything joins t.wg, so shutdown waits for the drainers and their
-// classifiers.
-func newSharedConn(raw *quic.Conn) *sharedConn {
+// newSharedConn splits an ethp2p_0 connection into the shared state backing its
+// two views and starts the stream dispatchers on wg. Callers build the views
+// with ethp2p() and libp2p().
+//
+// knownID is an identity already established for this connection: derived by the
+// handshake for TLS connections, or caller-supplied metadata for NewQUICConn. An
+// empty knownID falls back to deriving it from the connection's certificate on
+// first use, which costs a second derivation.
+func newSharedConn(raw *quic.Conn, wg *sync.WaitGroup, knownID PeerID) *sharedConn {
 	sc := &sharedConn{
 		conn:      raw,
+		wg:        wg,
 		sem:       make(chan struct{}, maxPendingStreamsPerConn),
 		libp2pBi:  make(chan *quic.Stream, deliveryQueueLen),
 		ethp2pBi:  make(chan *quic.Stream, deliveryQueueLen),
@@ -238,8 +254,22 @@ func newSharedConn(raw *quic.Conn) *sharedConn {
 	for range maxPendingStreamsPerConn {
 		sc.sem <- struct{}{}
 	}
+	sc.resolveID = sync.OnceValues(func() (PeerID, error) {
+		if knownID != "" {
+			return knownID, nil
+		}
+		_, id, err := authenticate(raw.ConnectionState().TLS.PeerCertificates)
+		return id, err
+	})
+	wg.Go(sc.drainBidi)
+	wg.Go(sc.drainUni)
 	return sc
 }
+
+// remoteID returns the identity authenticated for the remote endpoint during
+// the handshake, or the caller-supplied identity for connections built by
+// NewQUICConn.
+func (c *sharedConn) remoteID() (PeerID, error) { return c.resolveID() }
 
 // closeSide releases one view and closes the connection when both are released.
 func (s *sharedConn) closeSide(want side, code quic.ApplicationErrorCode, reason string) {
@@ -262,7 +292,7 @@ func (r *sharedConn) libp2p() quicreuse.QUICConn {
 
 // drainBidi accepts bidirectional streams and classifies them.
 // The semaphore limits the number of concurrent classifications.
-func (r *sharedConn) drainBidi(wg *sync.WaitGroup) {
+func (r *sharedConn) drainBidi() {
 	ctx := r.conn.Context()
 
 	for {
@@ -281,7 +311,7 @@ func (r *sharedConn) drainBidi(wg *sync.WaitGroup) {
 			return
 		}
 
-		wg.Go(func() {
+		r.wg.Go(func() {
 			defer func() { r.sem <- struct{}{} }()
 
 			isEthp2p, err := classify(ctx, stream)
@@ -365,10 +395,6 @@ func classify[S peekableStream](ctx context.Context, stream S) (ethp2p bool, err
 		return buf[prefixLen] != '/', nil
 	}
 	return false, errInvalidFrame
-}
-
-func (r *sharedConn) classify[S peekableStream]() {
-
 }
 
 // drainUni routes all incoming unidirectional streams to ethp2p; libp2p uses none.

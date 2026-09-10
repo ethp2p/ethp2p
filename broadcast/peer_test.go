@@ -27,8 +27,8 @@ func TestHandshakeUsesAuthenticatedPeerIDs(t *testing.T) {
 	defer cancel()
 
 	leftRaw, rightRaw := newTestTransportPair(ctx)
-	leftRaw.auth = testAuthInfo("authenticated-left", "authenticated-right")
-	rightRaw.auth = testAuthInfo("authenticated-right", "authenticated-left")
+	leftRaw.remote = "authenticated-right"
+	rightRaw.remote = "authenticated-left"
 	left := newPeerConn(
 		&Engine{ctx: ctx, config: EngineConfig{Observer: NoOpObserver{}}},
 		ctx,
@@ -101,7 +101,7 @@ func TestHandshakeRequiresAuthenticatedPeerIDs(t *testing.T) {
 	ctx, cancel := context.WithTimeout(t.Context(), time.Second)
 	defer cancel()
 	raw, _ := newTestTransportPair(ctx)
-	raw.auth = transport.AuthInfo{}
+	raw.remote = ""
 	peer := newPeerConn(
 		&Engine{ctx: ctx, config: EngineConfig{Observer: NoOpObserver{}}},
 		ctx,

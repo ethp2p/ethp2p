@@ -38,18 +38,20 @@ type handshaker struct {
 	config    tls.Config
 }
 
-// handshake is one connection's TLS handshake. On the dial side it owns the
-// connection's tls.Config; on both sides its verify callback memoizes the
-// authenticated identity into auth, so the accept path need not verify it again.
-type handshake struct {
-	config tls.Config
-	auth   AuthInfo
-}
+// identitySlot is the per-connection rendezvous between the handshake verify
+// callback, which derives the peer identity, and the dial or accept path, which
+// needs it. The callback runs during the handshake and the reader runs only
+// after the handshake completes, so the write happens-before the read without
+// further synchronization.
+//
+// The dial path owns its slot as a local variable. The accept path has nothing
+// local that spans both the TLS configuration and the accepted connection, so
+// it carries its slot on the connection context instead.
+type identitySlot struct{ id PeerID }
 
-// handshakeContextKey is the context key under which the server-side
-// handshake instance travels from NewShared's ConnContext hook to the
-// accept path.
-type handshakeContextKey struct{}
+// identityContextKey is the connection-context key under which NewShared's
+// ConnContext hook installs the accept-side slot.
+type identityContextKey struct{}
 
 // newHandshaker configures TLS 1.3 for key, preferring ethp2p over libp2p.
 func newHandshaker(key *PrivKey) (*handshaker, error) {
@@ -75,45 +77,52 @@ func newHandshaker(key *PrivKey) (*handshaker, error) {
 	}, nil
 }
 
-// newHandshake returns a handshake for one dial. A nonempty expect pins the server
+// dialConfig returns the TLS configuration for one dial, recording the
+// authenticated peer identity into slot. A nonempty expect pins the server
 // identity, failing the handshake on mismatch.
-func (h *handshaker) newHandshake(expect PeerID) *handshake {
-	hs := &handshake{}
-	hs.config = *h.verify(hs, expect)
-	return hs
+func (h *handshaker) dialConfig(slot *identitySlot, expect PeerID) *tls.Config {
+	return h.verify(slot, expect)
 }
 
 // serverConfig returns the listener configuration whose top-level ALPN is
-// libp2p. GetConfigForClient finds the handshake instance that ConnContext
-// attached to the connection context and returns a configuration that
-// memoizes the authenticated identity into it.
+// libp2p. GetConfigForClient replaces it with the full preference order, so the
+// listener accepts both ethp2p_0 and libp2p, and hands the per-connection
+// identity slot installed by ConnContext to the verify callback.
 func (h *handshaker) serverConfig() *tls.Config {
 	return &tls.Config{
 		NextProtos: []string{AlpnLibp2p},
 		GetConfigForClient: func(info *tls.ClientHelloInfo) (*tls.Config, error) {
-			hs := info.Context().Value(handshakeContextKey{}).(*handshake)
-			return h.verify(hs, ""), nil
+			slot, _ := info.Context().Value(identityContextKey{}).(*identitySlot)
+			return h.verify(slot, ""), nil
 		},
 	}
 }
 
 // verify returns a single-connection TLS config whose verify callback
-// authenticates the presented certificate and memoizes the identity into hs.
-func (h *handshaker) verify(hs *handshake, expect PeerID) *tls.Config {
+// authenticates the presented certificate, pins it to expect when nonempty, and
+// records the identity into slot.
+//
+// It is the security boundary for inbound and outbound handshakes: the peer
+// identity is trustworthy because this callback rejected the connection
+// otherwise, and it is derived here exactly once per connection. A nil slot
+// costs a second derivation when the identity is read back.
+func (h *handshaker) verify(slot *identitySlot, expect PeerID) *tls.Config {
 	config := h.config.Clone()
 	config.VerifyPeerCertificate = func(rawCerts [][]byte, _ [][]*x509.Certificate) error {
 		chain, err := parseChain(rawCerts)
 		if err != nil {
 			return err
 		}
-		key, actual, err := authenticate(chain)
+		_, actual, err := authenticate(chain)
 		if err != nil {
 			return err
 		}
 		if expect != "" && expect != actual {
 			return ErrPeerMismatch{Expected: expect, Actual: actual}
 		}
-		hs.auth = AuthInfo{Local: h.peerID, Remote: actual, RemoteKey: key}
+		if slot != nil {
+			slot.id = actual
+		}
 		return nil
 	}
 	return config

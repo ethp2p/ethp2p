@@ -35,7 +35,7 @@ The implementation spans four responsibilities:
 
 | Component | Current responsibility | Missing contract |
 | --- | --- | --- |
-| `TransportShared` | Owns the QUIC endpoint and publishes libp2p and ethp2p views | Complete view termination and coherent resource ownership |
+| `SharedTransport` | Owns the QUIC endpoint and publishes libp2p and ethp2p views | Complete view termination and coherent resource ownership |
 | `sharedConn` | Classifies inbound streams and tracks two close bits | Cancellation of operations belonging to a closed view |
 | `Stack.ServeConn` | Binds protocols and runs bidirectional and unidirectional routing loops | Connection identity, admission, dial coordination, and inspection |
 | `broadcast.Engine` | Tracks broadcast peers and channel subscriptions | Protection against cleanup from an older binding for the same peer |
@@ -252,7 +252,7 @@ and avoid unbounded goroutine creation.
 ### Dispose of the undelivered libp2p view
 
 The outbound overflow fix is localized to
-[TransportEth.Dial](../transport/transport_ethp2p.go):
+[Ethp2pTransport.Dial](../transport/ethp2p.go):
 
 ```go
 // CURRENT
@@ -289,7 +289,7 @@ requirement.
 The proposed separation is:
 
 ```text
-TransportShared
+SharedTransport
   owns the shared QUIC endpoint
   owns physical connections and their dispatchers
     libp2p view
@@ -328,7 +328,7 @@ type Stack struct {
 	PeerID          transport.PeerID
 	Key             PrivKey
 	BroadcastConfig broadcast.EngineConfig
-	Transport       *transport.TransportShared
+	Transport       *transport.SharedTransport
 	// Initialization and shutdown fields omitted.
 }
 
@@ -346,7 +346,7 @@ type Config struct {
 }
 
 type Stack struct {
-	endpoint  *transport.TransportShared
+	endpoint  *transport.SharedTransport
 	engine    *broadcast.Engine
 	protocols protocol.Registry
 
@@ -363,7 +363,7 @@ type Stack struct {
 }
 
 func NewStack(
-	endpoint *transport.TransportShared,
+	endpoint *transport.SharedTransport,
 	cfg Config,
 ) (*Stack, error)
 
@@ -590,9 +590,12 @@ A duplicate must not escape accounting because it is not the primary.
 
 ## The libp2p boundary limits what Stack can promise
 
-Today `TransportLib.Dial` uses the libp2p caller's TLS configuration and requires the `libp2p` ALPN.
-A libp2p-initiated connection therefore does not become shared merely
-because both peers understand ethp2p.
+`Libp2pTransport.Dial` layers the ethp2p verification onto the libp2p caller's TLS configuration
+instead of replacing it, so an outbound libp2p dial now also publishes the ethp2p view when the peer
+negotiates `ethp2p_0`.
+The reverse direction is not symmetric:
+an inbound connection that negotiated only `libp2p` stays libp2p-only,
+because classification happens once, at handshake time.
 
 The first version of `Stack.Connect` should initiate ethp2p-aware dials
 and manage the resulting ethp2p views.
@@ -606,12 +609,14 @@ peer table.
 Both dial entry points need common reuse and selection rules.
 An existing connection that negotiated only `libp2p` cannot silently change its negotiated protocol.
 
-If libp2p-initiated dials later offer `ethp2p_0`,
+Because libp2p-initiated dials now offer `ethp2p_0`,
 the adapter must preserve the caller's certificate verification, expected peer identity,
 and identity callback behavior.
-The current libp2p transport expects its TLS callback to provide the authenticated remote key
+The libp2p transport expects its TLS callback to provide the authenticated remote key
 before its dial returns.
-Replacing the TLS configuration wholesale would break that contract.
+`Libp2pTransport.Dial` therefore clones the caller's configuration
+and chains the ethp2p verification after the caller's own callback,
+rather than replacing the configuration wholesale.
 
 I would keep this broader coordination as a separate implementation unit.
 That choice limits the first manager to a contract it can fulfill without replacing libp2p's peering

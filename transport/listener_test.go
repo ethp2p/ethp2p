@@ -34,8 +34,8 @@ func TestEthp2pDialPublishesBothViews(t *testing.T) {
 
 	assertSharedALPN(t, clientLibConn)
 	assertSharedALPN(t, serverLibConn)
-	assertAuth(t, clientEthConn, clientEth.PeerID(), serverEth.PeerID(), ConnDirOut)
-	assertAuth(t, serverEthConn, serverEth.PeerID(), clientEth.PeerID(), ConnDirIn)
+	assertPeer(t, clientEthConn, serverEth.PeerID())
+	assertPeer(t, serverEthConn, clientEth.PeerID())
 	if !clientEthConn.SupportsDatagrams() || !serverEthConn.SupportsDatagrams() {
 		t.Fatal("shared QUIC configuration did not negotiate datagrams")
 	}
@@ -70,8 +70,8 @@ func TestEthp2pAcceptStartsSharedListener(t *testing.T) {
 		t.Fatal(err)
 	}
 	assertSharedALPN(t, serverLibConn)
-	assertAuth(t, result.conn, clientEth.PeerID(), serverEth.PeerID(), ConnDirOut)
-	assertAuth(t, serverConn, serverEth.PeerID(), clientEth.PeerID(), ConnDirIn)
+	assertPeer(t, result.conn, serverEth.PeerID())
+	assertPeer(t, serverConn, clientEth.PeerID())
 }
 
 func TestSecondListenFails(t *testing.T) {
@@ -82,16 +82,16 @@ func TestSecondListenFails(t *testing.T) {
 	}
 }
 
-func TestListenerCloseIsNoop(t *testing.T) {
+func TestListenerCloseIsRejected(t *testing.T) {
 	ctx := testContext(t)
 	_, _, clientEth, _ := newEndpoint(t)
 	_, serverLib, serverEth, serverPC := newEndpoint(t)
 	listener := listen(t, serverLib, serverEth)
 
-	// Listener.Close is a noop: listening stops only with the whole
-	// transport, and delivery keeps working after it.
-	if err := listener.Close(); err != nil {
-		t.Fatal(err)
+	// Listener.Close is rejected: listening stops only with the whole
+	// transport, and delivery keeps working after the rejection.
+	if err := listener.Close(); err == nil {
+		t.Fatal("listener.Close succeeded, want rejection")
 	}
 	if _, err := clientEth.Dial(ctx, serverPC.LocalAddr(), serverEth.PeerID()); err != nil {
 		t.Fatal(err)
@@ -103,7 +103,7 @@ func TestListenerCloseIsNoop(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	assertAuth(t, serverEthConn, serverEth.PeerID(), clientEth.PeerID(), ConnDirIn)
+	assertPeer(t, serverEthConn, clientEth.PeerID())
 }
 
 func TestShutdownEndsAccept(t *testing.T) {
