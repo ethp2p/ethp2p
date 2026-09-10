@@ -14,9 +14,9 @@ import (
 func TestPeerDisconnectMidSession(t *testing.T) {
 	for _, ss := range strategies {
 		t.Run(ss.name, func(t *testing.T) {
-			a := newTestNode(t, "node-a")
-			b := newTestNode(t, "node-b")
-			c := newTestNode(t, "node-c")
+			a := newTestNode(t)
+			b := newTestNode(t)
+			c := newTestNode(t)
 			channelID := broadcast.ChannelID("churn-channel")
 
 			thA := ss.createChannel(t, a.engine, channelID)
@@ -57,8 +57,8 @@ func TestPeerDisconnectMidSession(t *testing.T) {
 func TestLateJoinPeer(t *testing.T) {
 	for _, ss := range strategies {
 		t.Run(ss.name, func(t *testing.T) {
-			a := newTestNode(t, "node-a")
-			b := newTestNode(t, "node-b")
+			a := newTestNode(t)
+			b := newTestNode(t)
 			channelID := broadcast.ChannelID("late-channel")
 
 			thA := ss.createChannel(t, a.engine, channelID)
@@ -77,7 +77,7 @@ func TestLateJoinPeer(t *testing.T) {
 			b.obs.waitDecoded(t, channelID, "msg-1", defaultTimeout)
 
 			// Late joiner C connects to A.
-			c := newTestNode(t, "node-c")
+			c := newTestNode(t)
 			thC := ss.createChannel(t, c.engine, channelID)
 			defer thC.stop()
 

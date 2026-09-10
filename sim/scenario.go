@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"net"
 	"sync"
 	"time"
 )
@@ -71,9 +70,8 @@ func (s *Scenario) Start() {
 func (s *Scenario) RunNode(ctx context.Context, node Node, peers []int, publishWait time.Duration) {
 	nodeNum := node.NodeNum()
 	nodeCtx := context.WithoutCancel(ctx)
-	if configurable, ok := node.(interface{ setPeerAddresses(map[int]net.Addr) }); ok {
-		configurable.setPeerAddresses(s.peerAddresses(nodeNum, peers))
-	}
+	// Peer identity comes from the transport handshake, so the node no longer
+	// needs the topology-derived address map to authenticate inbound peers.
 	node.Start(nodeCtx)
 	if s.BandwidthLogFrequency != 0 {
 		s.wg.Go(func() { s.reportNodeBandwidth(s.ctx, s.BandwidthLogFrequency, nodeNum, node) })
@@ -103,34 +101,6 @@ func (s *Scenario) RunNode(ctx context.Context, node Node, peers []int, publishW
 	} else {
 		s.receiveMessages(nodeCtx, nodeNum, node)
 	}
-}
-
-func (s *Scenario) peerAddresses(nodeNum int, dialPeers []int) map[int]net.Addr {
-	peerNums := make(map[int]struct{}, len(dialPeers))
-	for _, peer := range dialPeers {
-		peerNums[peer] = struct{}{}
-	}
-
-	topology := s.topology
-	if len(topology.Nodes) == 0 {
-		if driver, ok := s.Driver.(*SimnetDriver); ok {
-			topology = driver.Topology
-		}
-	}
-	for _, edge := range topology.Edges {
-		switch nodeNum {
-		case edge.Source:
-			peerNums[edge.Target] = struct{}{}
-		case edge.Target:
-			peerNums[edge.Source] = struct{}{}
-		}
-	}
-
-	peers := make(map[int]net.Addr, len(peerNums))
-	for peer := range peerNums {
-		peers[peer] = s.Driver.NodeAddr(peer)
-	}
-	return peers
 }
 
 func (s *Scenario) publishMessages(ctx context.Context, nodeNum int, node Node, publishWait time.Duration) {

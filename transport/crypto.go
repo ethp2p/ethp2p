@@ -1,6 +1,7 @@
 package transport
 
 import (
+	"bytes"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
@@ -116,6 +117,24 @@ func GenPrivKey() (*PrivKey, error) {
 	priv, err := secp256k1.GeneratePrivateKey()
 	if err != nil {
 		return nil, err
+	}
+	return &PrivKey{priv: priv}, nil
+}
+
+// PrivKeyFromBytes parses the 32-byte secp256k1 secret scalar encoding produced
+// by [PrivKey.Bytes]. An identity loaded from storage is validated once here
+// rather than trusted downstream.
+func PrivKeyFromBytes(secret []byte) (*PrivKey, error) {
+	priv := secp256k1.PrivKeyFromBytes(secret)
+	// SetByteSlice reduces whatever it is given modulo the group order, so a
+	// round trip that changes the bytes means the input was rejected as
+	// out of range or was not 32 bytes to begin with.
+	if !bytes.Equal(priv.Serialize(), secret) {
+		return nil, errInvalidPrivKey
+	}
+	// The zero scalar round-trips but has no public key.
+	if priv.Key.IsZero() {
+		return nil, errInvalidPrivKey
 	}
 	return &PrivKey{priv: priv}, nil
 }

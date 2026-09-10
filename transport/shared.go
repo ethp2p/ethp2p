@@ -48,6 +48,7 @@ const (
 type SharedTransport struct {
 	raw        *quic.Transport
 	handshaker *handshaker
+	profile    Profile
 
 	// ctx is the transport lifetime.
 	ctx    context.Context
@@ -74,10 +75,11 @@ type SharedTransport struct {
 	wg sync.WaitGroup
 }
 
-// NewShared creates a shared QUIC endpoint using key for authentication.
-// Listening starts on the first [Libp2pTransport.Listen] or [Ethp2pTransport.Accept].
+// NewShared creates a shared QUIC endpoint using key for authentication and
+// profile for connection policy. Listening starts on the first
+// [Libp2pTransport.Listen] or [Ethp2pTransport.Accept].
 // The caller remains responsible for closing packetConn.
-func NewShared(key *PrivKey, packetConn net.PacketConn) (*SharedTransport, error) {
+func NewShared(key *PrivKey, packetConn net.PacketConn, profile Profile) (*SharedTransport, error) {
 	if packetConn == nil {
 		return nil, errNilPacketConn
 	}
@@ -90,6 +92,7 @@ func NewShared(key *PrivKey, packetConn net.PacketConn) (*SharedTransport, error
 	t := &SharedTransport{
 		raw:        &quic.Transport{Conn: packetConn},
 		handshaker: handshaker,
+		profile:    profile,
 		ctx:        ctx,
 		cancel:     cancel,
 		libQ:       make(chan quicreuse.QUICConn, connQueueLen),
@@ -135,7 +138,7 @@ func (t *SharedTransport) ensureListener() error {
 		return nil
 	}
 	t.lnOnce.Do(func() {
-		ln, err := t.raw.Listen(t.handshaker.serverConfig(), quicConfig.Clone())
+		ln, err := t.raw.Listen(t.handshaker.serverConfig(), t.profile.quicConfig())
 		if err != nil {
 			t.lnErr = err
 			return
@@ -163,7 +166,7 @@ func (t *SharedTransport) acceptLoop(ln *quic.Listener) {
 				_ = raw.CloseWithError(appFailure, errClosed.Error())
 			}
 		case AlpnEthp2p:
-			sc := newSharedConn(raw, &t.wg, verifiedIdentity(acceptedRemoteKey(raw)))
+			sc := newSharedConn(raw, &t.wg, acceptedPeerID(raw))
 			ethp2p := sc.ethp2p()
 			libp2p := sc.libp2p()
 			// Dispose the ethp2p view first so a double drop closes the raw
@@ -186,15 +189,15 @@ func (t *SharedTransport) acceptLoop(ln *quic.Listener) {
 	}
 }
 
-// acceptedRemoteKey returns the key authenticated during the accept handshake.
-// A nil result means the slot was missing or unfilled, so the identity is
-// derived from the connection's certificate on first use instead.
-func acceptedRemoteKey(raw *quic.Conn) *PubKey {
+// acceptedPeerID returns the peer identity authenticated during the accept
+// handshake. An ethp2p_0 connection always has one, because the ALPN could only
+// be negotiated after the verify callback accepted the peer's certificate.
+func acceptedPeerID(raw *quic.Conn) PeerID {
 	slot, _ := raw.Context().Value(remoteIdentityContextKey{}).(*remoteIdentitySlot)
-	if slot == nil {
-		return nil
+	if slot == nil || slot.key == nil {
+		return ""
 	}
-	return slot.key
+	return slot.key.PeerID()
 }
 
 // shutdown cancels transport waits and closes the endpoint before joining
@@ -228,57 +231,22 @@ type sharedConn struct {
 	// the other. Accessed atomically.
 	closed atomic.Uint32
 
-	// resolvePeerID memoizes the remote peer identity, preferring the key the
-	// handshake already authenticated. It falls back to authenticating the peer
-	// certificate from the connection's TLS state when no identity was supplied.
-	resolvePeerID func() (PeerID, error)
-}
-
-// remoteIdentity is the identity established for a remote endpoint. It is
-// either the key authenticated by the ethp2p TLS handshake or an opaque peer ID
-// a caller authenticated out of band. A verified key always wins, so the two
-// arms cannot conflict, and an empty identity means "derive it on first use".
-type remoteIdentity struct {
-	// key is the remote public key authenticated by the handshake, if any.
-	key *PubKey
-	// id is a caller-supplied identity, used only when key is nil.
-	id PeerID
-}
-
-// verifiedIdentity returns the identity established by a handshake that
-// authenticated key, or the zero identity when key is nil.
-func verifiedIdentity(key *PubKey) remoteIdentity { return remoteIdentity{key: key} }
-
-// suppliedIdentity returns an identity a caller authenticated out of band, such
-// as the simulation peer numbers used by NewQUICConn. An empty id yields the
-// zero identity, which requests derivation from the certificate instead.
-func suppliedIdentity(id PeerID) remoteIdentity { return remoteIdentity{id: id} }
-
-// known reports whether an identity was established up front, rather than
-// needing to be derived from the connection's certificate.
-func (r remoteIdentity) known() bool { return r.key != nil || r.id != "" }
-
-// peerID returns the authenticated peer identity, deriving it from the verified
-// key when that is the provenance.
-func (r remoteIdentity) peerID() PeerID {
-	if r.key != nil {
-		return r.key.PeerID()
-	}
-	return r.id
+	// remote is the identity authenticated for the remote endpoint.
+	remote PeerID
 }
 
 // newSharedConn splits an ethp2p_0 connection into the shared state backing its
 // two views and starts the stream dispatchers on wg. Callers build the views
 // with ethp2p() and libp2p().
 //
-// remote is the identity already established for this connection: the key the
-// handshake authenticated, or caller-supplied metadata for NewQUICConn. The
-// zero identity falls back to authenticating the connection's certificate on
-// first use, which costs a second authentication.
-func newSharedConn(raw *quic.Conn, wg *sync.WaitGroup, remote remoteIdentity) *sharedConn {
+// remote is the peer identity the handshake authenticated. An ethp2p_0
+// connection only reaches this point after the verify callback accepted the
+// peer's certificate, so the identity is always established by then.
+func newSharedConn(raw *quic.Conn, wg *sync.WaitGroup, remote PeerID) *sharedConn {
 	sc := &sharedConn{
 		conn:      raw,
 		wg:        wg,
+		remote:    remote,
 		sem:       make(chan struct{}, maxPendingStreamsPerConn),
 		libp2pBi:  make(chan *quic.Stream, deliveryQueueLen),
 		ethp2pBi:  make(chan *quic.Stream, deliveryQueueLen),
@@ -287,24 +255,13 @@ func newSharedConn(raw *quic.Conn, wg *sync.WaitGroup, remote remoteIdentity) *s
 	for range maxPendingStreamsPerConn {
 		sc.sem <- struct{}{}
 	}
-	sc.resolvePeerID = sync.OnceValues(func() (PeerID, error) {
-		if remote.known() {
-			return remote.peerID(), nil
-		}
-		key, _, err := authenticate(raw.ConnectionState().TLS.PeerCertificates)
-		if err != nil {
-			return "", err
-		}
-		return key.PeerID(), nil
-	})
 	wg.Go(sc.drainBidi)
 	wg.Go(sc.drainUni)
 	return sc
 }
 
-// remotePeerID returns the identity authenticated for the remote endpoint, or
-// the caller-supplied identity for connections built by NewQUICConn.
-func (c *sharedConn) remotePeerID() (PeerID, error) { return c.resolvePeerID() }
+// remotePeerID returns the identity authenticated for the remote endpoint.
+func (c *sharedConn) remotePeerID() PeerID { return c.remote }
 
 // closeSide releases one view and closes the connection when both are released.
 func (s *sharedConn) closeSide(want side, code quic.ApplicationErrorCode, reason string) {

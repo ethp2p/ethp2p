@@ -2,9 +2,6 @@ package transport
 
 import (
 	"context"
-	"sync"
-
-	"github.com/quic-go/quic-go"
 )
 
 // PeerID is the binary multihash representation used by libp2p peer.ID. A
@@ -56,29 +53,7 @@ type Conn interface {
 	// includes retransmissions. The received count includes duplicate stream
 	// data. Neither count includes UDP framing.
 	ConnectionStats() (bytesSent, bytesReceived uint64)
-	// RemotePeerID returns the identity authenticated for the remote endpoint,
-	// or the caller-supplied identity for connections built by NewQUICConn. It
-	// returns the empty PeerID when the connection carries neither. The local
-	// identity belongs to the owning endpoint, not to the connection.
+	// RemotePeerID returns the identity authenticated for the remote endpoint.
+	// The local identity belongs to the owning endpoint, not to the connection.
 	RemotePeerID() PeerID
-}
-
-// NewQUICConn routes streams from an already-authenticated QUIC connection and
-// returns its ethp2p view. The caller must not accept streams directly from raw.
-// Closing the returned view closes raw.
-//
-// remote is the identity reported for the remote endpoint, used when the
-// connection carries no ethp2p TLS certificate to derive one from. Passing the
-// empty PeerID falls back to the certificate, which is only meaningful for a
-// connection that did complete an ethp2p handshake.
-func NewQUICConn(raw *quic.Conn, remote PeerID) Conn {
-	// Routing ends when raw closes; this adapter does not wait for its
-	// dispatchers.
-	var wg sync.WaitGroup
-	sc := newSharedConn(raw, &wg, suppliedIdentity(remote))
-
-	// Single-view adapter: the libp2p view never exists, so mark it done at
-	// birth. Its code never wins; the ethp2p view always closes last.
-	_ = sc.libp2p().CloseWithError(appNoError, "closed")
-	return sc.ethp2p()
 }

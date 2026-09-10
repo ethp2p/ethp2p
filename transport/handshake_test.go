@@ -36,9 +36,6 @@ func TestVerifyRecordsRemoteKeyInSlot(t *testing.T) {
 	if got := slot.key.PeerID(); got != theirs.peerID {
 		t.Fatalf("peer ID derived from slot key = %x, want %x", got, theirs.peerID)
 	}
-	if got := verifiedIdentity(slot.key).peerID(); got != theirs.peerID {
-		t.Fatalf("remoteIdentity peer ID = %x, want %x", got, theirs.peerID)
-	}
 }
 
 func TestVerifyLeavesSlotEmptyOnMismatch(t *testing.T) {

@@ -3,18 +3,15 @@ package sim
 import (
 	"context"
 	"errors"
-	"fmt"
 	"log/slog"
 	"net"
 	"slices"
-	"strconv"
 	"strings"
 	"sync"
 
 	"github.com/ethp2p/ethp2p"
 	"github.com/ethp2p/ethp2p/broadcast"
 	"github.com/ethp2p/ethp2p/transport"
-	"github.com/quic-go/quic-go"
 )
 
 // Node defines the interface for network simulation nodes.
@@ -33,15 +30,21 @@ type Node interface {
 // BroadcastNode wraps broadcast.Engine and a generic Channel to implement the
 // Node interface. The generic Channel boundary is captured at construction
 // via closures (publishFn, stopFn) and a receive channel.
+//
+// The node owns a shared QUIC endpoint and its ethp2p view. Peer identity comes
+// from the transport's authenticated handshake rather than from the topology.
 type BroadcastNode struct {
-	num      int
-	quicHost QUICHost
-	stack    *ethp2p.Stack
-	engine   *broadcast.Engine
-	peers    chan *ethp2p.Peer
-	streams  chan ethp2p.StreamEvent
-	appCtx   context.Context
-	cancel   context.CancelFunc
+	num     int
+	eth     *transport.Ethp2pTransport
+	shared  *transport.SharedTransport
+	packet  net.PacketConn
+	peerID  transport.PeerID
+	stack   *ethp2p.Stack
+	engine  *broadcast.Engine
+	peers   chan *ethp2p.Peer
+	streams chan ethp2p.StreamEvent
+	appCtx  context.Context
+	cancel  context.CancelFunc
 
 	publishFn func(broadcast.MessageID, []byte) error
 	stopFn    func()
@@ -49,15 +52,14 @@ type BroadcastNode struct {
 
 	logger *slog.Logger
 
-	mu         sync.Mutex
-	conns      []transport.Conn
-	peerByAddr map[string]int
-	wg         sync.WaitGroup
-	closed     bool
-	closeOnce  sync.Once
-	closeErr   error
-	baseSent   int // cumulative baseline for ResetBandwidthStats
-	baseRecv   int
+	mu        sync.Mutex
+	conns     []transport.Conn
+	wg        sync.WaitGroup
+	closed    bool
+	closeOnce sync.Once
+	closeErr  error
+	baseSent  int // cumulative baseline for ResetBandwidthStats
+	baseRecv  int
 }
 
 func (n *BroadcastNode) NodeNum() int {
@@ -65,7 +67,12 @@ func (n *BroadcastNode) NodeNum() int {
 }
 
 func (n *BroadcastNode) Addr() net.Addr {
-	return n.quicHost.UDPAddr
+	return n.packet.LocalAddr()
+}
+
+// PeerID returns the node's authenticated transport identity.
+func (n *BroadcastNode) PeerID() transport.PeerID {
+	return n.peerID
 }
 
 func (n *BroadcastNode) Start(ctx context.Context) {
@@ -102,7 +109,9 @@ func (n *BroadcastNode) Close() error {
 		for _, conn := range conns {
 			closeErr = errors.Join(closeErr, conn.Close())
 		}
-		hostErr := n.quicHost.Close()
+		// The shared transport does not own the packet connection.
+		endpointErr := n.shared.Close()
+		packetErr := n.packet.Close()
 		n.wg.Wait()
 
 		// Stack does not own delivered streams. The serving goroutines have stopped,
@@ -112,7 +121,7 @@ func (n *BroadcastNode) Close() error {
 		drainPeers(n.peers)
 		n.stopFn()
 		engineErr := n.engine.Close()
-		closeErr = errors.Join(closeErr, hostErr, engineErr)
+		closeErr = errors.Join(closeErr, endpointErr, packetErr, engineErr)
 
 		n.closeErr = closeErr
 	})
@@ -137,52 +146,32 @@ func (n *BroadcastNode) Receive(ctx context.Context) (string, []byte, error) {
 
 func (n *BroadcastNode) processIncomingConnections(ctx context.Context) {
 	for {
-		c, err := n.quicHost.Accept(ctx)
+		conn, err := n.eth.Accept(ctx)
 		if err != nil {
 			if !(errors.Is(err, ctx.Err()) || strings.Contains(err.Error(), "transport closed")) {
 				n.logger.Error("failed to accept connection", "err", err)
 			}
 			return
 		}
-		n.mu.Lock()
-		remote, ok := n.peerByAddr[c.RemoteAddr().String()]
-		n.mu.Unlock()
-		if !ok {
-			_ = c.CloseWithError(0, "unknown simulation peer")
-			n.logger.Error("failed to authenticate simulation peer", "addr", c.RemoteAddr())
-			continue
-		}
-		n.serveConn(c, simPeerID(remote))
+		// The transport authenticated the peer during the handshake.
+		n.serveConn(conn)
 	}
-}
-
-// setPeerAddresses installs the topology-derived address-to-node mapping used
-// to authenticate inbound simulation connections. Scenario calls this before
-// Start, so a Shadow process does not depend on state from other processes.
-func (n *BroadcastNode) setPeerAddresses(peers map[int]net.Addr) {
-	byAddr := make(map[string]int, len(peers))
-	for nodeNum, addr := range peers {
-		if addr != nil {
-			byAddr[addr.String()] = nodeNum
-		}
-	}
-	n.mu.Lock()
-	n.peerByAddr = byAddr
-	n.mu.Unlock()
 }
 
 func (n *BroadcastNode) DialPeer(ctx context.Context, p int, addr net.Addr) error {
-	cu, err := n.quicHost.Dial(ctx, addr, nil)
+	// The expected identity is not pinned: a Shadow node runs in its own process
+	// and does not know its peers' keys before connecting. The handshake still
+	// authenticates whichever ethp2p peer answers.
+	conn, err := n.eth.Dial(ctx, addr, "")
 	if err != nil {
 		return err
 	}
 
-	n.serveConn(cu, simPeerID(p))
+	n.serveConn(conn)
 	return nil
 }
 
-func (n *BroadcastNode) serveConn(conn *quic.Conn, remote transport.PeerID) {
-	ethConn := transport.NewQUICConn(conn, remote)
+func (n *BroadcastNode) serveConn(ethConn transport.Conn) {
 	n.mu.Lock()
 	if n.closed {
 		n.mu.Unlock()
@@ -244,28 +233,31 @@ func newBroadcastNode(
 	nodeNum int,
 	logger *slog.Logger,
 ) (*BroadcastNode, error) {
-	qh, err := NewQUICHost(conn)
+	eth, shared, key, peerID, err := newNodeEndpoint(nodeNum, conn)
 	if err != nil {
 		stopFn()
 		_ = engine.Close()
-		return nil, fmt.Errorf("failed to create quic host: %w", err)
+		return nil, err
 	}
+	_ = key
 	appCtx, cancel := context.WithCancel(context.Background())
 
 	n := &BroadcastNode{
-		num:        nodeNum,
-		quicHost:   qh,
-		stack:      stack,
-		engine:     engine,
-		peers:      peers,
-		streams:    streams,
-		appCtx:     appCtx,
-		cancel:     cancel,
-		publishFn:  publishFn,
-		stopFn:     stopFn,
-		recvCh:     recvCh,
-		logger:     logger,
-		peerByAddr: make(map[string]int),
+		num:       nodeNum,
+		eth:       eth,
+		shared:    shared,
+		packet:    conn,
+		peerID:    peerID,
+		stack:     stack,
+		engine:    engine,
+		peers:     peers,
+		streams:   streams,
+		appCtx:    appCtx,
+		cancel:    cancel,
+		publishFn: publishFn,
+		stopFn:    stopFn,
+		recvCh:    recvCh,
+		logger:    logger,
 	}
 	n.wg.Go(func() {
 		if err := engine.Serve(appCtx, peers, streams); err != nil && !errors.Is(err, context.Canceled) {
@@ -301,11 +293,4 @@ func drainPeers(peers <-chan *ethp2p.Peer) {
 			return
 		}
 	}
-}
-
-// simPeerID renders a simulation node number as the peer identity reported for
-// a connection. Simulation hosts authenticate by address rather than by
-// certificate, so NewQUICConn carries the identity as caller-supplied metadata.
-func simPeerID(node int) transport.PeerID {
-	return transport.PeerID(strconv.Itoa(node))
 }

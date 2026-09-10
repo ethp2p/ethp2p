@@ -225,6 +225,16 @@ func (rc *RunConfig) BuildTraceHeaderOptions(topo Topology) (TraceHeaderOptions,
 		}
 	default:
 		opts.DecoderName = "ethp2p"
+		// ethp2p peer IDs are transport identities, not node numbers, so the
+		// header must carry the mapping for consumers to resolve events to nodes.
+		opts.PeerIDs = make([]string, len(topo.Nodes))
+		for i, ns := range topo.Nodes {
+			_, peerID, err := nodeIdentity(ns.Num)
+			if err != nil {
+				return TraceHeaderOptions{}, fmt.Errorf("derive ethp2p peer id for node %d: %w", ns.Num, err)
+			}
+			opts.PeerIDs[i] = string(peerID)
+		}
 	}
 	return opts, nil
 }

@@ -49,8 +49,14 @@ func assertPeer(t *testing.T, conn Conn, remote PeerID) {
 
 func newEndpoint(t *testing.T) (*SharedTransport, quicreuse.QUICTransport, *Ethp2pTransport, *net.UDPConn) {
 	t.Helper()
+	return newEndpointWith(t, Interop())
+}
+
+// newEndpointWith builds an endpoint with an explicit connection profile.
+func newEndpointWith(t *testing.T, profile Profile) (*SharedTransport, quicreuse.QUICTransport, *Ethp2pTransport, *net.UDPConn) {
+	t.Helper()
 	packetConn := testPacketConn(t)
-	shared, err := NewShared(testKey(t), packetConn)
+	shared, err := NewShared(testKey(t), packetConn, profile)
 	if err != nil {
 		t.Fatal(err)
 	}

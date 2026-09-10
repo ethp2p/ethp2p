@@ -50,7 +50,7 @@ func (t *Ethp2pTransport) Dial(ctx context.Context, addr net.Addr, expect PeerID
 
 	slot := &remoteIdentitySlot{}
 	tlsConfig := t.handshaker.dialConfig(slot, expect)
-	raw, err := t.raw.Dial(ctx, addr, tlsConfig, quicConfig.Clone())
+	raw, err := t.raw.Dial(ctx, addr, tlsConfig, t.profile.quicConfig())
 	if err != nil {
 		return nil, err
 	}
@@ -72,7 +72,7 @@ func (t *Ethp2pTransport) Dial(ctx context.Context, addr net.Addr, expect PeerID
 
 	// Create the shared connection and its dispatchers, then return the ethp2p
 	// side and feed the libp2p side to libp2p.
-	sc := newSharedConn(raw, &t.wg, verifiedIdentity(slot.key))
+	sc := newSharedConn(raw, &t.wg, slot.key.PeerID())
 	ethp2p := sc.ethp2p()
 	select {
 	case t.libQ <- sc.libp2p():
@@ -93,13 +93,8 @@ type ethp2pConn struct {
 	*sharedConn
 }
 
-// RemotePeerID returns the identity authenticated for the remote endpoint, or
-// the caller-supplied identity for connections built by NewQUICConn. It reports
-// the empty PeerID if the connection carries neither.
-func (c *ethp2pConn) RemotePeerID() PeerID {
-	id, _ := c.remotePeerID()
-	return id
-}
+// RemotePeerID returns the identity authenticated for the remote endpoint.
+func (c *ethp2pConn) RemotePeerID() PeerID { return c.remotePeerID() }
 
 func (c *ethp2pConn) OpenStream(ctx context.Context) (Stream, error) {
 	s, err := c.conn.OpenStreamSync(ctx)

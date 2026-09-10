@@ -50,7 +50,7 @@ func newTestEndpoint(t *testing.T) *testEndpoint {
 	if err != nil {
 		t.Fatal(err)
 	}
-	shared, err := transport.NewShared(key, packet)
+	shared, err := transport.NewShared(key, packet, transport.Interop())
 	if err != nil {
 		_ = packet.Close()
 		t.Fatal(err)

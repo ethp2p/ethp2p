@@ -18,7 +18,7 @@ import (
 // TestSharedTransportBroadcastRoundTrip exercises the broadcast stack over
 // the production shared transport. The regular integration helpers use a raw
 // QUIC host, so this test specifically covers authenticated Ethp2pTransport
-// connections and the production five-stream unidirectional limit.
+// connections and the production unidirectional stream profile.
 func TestSharedTransportBroadcastRoundTrip(t *testing.T) {
 	for _, ss := range strategies {
 		t.Run(ss.name, func(t *testing.T) {
@@ -52,7 +52,7 @@ func TestSharedTransportBroadcastRoundTrip(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				shared, err := transport.NewShared(key, packet)
+				shared, err := transport.NewShared(key, packet, transport.Interop())
 				if err != nil {
 					_ = packet.Close()
 					t.Fatal(err)

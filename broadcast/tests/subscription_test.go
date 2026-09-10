@@ -14,8 +14,8 @@ import (
 func TestSubscribeBeforeConnect(t *testing.T) {
 	for _, ss := range strategies {
 		t.Run(ss.name, func(t *testing.T) {
-			a := newTestNode(t, "node-a")
-			b := newTestNode(t, "node-b")
+			a := newTestNode(t)
+			b := newTestNode(t)
 			channelID := broadcast.ChannelID("pre-connect-channel")
 
 			thA := ss.createChannel(t, a.engine, channelID)
@@ -45,8 +45,8 @@ func TestSubscribeBeforeConnect(t *testing.T) {
 func TestSubscribeAfterConnect(t *testing.T) {
 	for _, ss := range strategies {
 		t.Run(ss.name, func(t *testing.T) {
-			a := newTestNode(t, "node-a")
-			b := newTestNode(t, "node-b")
+			a := newTestNode(t)
+			b := newTestNode(t)
 			channelID := broadcast.ChannelID("post-connect-channel")
 
 			// Connect first, no channels yet.
@@ -79,8 +79,8 @@ func TestSubscribeAfterConnect(t *testing.T) {
 func TestSubscribeBothPaths(t *testing.T) {
 	for _, ss := range strategies {
 		t.Run(ss.name, func(t *testing.T) {
-			a := newTestNode(t, "node-a")
-			b := newTestNode(t, "node-b")
+			a := newTestNode(t)
+			b := newTestNode(t)
 
 			preChannelID := broadcast.ChannelID("pre-channel")
 			postChannelID := broadcast.ChannelID("post-channel")

@@ -14,9 +14,9 @@ func TestChainRelay(t *testing.T) {
 	for _, ss := range strategies {
 		t.Run(ss.name, func(t *testing.T) {
 			nodes := make([]*testNode, 3)
-			nodes[0] = newTestNode(t, "origin")
-			nodes[1] = newTestNode(t, "relay")
-			nodes[2] = newTestNode(t, "receiver")
+			nodes[0] = newTestNode(t)
+			nodes[1] = newTestNode(t)
+			nodes[2] = newTestNode(t)
 
 			channelID := broadcast.ChannelID("chain-channel")
 			handles := make([]channelHandle, 3)
@@ -67,9 +67,9 @@ func TestStarRelay(t *testing.T) {
 			channelID := broadcast.ChannelID("star-channel")
 
 			nodes := make([]*testNode, numLeaves+1)
-			nodes[0] = newTestNode(t, "center")
+			nodes[0] = newTestNode(t)
 			for i := 1; i <= numLeaves; i++ {
-				nodes[i] = newTestNode(t, broadcast.PeerID("leaf-"+string(rune('0'+i))))
+				nodes[i] = newTestNode(t)
 			}
 
 			handles := make([]channelHandle, len(nodes))

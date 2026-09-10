@@ -13,8 +13,8 @@ import (
 func TestPairPublishDecode(t *testing.T) {
 	for _, ss := range strategies {
 		t.Run(ss.name, func(t *testing.T) {
-			a := newTestNode(t, "node-a")
-			b := newTestNode(t, "node-b")
+			a := newTestNode(t)
+			b := newTestNode(t)
 
 			channelID := broadcast.ChannelID("test-channel")
 
@@ -61,9 +61,9 @@ func TestMultiPeerFanOut(t *testing.T) {
 			channelID := broadcast.ChannelID("fanout-channel")
 
 			nodes := make([]*testNode, numReceivers+1)
-			nodes[0] = newTestNode(t, "publisher")
+			nodes[0] = newTestNode(t)
 			for i := 1; i <= numReceivers; i++ {
-				nodes[i] = newTestNode(t, broadcast.PeerID("receiver-"+string(rune('0'+i))))
+				nodes[i] = newTestNode(t)
 			}
 
 			handles := make([]channelHandle, len(nodes))
@@ -97,8 +97,8 @@ func TestMultiPeerFanOut(t *testing.T) {
 func TestBidirectionalExchange(t *testing.T) {
 	for _, ss := range strategies {
 		t.Run(ss.name, func(t *testing.T) {
-			a := newTestNode(t, "node-a")
-			b := newTestNode(t, "node-b")
+			a := newTestNode(t)
+			b := newTestNode(t)
 			channelID := broadcast.ChannelID("bidi-channel")
 
 			thA := ss.createChannel(t, a.engine, channelID)

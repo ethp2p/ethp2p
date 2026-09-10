@@ -33,9 +33,7 @@
 // The shared listener and [Ethp2pTransport.Dial] authenticate secp256k1 identities
 // using the libp2p TLS certificate format. Dial can require a specific [PeerID].
 // The handshake verify callback is the security boundary; [Conn.RemotePeerID]
-// reads back the identity it authenticated from the connection's TLS state.
-// [NewQUICConn] instead accepts caller-supplied identity for connections that
-// carry no ethp2p certificate.
+// reports the identity it authenticated.
 //
 // # Connection views
 //

@@ -7,8 +7,73 @@ import (
 	"testing"
 	"time"
 
-	"github.com/quic-go/quic-go"
+	"github.com/libp2p/go-libp2p/p2p/transport/quicreuse"
 )
+
+// testProfile returns Interop with the incoming unidirectional stream limit set
+// explicitly. These tests drive the sender past the point where QUIC credit is
+// exhausted, which needs a limit the test controls: the delivery buffer between
+// acceptance and hand-over holds 16 streams, so the limit must exceed that for
+// the senders to fill it and block.
+func testProfile(incomingUni int64) Profile {
+	profile := Interop()
+	profile.maxIncomingUniStreams = incomingUni
+	return profile
+}
+
+// sharedPair is one ethp2p connection between two shared endpoints.
+//
+// The server keeps both its views because a shared connection closes only when
+// both views are released, and only that close is sent to the peer. A
+// libp2pConn.CloseWithError plus an ethp2pConn.Close is what puts a
+// CONNECTION_CLOSE on the wire; closing the endpoint does not, because quic-go
+// destroys its connections locally without notifying the peer.
+type sharedPair struct {
+	client    Conn
+	server    Conn
+	serverLib quicreuse.QUICConn
+}
+
+// closeServer releases both server views, which closes the physical connection
+// and notifies the peer.
+func (p sharedPair) closeServer(reason string) error {
+	return errors.Join(
+		p.server.Close(),
+		p.serverLib.CloseWithError(0, reason),
+	)
+}
+
+func newSharedPair(t *testing.T, incomingUni int64) sharedPair {
+	t.Helper()
+	ctx := testContext(t)
+	_, _, clientEth, _ := newEndpointWith(t, Interop())
+	_, serverLib, serverEth, serverPC := newEndpointWith(t, testProfile(incomingUni))
+	listener := listen(t, serverLib, serverEth)
+
+	type acceptResult struct {
+		conn Conn
+		err  error
+	}
+	accepted := make(chan acceptResult, 1)
+	go func() {
+		conn, err := serverEth.Accept(ctx)
+		accepted <- acceptResult{conn: conn, err: err}
+	}()
+
+	client, err := clientEth.Dial(ctx, serverPC.LocalAddr(), serverEth.PeerID())
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := <-accepted
+	if result.err != nil {
+		t.Fatal(result.err)
+	}
+	serverLibConn, err := listener.Accept(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return sharedPair{client: client, server: result.conn, serverLib: serverLibConn}
+}
 
 func TestUnidirectionalBackpressure(t *testing.T) {
 	for _, resume := range []bool{true, false} {
@@ -18,13 +83,13 @@ func TestUnidirectionalBackpressure(t *testing.T) {
 		}
 		t.Run(name, func(t *testing.T) {
 			ctx := testContext(t)
-			// Exercise the public adapter with a caller-supplied QUIC limit
-			// larger than the delivery buffer. Production's five-stream limit
-			// cannot fill that buffer; changing it is not part of this test.
+			// The incoming limit must exceed the delivery buffer so the test can
+			// reach the point where QUIC credit is exhausted.
 			const streams = 32
-			client, server := newQUICPair(t, streams)
+			pair := newSharedPair(t, streams)
+
 			for i := range streams {
-				stream, err := client.OpenUniStream(ctx)
+				stream, err := pair.client.OpenUniStream(ctx)
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -39,7 +104,7 @@ func TestUnidirectionalBackpressure(t *testing.T) {
 			// Without a consumer, credit must stay exhausted. Resetting a
 			// queued stream would return credit and let this open succeed.
 			waitCtx, cancel := context.WithTimeout(ctx, 200*time.Millisecond)
-			_, err := client.OpenUniStream(waitCtx)
+			_, err := pair.client.OpenUniStream(waitCtx)
 			cancel()
 			if !errors.Is(err, context.DeadlineExceeded) {
 				t.Fatalf("open beyond unread stream limit = %v, want deadline exceeded", err)
@@ -48,25 +113,27 @@ func TestUnidirectionalBackpressure(t *testing.T) {
 			if !resume {
 				opened := make(chan error, 1)
 				go func() {
-					_, err := client.OpenUniStream(ctx)
+					_, err := pair.client.OpenUniStream(ctx)
 					opened <- err
 				}()
-				if err := server.Close(); err != nil {
+				// Closing the connection must unblock a sender waiting on stream
+				// credit. Both views are released so the close reaches the peer.
+				if err := pair.closeServer("test done"); err != nil {
 					t.Fatal(err)
 				}
 				select {
 				case err := <-opened:
 					if err == nil || errors.Is(err, context.DeadlineExceeded) {
-						t.Fatalf("blocked open after connection close = %v, want connection error", err)
+						t.Fatalf("blocked open after endpoint close = %v, want connection error", err)
 					}
 				case <-ctx.Done():
-					t.Fatal("connection close did not unblock sender")
+					t.Fatal("endpoint close did not unblock sender")
 				}
 				return
 			}
 
 			for i := range streams {
-				stream, err := server.AcceptUniStream(ctx)
+				stream, err := pair.server.AcceptUniStream(ctx)
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -81,46 +148,11 @@ func TestUnidirectionalBackpressure(t *testing.T) {
 					t.Fatalf("stream %d payload = %x", i, payload)
 				}
 			}
-			stream, err := client.OpenUniStream(ctx)
+			stream, err := pair.client.OpenUniStream(ctx)
 			if err != nil {
 				t.Fatalf("consumption did not restore stream credit: %v", err)
 			}
 			stream.CancelWrite(0)
 		})
 	}
-}
-
-func newQUICPair(t *testing.T, incomingUni int64) (Conn, Conn) {
-	t.Helper()
-	ctx := testContext(t)
-	clientIdentity, err := newHandshaker(testKey(t))
-	if err != nil {
-		t.Fatal(err)
-	}
-	serverIdentity, err := newHandshaker(testKey(t))
-	if err != nil {
-		t.Fatal(err)
-	}
-	clientTLS := clientIdentity.dialConfig(nil, serverIdentity.peerID)
-	serverTLS := serverIdentity.dialConfig(nil, clientIdentity.peerID)
-	clientTransport := &quic.Transport{Conn: testPacketConn(t)}
-	serverTransport := &quic.Transport{Conn: testPacketConn(t)}
-	t.Cleanup(func() { _ = clientTransport.Close() })
-	t.Cleanup(func() { _ = serverTransport.Close() })
-	listener, err := serverTransport.Listen(serverTLS, &quic.Config{MaxIncomingUniStreams: incomingUni})
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = listener.Close() })
-	clientRaw, err := clientTransport.Dial(ctx, serverTransport.Conn.LocalAddr(), clientTLS, &quic.Config{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = clientRaw.CloseWithError(0, "test done") })
-	serverRaw, err := listener.Accept(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = serverRaw.CloseWithError(0, "test done") })
-	return NewQUICConn(clientRaw, serverIdentity.peerID), NewQUICConn(serverRaw, clientIdentity.peerID)
 }

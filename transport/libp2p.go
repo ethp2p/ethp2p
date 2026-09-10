@@ -64,7 +64,7 @@ func (t *Libp2pTransport) Dial(ctx context.Context, addr net.Addr, tlsConf *tls.
 		return ours.VerifyPeerCertificate(rawCerts, verifiedChains)
 	}
 
-	raw, err := t.raw.Dial(ctx, addr, tlsConf, quicConfig.Clone())
+	raw, err := t.raw.Dial(ctx, addr, tlsConf, t.profile.quicConfig())
 	if err != nil {
 		return nil, err
 	}
@@ -73,7 +73,7 @@ func (t *Libp2pTransport) Dial(ctx context.Context, addr net.Addr, tlsConf *tls.
 		// A modern ethp2p peer: return the connection to libp2p and offer the
 		// ethp2p view to the local ethp2p side. The dispatchers must start even
 		// when nobody claims that view, or no stream is ever classified.
-		sc := newSharedConn(raw, &t.wg, verifiedIdentity(slot.key))
+		sc := newSharedConn(raw, &t.wg, slot.key.PeerID())
 		select {
 		case t.ethQ <- sc.ethp2p():
 		default:

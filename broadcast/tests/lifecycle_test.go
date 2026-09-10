@@ -20,8 +20,8 @@ import (
 func TestSessionDone(t *testing.T) {
 	for _, ss := range strategies {
 		t.Run(ss.name, func(t *testing.T) {
-			a := newTestNode(t, "node-a")
-			b := newTestNode(t, "node-b")
+			a := newTestNode(t)
+			b := newTestNode(t)
 			channelID := broadcast.ChannelID("lifecycle-channel")
 
 			thA := ss.createChannel(t, a.engine, channelID)
@@ -53,8 +53,8 @@ func TestSessionDone(t *testing.T) {
 func TestEngineCloseCleanup(t *testing.T) {
 	for _, ss := range strategies {
 		t.Run(ss.name, func(t *testing.T) {
-			a := newTestNode(t, "node-a")
-			b := newTestNode(t, "node-b")
+			a := newTestNode(t)
+			b := newTestNode(t)
 			channelID := broadcast.ChannelID("close-channel")
 			const probeSelector protocol.Selector = 17
 
@@ -181,8 +181,8 @@ func TestEngineCloseCleanup(t *testing.T) {
 func TestObserverSessionStarted(t *testing.T) {
 	for _, ss := range strategies {
 		t.Run(ss.name, func(t *testing.T) {
-			a := newTestNode(t, "node-a")
-			b := newTestNode(t, "node-b")
+			a := newTestNode(t)
+			b := newTestNode(t)
 			channelID := broadcast.ChannelID("observer-channel")
 
 			thA := ss.createChannel(t, a.engine, channelID)

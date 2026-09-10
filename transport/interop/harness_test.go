@@ -83,7 +83,7 @@ func newSharedHostFamily(t *testing.T, family ipFamily, mode listenMode) *shared
 	t.Helper()
 	key := testKey(t)
 	udp := listenInteropUDP(t, family)
-	shared, err := transport.NewShared(key, udp)
+	shared, err := transport.NewShared(key, udp, transport.Interop())
 	if err != nil {
 		t.Fatal(err)
 	}

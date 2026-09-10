@@ -4,12 +4,7 @@ package tests
 
 import (
 	"context"
-	"crypto/ed25519"
-	"crypto/rand"
-	"crypto/tls"
-	"crypto/x509"
 	"errors"
-	"math/big"
 	"net"
 	"slices"
 	"sync"
@@ -20,7 +15,6 @@ import (
 	"github.com/ethp2p/ethp2p/broadcast"
 	"github.com/ethp2p/ethp2p/broadcast/rs"
 	"github.com/ethp2p/ethp2p/transport"
-	"github.com/quic-go/quic-go"
 )
 
 // --- Strategy parameterization ---
@@ -59,116 +53,44 @@ var strategies = []struct {
 	{"rs", rsSetup{}},
 }
 
-// --- QUIC host ---
+// --- Shared transport endpoint ---
 
-type quicHost struct {
-	tr       *quic.Transport
-	listener *quic.Listener
-	addr     net.Addr
-	tlsConf  *tls.Config
-	quicConf *quic.Config
-
-	closeOnce sync.Once
-	closeErr  error
-}
-
-func newQUICHost(t *testing.T) *quicHost {
+// newTestEndpoint builds a shared endpoint with a freshly generated identity.
+// The test nodes speak the production transport, so their peer identities are
+// authenticated rather than synthetic.
+func newTestEndpoint(t *testing.T) (*transport.Ethp2pTransport, *transport.SharedTransport, net.Addr) {
 	t.Helper()
-
-	conn, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 0})
+	key, err := transport.GenPrivKey()
 	if err != nil {
-		t.Fatalf("listen UDP: %v", err)
+		t.Fatal(err)
 	}
-
-	tlsConf, err := generateTestTLSConfig()
+	packet, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 0})
 	if err != nil {
-		conn.Close()
-		t.Fatalf("generate TLS config: %v", err)
+		t.Fatal(err)
 	}
-
-	quicConf := &quic.Config{MaxIdleTimeout: 30 * time.Second}
-
-	tr := &quic.Transport{Conn: conn}
-	ln, err := tr.Listen(tlsConf, quicConf)
+	shared, err := transport.NewShared(key, packet, transport.Interop())
 	if err != nil {
-		conn.Close()
-		t.Fatalf("QUIC listen: %v", err)
+		_ = packet.Close()
+		t.Fatal(err)
 	}
-
-	h := &quicHost{
-		tr:       tr,
-		listener: ln,
-		addr:     conn.LocalAddr(),
-		tlsConf:  tlsConf,
-		quicConf: quicConf,
-	}
-	t.Cleanup(func() { h.close() })
-	return h
-}
-
-func (h *quicHost) dial(ctx context.Context, addr net.Addr) (*quic.Conn, error) {
-	tlsConf := &tls.Config{
-		InsecureSkipVerify: true,
-		NextProtos:         []string{"eth-ec-broadcast-test"},
-	}
-	conn, err := h.tr.Dial(ctx, addr, tlsConf, h.quicConf)
-	if err != nil {
-		return nil, err
-	}
-	return conn, nil
-}
-
-func (h *quicHost) accept(ctx context.Context) (*quic.Conn, error) {
-	conn, err := h.listener.Accept(ctx)
-	if err != nil {
-		return nil, err
-	}
-	return conn, nil
-}
-
-func (h *quicHost) close() error {
-	h.closeOnce.Do(func() {
-		h.closeErr = errors.Join(
-			h.listener.Close(),
-			h.tr.Close(),
-			h.tr.Conn.Close(),
-		)
+	// The shared transport deliberately does not own the packet connection.
+	t.Cleanup(func() {
+		_ = shared.Close()
+		_ = packet.Close()
 	})
-	return h.closeErr
-}
-
-func generateTestTLSConfig() (*tls.Config, error) {
-	_, priv, err := ed25519.GenerateKey(rand.Reader)
-	if err != nil {
-		return nil, err
-	}
-	template := x509.Certificate{
-		SerialNumber: big.NewInt(1),
-		NotBefore:    time.Now(),
-		NotAfter:     time.Now().Add(24 * time.Hour),
-	}
-	certDER, err := x509.CreateCertificate(rand.Reader, &template, &template, priv.Public(), priv)
-	if err != nil {
-		return nil, err
-	}
-	return &tls.Config{
-		Certificates: []tls.Certificate{{
-			Certificate: [][]byte{certDER},
-			PrivateKey:  priv,
-		}},
-		NextProtos:         []string{"eth-ec-broadcast-test"},
-		InsecureSkipVerify: true,
-	}, nil
+	eth := shared.Ethp2p()
+	return eth, shared, packet.LocalAddr()
 }
 
 // --- Test node ---
 
 type testNode struct {
-	host    *quicHost
+	eth     *transport.Ethp2pTransport
+	shared  *transport.SharedTransport
+	addr    net.Addr
 	stack   *ethp2p.Stack
 	engine  *broadcast.Engine
 	obs     *testObserver
-	peerID  broadcast.PeerID
 	peers   chan *ethp2p.Peer
 	streams chan ethp2p.StreamEvent
 
@@ -183,9 +105,9 @@ type testNode struct {
 	once     sync.Once
 }
 
-func newTestNode(t *testing.T, peerID broadcast.PeerID) *testNode {
+func newTestNode(t *testing.T) *testNode {
 	t.Helper()
-	host := newQUICHost(t)
+	eth, shared, addr := newTestEndpoint(t)
 	obs := newTestObserver()
 	cfg := broadcast.EngineConfig{Observer: obs}
 	stack := new(ethp2p.Stack)
@@ -204,11 +126,12 @@ func newTestNode(t *testing.T, peerID broadcast.PeerID) *testNode {
 	engine := broadcast.NewEngine(cfg)
 	ctx, cancel := context.WithCancel(t.Context())
 	n := &testNode{
-		host:    host,
+		eth:     eth,
+		shared:  shared,
+		addr:    addr,
 		stack:   stack,
 		engine:  engine,
 		obs:     obs,
-		peerID:  peerID,
 		peers:   peers,
 		streams: streams,
 		ctx:     ctx,
@@ -231,7 +154,7 @@ func (n *testNode) Close() error {
 		for _, conn := range conns {
 			closeErr = errors.Join(closeErr, conn.Close())
 		}
-		closeErr = errors.Join(closeErr, n.host.close())
+		closeErr = errors.Join(closeErr, n.shared.Close())
 		n.wg.Wait()
 
 		drainQueuedStreams(n.streams)
@@ -434,9 +357,9 @@ func starEdges(n int) []edge {
 	return edges
 }
 
-// connectNodes establishes QUIC connections between nodes according to
-// the edge list and serves them through their stacks. Blocks until all connections
-// are established but does NOT wait for handshakes to complete.
+// connectNodes connects nodes according to the edge list and serves the
+// resulting connections through their stacks. Blocks until all connections are
+// established but does NOT wait for handshakes to complete.
 func connectNodes(t *testing.T, nodes []*testNode, edges []edge) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
@@ -446,32 +369,31 @@ func connectNodes(t *testing.T, nodes []*testNode, edges []edge) {
 		from := nodes[e.from]
 		to := nodes[e.to]
 
-		var dialRaw, acceptRaw *quic.Conn
-		var dialErr, acceptErr error
-		var wg sync.WaitGroup
+		type acceptResult struct {
+			conn transport.Conn
+			err  error
+		}
+		accepted := make(chan acceptResult, 1)
+		go func() {
+			conn, err := to.eth.Accept(ctx)
+			accepted <- acceptResult{conn: conn, err: err}
+		}()
 
-		wg.Go(func() {
-			dialRaw, dialErr = from.host.dial(ctx, to.host.addr)
-		})
-		wg.Go(func() {
-			acceptRaw, acceptErr = to.host.accept(ctx)
-		})
-		wg.Wait()
-
+		dialed, dialErr := from.eth.Dial(ctx, to.addr, to.eth.PeerID())
 		if dialErr != nil {
 			t.Fatalf("dial %d->%d: %v", e.from, e.to, dialErr)
 		}
-		if acceptErr != nil {
-			t.Fatalf("accept %d->%d: %v", e.from, e.to, acceptErr)
+		result := <-accepted
+		if result.err != nil {
+			t.Fatalf("accept %d->%d: %v", e.from, e.to, result.err)
 		}
 
-		from.serveConn(dialRaw, transport.PeerID(to.peerID))
-		to.serveConn(acceptRaw, transport.PeerID(from.peerID))
+		from.serveConn(dialed)
+		to.serveConn(result.conn)
 	}
 }
 
-func (n *testNode) serveConn(raw *quic.Conn, remote transport.PeerID) {
-	conn := transport.NewQUICConn(raw, remote)
+func (n *testNode) serveConn(conn transport.Conn) {
 	n.mu.Lock()
 	if n.closed {
 		n.mu.Unlock()
