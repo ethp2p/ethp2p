@@ -6,14 +6,14 @@
 //
 // # Shared QUIC transport
 //
-// [NewShared] wraps a packet connection. Lend [TransportShared.Libp2p] to
+// [NewShared] wraps a packet connection. Lend [SharedTransport.Libp2p] to
 // libp2p through quicreuse.ConnManager.LendTransport. The application passes
-// connections from [TransportEth.Accept] and [TransportEth.Dial] to
-// ethp2p.Stack.ServeConn. The first [TransportLib.Listen] or [TransportEth.Accept]
+// connections from [Transport.Accept] and [Transport.Dial] to
+// ethp2p.Stack.ServeConn. The first [Libp2pTransport.Listen] or [Transport.Accept]
 // starts listening.
 //
-// The application owns endpoint shutdown. [TransportShared.Close] closes all
-// connections and stops listening; [TransportLib.Close] and its listener's
+// The application owns endpoint shutdown. [SharedTransport.Close] closes all
+// connections and stops listening; [Libp2pTransport.Close] and its listener's
 // Close are no-ops. Stack.ServeConn only borrows connections and never closes
 // the endpoint. The caller must also close the supplied packet connection.
 // On a shared connection, closing one view releases only that view; the
@@ -21,15 +21,15 @@
 //
 // # Connection negotiation
 //
-// [TransportEth.Dial] and the shared listener prefer ethp2p_0 over libp2p.
+// [Transport.Dial] and the shared listener prefer ethp2p_0 over libp2p.
 // Connections negotiating ethp2p_0 expose both views. Connections negotiating
 // libp2p are libp2p-only; TransportEth.Dial returns [ErrDialLegacyPeer] and
-// offers the connection to the libp2p listener. [TransportLib.Dial] uses the
+// offers the connection to the libp2p listener. [Libp2pTransport.Dial] uses the
 // caller's TLS configuration and accepts only libp2p.
 //
 // # TLS authentication
 //
-// The shared listener and [TransportEth.Dial] authenticate secp256k1 identities
+// The shared listener and [Transport.Dial] authenticate secp256k1 identities
 // using the libp2p TLS certificate format. Dial can require a specific [PeerID].
 // [Conn.AuthInfo] exposes the authenticated identities and remote public key.
 // [NewQUICConn] instead trusts caller-supplied authentication metadata.

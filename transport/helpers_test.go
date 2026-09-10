@@ -13,7 +13,7 @@ import (
 
 func assertSharedALPN(t *testing.T, conn quicreuse.QUICConn) {
 	t.Helper()
-	shared, ok := conn.(*connLib)
+	shared, ok := conn.(*libp2pConn)
 	if !ok {
 		t.Fatalf("connection type = %T, want *libp2pConn", conn)
 	}
@@ -50,7 +50,7 @@ func assertAuth(t *testing.T, conn Conn, local, remote PeerID, direction ConnDir
 	}
 }
 
-func newEndpoint(t *testing.T) (*TransportShared, *TransportLib, *TransportEth, *net.UDPConn) {
+func newEndpoint(t *testing.T) (*SharedTransport, *Libp2pTransport, *Transport, *net.UDPConn) {
 	t.Helper()
 	packetConn := testPacketConn(t)
 	shared, err := NewShared(testKey(t), packetConn)
@@ -65,7 +65,7 @@ func newEndpoint(t *testing.T) (*TransportShared, *TransportLib, *TransportEth, 
 	return shared, libp2p, ethp2p, packetConn
 }
 
-func listen(t *testing.T, libp2p *TransportLib, ethp2p *TransportEth) quicreuse.QUICListener {
+func listen(t *testing.T, libp2p *Libp2pTransport, ethp2p *Transport) quicreuse.QUICListener {
 	t.Helper()
 	listener, err := libp2p.Listen(ethp2p.handshaker.serverConfig(), &quic.Config{})
 	if err != nil {

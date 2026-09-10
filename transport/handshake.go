@@ -60,10 +60,10 @@ func newHandshaker(key *PrivKey) (*handshaker, error) {
 	if err != nil {
 		return nil, err
 	}
-	publicKey := key.Public()
+	pubkey := key.Public()
 	return &handshaker{
-		publicKey: publicKey,
-		peerID:    publicKey.PeerID(),
+		publicKey: pubkey,
+		peerID:    pubkey.PeerID(),
 		config: tls.Config{
 			MinVersion:             tls.VersionTLS13,
 			InsecureSkipVerify:     true,
@@ -97,11 +97,8 @@ func (h *handshaker) serverConfig() *tls.Config {
 	}
 }
 
-// verify returns a single-connection TLS configuration whose verify callback
+// verify returns a single-connection TLS config whose verify callback
 // authenticates the presented certificate and memoizes the identity into hs.
-// Both roles use it: the dial side passes the handshake it owns, the accept
-// side the instance ConnContext attached to the connection context. A
-// nonempty expect pins the peer ID, failing the handshake on mismatch.
 func (h *handshaker) verify(hs *handshake, expect PeerID) *tls.Config {
 	config := h.config.Clone()
 	config.VerifyPeerCertificate = func(rawCerts [][]byte, _ [][]*x509.Certificate) error {

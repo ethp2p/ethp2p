@@ -25,8 +25,8 @@ const (
 )
 
 type testEndpoint struct {
-	shared *transport.TransportShared
-	eth    *transport.TransportEth
+	shared *transport.SharedTransport
+	eth    *transport.Transport
 	packet *net.UDPConn
 }
 

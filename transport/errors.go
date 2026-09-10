@@ -31,7 +31,7 @@ const (
 )
 
 // ErrPeerMismatch reports that a dial authenticated a valid peer identity that
-// differs from the nonempty peer ID passed to [TransportEth.Dial].
+// differs from the nonempty peer ID passed to [Transport.Dial].
 type ErrPeerMismatch struct {
 	// Expected is the peer ID supplied by the dialer.
 	Expected PeerID

@@ -7,7 +7,7 @@ import (
 	"github.com/quic-go/quic-go"
 )
 
-var _ Conn = (*connEth)(nil)
+var _ Conn = (*ethp2pConn)(nil)
 
 // PeerID is the binary multihash representation used by libp2p peer.ID. A
 // PeerID is not the human-readable base-encoded form of that multihash.
@@ -16,6 +16,10 @@ type PeerID string
 // AuthInfo identifies both ends of an ethp2p connection and carries the
 // identity key authenticated for the remote endpoint. NewShared derives these
 // values from secp256k1 identity keys; NewQUICConn trusts caller-supplied values.
+
+// TODO now that we have the ethp2p.Stack which holds our local identity,
+// drop local peer from AuthInfo. And the remote PeerID can be obtained from the
+// PubKey, so drop the field too.
 type AuthInfo struct {
 	// Local is the identity derived from the key passed to NewShared,
 	// or supplied by the caller of NewQUICConn.

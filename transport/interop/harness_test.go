@@ -57,9 +57,9 @@ const (
 
 type sharedHost struct {
 	host     host.Host
-	shared   *transport.TransportShared
-	lib      *transport.TransportLib
-	eth      *transport.TransportEth
+	shared   *transport.SharedTransport
+	lib      *transport.Libp2pTransport
+	eth      *transport.Transport
 	udp      *net.UDPConn
 	manager  *quicreuse.ConnManager
 	identity crypto.PrivKey
@@ -237,7 +237,7 @@ func exchangeContext(ctx context.Context, dialer host.Host, listener peer.ID, na
 	return nil
 }
 
-func connectEth(t *testing.T, dialer *transport.TransportEth, listener *transport.TransportEth, addr net.Addr) ethPair {
+func connectEth(t *testing.T, dialer *transport.Transport, listener *transport.Transport, addr net.Addr) ethPair {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
 	defer cancel()
@@ -352,7 +352,7 @@ func frame(payload []byte) []byte {
 	return append(varint.ToUvarint(uint64(len(payload))), payload...)
 }
 
-func assertNoEthp2p(t *testing.T, eth *transport.TransportEth) {
+func assertNoEthp2p(t *testing.T, eth *transport.Transport) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(t.Context(), 100*time.Millisecond)
 	defer cancel()
