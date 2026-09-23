@@ -104,6 +104,14 @@ func (c *ethp2pConn) OpenStream(ctx context.Context) (Stream, error) {
 	return stream{s}, nil
 }
 
+func (c *ethp2pConn) OpenUniStream(ctx context.Context) (SendStream, error) {
+	s, err := c.conn.OpenUniStreamSync(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return sendStream{s}, nil
+}
+
 func (c *ethp2pConn) AcceptBiStream(ctx context.Context) (Stream, error) {
 	select {
 	case s := <-c.ethp2pBi:
@@ -113,14 +121,6 @@ func (c *ethp2pConn) AcceptBiStream(ctx context.Context) (Stream, error) {
 	case <-c.conn.Context().Done():
 		return nil, c.conn.Context().Err()
 	}
-}
-
-func (c *ethp2pConn) OpenUniStream(ctx context.Context) (SendStream, error) {
-	s, err := c.conn.OpenUniStreamSync(ctx)
-	if err != nil {
-		return nil, err
-	}
-	return sendStream{s}, nil
 }
 
 func (c *ethp2pConn) AcceptUniStream(ctx context.Context) (ReceiveStream, error) {

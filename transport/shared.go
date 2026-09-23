@@ -15,23 +15,17 @@ import (
 )
 
 const (
-	// deliveryQueueLen bounds bidirectional streams classified but not yet handed over.
-	// Delivery is expected immediate, so this is just a safety buffer.
-	deliveryQueueLen = 4
-	// uniDeliveryQueueLen absorbs short bursts while the application consumes
-	// streams. Sixteen is a burst allowance, not a limit on accepted traffic:
-	// a full queue pauses acceptance until delivery or connection shutdown.
-	uniDeliveryQueueLen = 16
-	// maxPendingStreamsPerConn limits concurrent stream classifications.
-	// Fragmentation, packet loss, or a stalled peer can delay classification;
-	// the bound limits resources held by streams awaiting their first bytes.
-	maxPendingStreamsPerConn = 4
-	// connQueueLen bounds inbound connections buffered before Accept.
-	// Delivery is expected to be immediate. This is just a small safety buffer.
-	connQueueLen = 16
+	// maxStreamsPendingDelivery is the limit of streams pending to be delivered, per conn x per outbox.
+	// Unqueueable streams are aborted.
+	// This handles slow application consumers.
+	maxStreamsPendingDelivery = 8
+	// maxStreamsPendingClassify limits concurrent stream classification per conn.
+	// This handles sustained packet loss and malicious peers.
+	maxStreamsPendingClassify = 4
+	// maxConnsPendingDelivery is the limit of conns pending delivery to the downstream stack, per stack.
+	maxConnsPendingDelivery = 16
 
-	classifyTimeout       = 5 * time.Second
-	varintContinuationBit = byte(0x80)
+	classifyTimeout = 5 * time.Second
 )
 
 type side uint32
@@ -95,8 +89,8 @@ func NewShared(key *PrivKey, packetConn net.PacketConn, profile Profile) (*Share
 		profile:    profile,
 		ctx:        ctx,
 		cancel:     cancel,
-		libQ:       make(chan quicreuse.QUICConn, connQueueLen),
-		ethQ:       make(chan Conn, connQueueLen),
+		libQ:       make(chan quicreuse.QUICConn, maxConnsPendingDelivery),
+		ethQ:       make(chan Conn, maxConnsPendingDelivery),
 	}
 
 	// ConnContext installs the per-connection identity slot that the verify
@@ -222,7 +216,7 @@ type sharedConn struct {
 	wg *sync.WaitGroup
 
 	// outboxes for classified incoming streams
-	libp2pBi  chan *quic.Stream
+	libp2pOut chan *quic.Stream
 	ethp2pBi  chan *quic.Stream
 	ethp2pUni chan *quic.ReceiveStream
 
@@ -247,12 +241,12 @@ func newSharedConn(raw *quic.Conn, wg *sync.WaitGroup, remote PeerID) *sharedCon
 		conn:      raw,
 		wg:        wg,
 		remote:    remote,
-		sem:       make(chan struct{}, maxPendingStreamsPerConn),
-		libp2pBi:  make(chan *quic.Stream, deliveryQueueLen),
-		ethp2pBi:  make(chan *quic.Stream, deliveryQueueLen),
-		ethp2pUni: make(chan *quic.ReceiveStream, uniDeliveryQueueLen),
+		sem:       make(chan struct{}, maxStreamsPendingClassify),
+		libp2pOut: make(chan *quic.Stream, maxStreamsPendingDelivery),
+		ethp2pBi:  make(chan *quic.Stream, maxStreamsPendingDelivery),
+		ethp2pUni: make(chan *quic.ReceiveStream, maxStreamsPendingDelivery),
 	}
-	for range maxPendingStreamsPerConn {
+	for range maxStreamsPendingClassify {
 		sc.sem <- struct{}{}
 	}
 	wg.Go(sc.drainBidi)
@@ -314,7 +308,7 @@ func (r *sharedConn) drainBidi() {
 				return
 			}
 
-			queue := r.libp2pBi
+			queue := r.libp2pOut
 			if isEthp2p {
 				queue = r.ethp2pBi
 			}
@@ -370,7 +364,7 @@ func classify[S peekableStream](ctx context.Context, stream S) (ethp2p bool, err
 		if err := peekExact(buf[:prefixLen]); err != nil {
 			return false, err
 		}
-		if buf[prefixLen-1]&varintContinuationBit != 0 {
+		if buf[prefixLen-1]&byte(0x80) != 0 {
 			continue
 		}
 

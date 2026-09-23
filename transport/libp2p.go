@@ -148,7 +148,7 @@ type libp2pConn sharedConn
 
 func (c *libp2pConn) AcceptStream(ctx context.Context) (*quic.Stream, error) {
 	select {
-	case stream := <-c.libp2pBi:
+	case stream := <-c.libp2pOut:
 		return stream, nil
 	case <-ctx.Done():
 		return nil, ctx.Err()
