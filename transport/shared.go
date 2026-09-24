@@ -252,7 +252,7 @@ drain:
 	}
 	t.libMu.Unlock()
 	for _, c := range queued {
-		_ = c.CloseWithError(appNoError, "listener closed")
+		_ = c.CloseWithError(quic.ApplicationErrorCode(protocol.Closing.Wire()), "listener closed")
 	}
 }
 

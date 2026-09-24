@@ -77,10 +77,13 @@
 // [Conn.CloseWithCode] sends GoAway and FIN before releasing the view. A peer
 // GoAway, FIN, or reset also releases the view. View methods then return a
 // [ViewClosedError] with the stack code and closure origin; [ErrViewClosed]
-// matches all control-protocol closures. GoAway can be overtaken by connection
-// close if this view is the last one on the physical connection.
-// The peer's closure is answered with FIN alone. Raw connection errors remain
-// quic-go errors, without mapping their codes. Dial before SetHello or Bind
+// matches these view closures. If ethp2p releases the last physical connection
+// view, CONNECTION_CLOSE carries the same stack code as GoAway. A remote
+// application close with a recognized even stack code becomes ViewClosedError;
+// odd and unknown codes, local closes, and other QUIC errors remain unchanged.
+// GoAway stays best-effort and the peer's closure is answered with FIN alone.
+// A libp2p-last zero-code close means Unspecified for a still-open ethp2p view;
+// it cannot replace a GoAway closure already observed. Dial before SetHello or Bind
 // returns [ErrNoHello]; unbound Accept waits for a claimed view.
 //
 // For each incoming bidirectional stream, the dispatcher checks the first byte.

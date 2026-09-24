@@ -75,7 +75,7 @@ func TestSinkRoutingRefusedAndUnsupported(t *testing.T) {
 
 func TestConnectInspectionRecordsAndClose(t *testing.T) {
 	a, b := transporttest.NewEndpoint(t), transporttest.NewEndpoint(t)
-	// Retain libp2p so connection close cannot overtake GoAway (spec 008 §4.3).
+	// Retain libp2p to exercise GoAway while the physical connection stays open.
 	keepLibp2p(t, a)
 	keepLibp2p(t, b)
 	left, err := NewStack(a.Eth, Config{Record: a.Record(t, 1)})
@@ -155,7 +155,7 @@ func TestConnectInspectionRecordsAndClose(t *testing.T) {
 
 func TestConnectValidationAndRejection(t *testing.T) {
 	a, b := transporttest.NewEndpoint(t), transporttest.NewEndpoint(t)
-	// Retain libp2p so connection close cannot overtake GoAway (spec 008 §4.3).
+	// Retain libp2p to exercise GoAway while the physical connection stays open.
 	keepLibp2p(t, a)
 	keepLibp2p(t, b)
 	left, right := newTestStack(t, a), newTestStack(t, b)
@@ -239,7 +239,7 @@ func TestConnectWaiterTakesOver(t *testing.T) {
 
 func TestSimultaneousConnectConverges(t *testing.T) {
 	a, b := transporttest.NewEndpoint(t), transporttest.NewEndpoint(t)
-	// Retain libp2p so connection close cannot overtake GoAway (spec 008 §4.3).
+	// Retain libp2p to exercise GoAway while the physical connection stays open.
 	keepLibp2p(t, a)
 	keepLibp2p(t, b)
 	left, right := newTestStack(t, a), newTestStack(t, b)
@@ -344,7 +344,7 @@ func TestRestartReplacesView(t *testing.T) {
 
 func TestHelloRecordMismatchRejected(t *testing.T) {
 	client, server := transporttest.NewEndpoint(t), transporttest.NewEndpoint(t)
-	// Retain libp2p so connection close cannot overtake GoAway (spec 008 §4.3).
+	// Retain libp2p to exercise GoAway while the physical connection stays open.
 	keepLibp2p(t, client)
 	keepLibp2p(t, server)
 	s := newTestStack(t, server)

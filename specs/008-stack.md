@@ -216,8 +216,21 @@ FIN without a preceding `GoAway` closes the peer view with `Unspecified`.
 
 The endpoint answers a peer's closure with FIN on its own control stream, without `GoAway`.
 
-`GoAway` is best-effort when releasing this view also closes the physical connection:
-the connection close may overtake it, leaving the peer with a connection error.
+`GoAway` remains informative and best-effort; it requires no reply or negotiation.
+When releasing the ethp2p view also closes the physical connection,
+the endpoint MUST send the same stack code in the QUIC application `CONNECTION_CLOSE`,
+encoded with the wire layout in section 5.1.
+A receiver MUST interpret a peer's connection close carrying a recognized stack-namespace
+application code as a remote view closure with that code, just as if `GoAway` had arrived.
+Whichever arrives first wins with the same result.
+Odd or unknown application codes, QUIC transport errors,
+timeouts and stateless resets retain their ordinary connection-error handling.
+
+When libp2p releases the last view, its connection-close code remains libp2p's code.
+A normal zero-code close means `Unspecified` to an ethp2p view still open at the receiver
+(for example, when talking to an older peer).
+It does not override a view already closed by `GoAway`.
+Listener shutdown uses `Closing`.
 
 This signal is the only way a peer learns that an ethp2p view closed
 while libp2p keeps the physical connection open.
@@ -246,7 +259,8 @@ That shortens the window in which a stale connection wins a duplicate check (sec
 
 ## 5. Outcome codes
 
-Stream resets (`RESET_STREAM`, `STOP_SENDING`) and `GoAway` carry codes.
+Stream resets (`RESET_STREAM`, `STOP_SENDING`), `GoAway`,
+and an ethp2p-last application `CONNECTION_CLOSE` carry codes.
 
 ### 5.1. Wire layout
 
@@ -286,7 +300,8 @@ Values 4 to 7 are unassigned and decode as `Unspecified`.
 Values 8 to 31 are sent only by the stack.
 Values 14 to 31 are reserved for future stack codes, keeping every stack code to one byte.
 
-A receiver MUST treat an unknown stack value as `Unspecified`.
+A receiver MUST treat an unknown stack value on a stream reset or in `GoAway` as `Unspecified`.
+An unknown connection-close value remains a connection error (section 4.3).
 When a reset carries a defined stack-only value,
 `ResetError.Code` preserves it for the receiving protocol.
 If a protocol passes that code to a stream cancellation method, the wrapper sends `Unspecified`;

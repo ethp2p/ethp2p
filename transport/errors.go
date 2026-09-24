@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/ethp2p/ethp2p/protocol"
 	"github.com/quic-go/quic-go"
 )
 
@@ -32,9 +33,33 @@ var (
 )
 
 const (
+	// A libp2p-last normal release is Unspecified to an ethp2p receiver
+	// still awaiting GoAway. Generic failures stay outside the stack namespace.
 	appNoError quic.ApplicationErrorCode = 0
 	appFailure quic.ApplicationErrorCode = 1
 )
+
+// ethp2pError interprets a remote connection close at the ethp2p boundary.
+// Keep raw.Context (and its child view contexts) intact: cancellation remains
+// synchronous with QUIC and requires no extra goroutine or shutdown handoff.
+// GoAway's first-wins ViewClosedError takes precedence. Unknown even values
+// must round-trip through ParseCode; its Unspecified fallback is not evidence
+// that an arbitrary application code denotes a view closure.
+func ethp2pError(err error) error {
+	if _, ok := errors.AsType[*ViewClosedError](err); ok {
+		return err
+	}
+	app, ok := errors.AsType[*quic.ApplicationError](err)
+	if !ok || !app.Remote || uint64(app.ErrorCode)&1 != 0 {
+		return err
+	}
+	wire := uint64(app.ErrorCode)
+	code := protocol.ParseCode(0, wire)
+	if code.Wire() != wire {
+		return err
+	}
+	return &ViewClosedError{Code: code, Remote: true}
+}
 
 // ErrPeerMismatch reports that a dial authenticated a valid peer identity that
 // differs from the nonempty peer ID passed to [Ethp2pTransport.Dial].

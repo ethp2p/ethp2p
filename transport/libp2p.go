@@ -89,7 +89,7 @@ func (l *libp2pListener) Accept(ctx context.Context) (quicreuse.QUICConn, error)
 		closed := t.libDetached || t.ctx.Err() != nil
 		t.libMu.Unlock()
 		if closed {
-			_ = c.CloseWithError(appNoError, "listener closed")
+			_ = c.CloseWithError(quic.ApplicationErrorCode(protocol.Closing.Wire()), "listener closed")
 			return nil, ErrClosed
 		}
 		return c, nil

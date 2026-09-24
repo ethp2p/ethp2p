@@ -66,7 +66,7 @@ func (p *testPair) connect(t *testing.T, client, server *Stack) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(t.Context(), testTimeout)
 	defer cancel()
-	// Retain libp2p so connection close cannot overtake GoAway (spec 008 §4.3).
+	// Retain libp2p to exercise GoAway while the physical connection stays open.
 	cl, err := p.client.Shared.Libp2p().Listen(nil, nil)
 	if err != nil {
 		t.Fatal(err)

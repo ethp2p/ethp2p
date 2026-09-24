@@ -149,11 +149,11 @@ func TestSinkInboundPump(t *testing.T) {
 	for _, remote := range []bool{false, true} {
 		t.Run(map[bool]string{false: "local", true: "remote"}[remote], func(t *testing.T) {
 			client, server := transporttest.NewEndpoint(t), transporttest.NewEndpoint(t)
-			// Retain libp2p so connection close cannot overtake GoAway (spec 008 §4.3).
+			// Retain libp2p to exercise GoAway while the physical connection stays open.
 			if _, err := client.Shared.Libp2p().Listen(nil, nil); err != nil {
 				t.Fatal(err)
 			}
-			// Keep the raw connection alive so GoAway cannot be overtaken.
+			// Keep this view alive to exercise control-stream closure independently.
 			listener, err := server.Shared.Libp2p().Listen(nil, nil)
 			if err != nil {
 				t.Fatal(err)
@@ -245,7 +245,7 @@ func TestSinkInboundPump(t *testing.T) {
 
 func TestSinkRejectedView(t *testing.T) {
 	client, server := transporttest.NewEndpoint(t), transporttest.NewEndpoint(t)
-	// Retain libp2p so connection close cannot overtake GoAway (spec 008 §4.3).
+	// Retain libp2p to exercise GoAway while the physical connection stays open.
 	if _, err := client.Shared.Libp2p().Listen(nil, nil); err != nil {
 		t.Fatal(err)
 	}

@@ -29,7 +29,7 @@ func (t *Ethp2pTransport) Accept(ctx context.Context) (Conn, error) {
 		return nil, ErrSinkBound
 	}
 	if err := t.shared.start(); err != nil {
-		return nil, err
+		return nil, ethp2pError(err)
 	}
 	select {
 	case <-changed:
@@ -69,7 +69,7 @@ func (t *Ethp2pTransport) Dial(ctx context.Context, addr net.Addr, expect PeerID
 	tlsConfig := t.shared.handshaker.connConfig(slot, expect)
 	raw, err := t.shared.raw.Dial(ctx, addr, tlsConfig, t.shared.profile.quicConfig())
 	if err != nil {
-		return nil, err
+		return nil, ethp2pError(err)
 	}
 
 	alpn := raw.ConnectionState().TLS.NegotiatedProtocol
@@ -88,7 +88,7 @@ func (t *Ethp2pTransport) Dial(ctx context.Context, addr net.Addr, expect PeerID
 		_ = ethp2p.Close()
 		t.shared.offerLibp2p(sc.libp2p())
 		sc.startDispatchers()
-		return nil, err
+		return nil, ethp2pError(err)
 	}
 	t.shared.offerLibp2p(sc.libp2p())
 	sc.startDispatchers()
@@ -97,7 +97,7 @@ func (t *Ethp2pTransport) Dial(ctx context.Context, addr net.Addr, expect PeerID
 	t.shared.helloMu.RUnlock()
 	if sink != nil {
 		if err := t.shared.admit(ctx, ethp2p, sink); err != nil {
-			return nil, err
+			return nil, ethp2pError(err)
 		}
 		// Transfer the existing reservation without an unowned gap, including
 		// when shutdown overtook successful admission in the caller.
@@ -138,16 +138,16 @@ func (c *ethp2pConn) Outbound() bool { return c.outbound }
 
 func (c *ethp2pConn) OpenStream(ctx context.Context, selector protocol.Selector) (Stream, error) {
 	if c.ethp2pCtx.Err() != nil {
-		return nil, context.Cause(c.ethp2pCtx)
+		return nil, ethp2pError(context.Cause(c.ethp2pCtx))
 	}
 	bound, cleanup := viewContext(ctx, c.ethp2pCtx)
 	defer cleanup()
 	s, err := c.conn.OpenStreamSync(bound)
 	if err != nil {
 		if c.ethp2pCtx.Err() != nil {
-			return nil, context.Cause(c.ethp2pCtx)
+			return nil, ethp2pError(context.Cause(c.ethp2pCtx))
 		}
-		return nil, err
+		return nil, ethp2pError(err)
 	}
 	stop := context.AfterFunc(bound, func() { s.CancelWrite(quicCode(openFailureCode(bound, bound.Err()))) })
 	err = protocol.WriteSelector(s, selector)
@@ -155,82 +155,82 @@ func (c *ethp2pConn) OpenStream(ctx context.Context, selector protocol.Selector)
 	if err = errors.Join(err, bound.Err()); err != nil {
 		code := openFailureCode(bound, err)
 		resetBi(s, code)
-		return nil, err
+		return nil, ethp2pError(err)
 	}
 	return stream{s}, nil
 }
 
 func (c *ethp2pConn) OpenUniStream(ctx context.Context, selector protocol.Selector) (SendStream, error) {
 	if c.ethp2pCtx.Err() != nil {
-		return nil, context.Cause(c.ethp2pCtx)
+		return nil, ethp2pError(context.Cause(c.ethp2pCtx))
 	}
 	bound, cleanup := viewContext(ctx, c.ethp2pCtx)
 	defer cleanup()
 	s, err := c.conn.OpenUniStreamSync(bound)
 	if err != nil {
 		if c.ethp2pCtx.Err() != nil {
-			return nil, context.Cause(c.ethp2pCtx)
+			return nil, ethp2pError(context.Cause(c.ethp2pCtx))
 		}
-		return nil, err
+		return nil, ethp2pError(err)
 	}
 	stop := context.AfterFunc(bound, func() { s.CancelWrite(quicCode(openFailureCode(bound, bound.Err()))) })
 	err = protocol.WriteSelector(s, selector)
 	stop()
 	if err = errors.Join(err, bound.Err()); err != nil {
 		s.CancelWrite(quicCode(openFailureCode(bound, err)))
-		return nil, err
+		return nil, ethp2pError(err)
 	}
 	return sendStream{s}, nil
 }
 
 func (c *ethp2pConn) AcceptStream(ctx context.Context) (Stream, protocol.Selector, error) {
 	if _, err := c.PeerHello(ctx); err != nil {
-		return nil, 0, err
+		return nil, 0, ethp2pError(err)
 	}
 	s, err := c.ethp2pBi.pop(ctx, c.ethp2pCtx)
 	if err != nil {
-		return nil, 0, err
+		return nil, 0, ethp2pError(err)
 	}
 	if c.ethp2pCtx.Err() != nil {
 		resetBi(s.stream, protocol.Closing)
-		return nil, 0, context.Cause(c.ethp2pCtx)
+		return nil, 0, ethp2pError(context.Cause(c.ethp2pCtx))
 	}
 	return stream{s.stream}, s.selector, nil
 }
 
 func (c *ethp2pConn) AcceptUniStream(ctx context.Context) (ReceiveStream, protocol.Selector, error) {
 	if _, err := c.PeerHello(ctx); err != nil {
-		return nil, 0, err
+		return nil, 0, ethp2pError(err)
 	}
 	s, err := c.ethp2pUni.pop(ctx, c.ethp2pCtx)
 	if err != nil {
-		return nil, 0, err
+		return nil, 0, ethp2pError(err)
 	}
 	if c.ethp2pCtx.Err() != nil {
 		s.stream.CancelRead(quicCode(protocol.Closing))
-		return nil, 0, context.Cause(c.ethp2pCtx)
+		return nil, 0, ethp2pError(context.Cause(c.ethp2pCtx))
 	}
 	return &receiveStream{ReceiveStream: s.stream, skip: s.frameLen}, s.selector, nil
 }
 
 func (c *ethp2pConn) SendDatagram(_ context.Context, payload []byte) error {
 	if c.ethp2pCtx.Err() != nil {
-		return context.Cause(c.ethp2pCtx)
+		return ethp2pError(context.Cause(c.ethp2pCtx))
 	}
-	return c.conn.SendDatagram(payload)
+	return ethp2pError(c.conn.SendDatagram(payload))
 }
 
 func (c *ethp2pConn) RecvDatagram(ctx context.Context) ([]byte, error) {
 	if c.ethp2pCtx.Err() != nil {
-		return nil, context.Cause(c.ethp2pCtx)
+		return nil, ethp2pError(context.Cause(c.ethp2pCtx))
 	}
 	bound, cleanup := viewContext(ctx, c.ethp2pCtx)
 	defer cleanup()
 	payload, err := c.conn.ReceiveDatagram(bound)
 	if err != nil && c.ethp2pCtx.Err() != nil {
-		return nil, context.Cause(c.ethp2pCtx)
+		return nil, ethp2pError(context.Cause(c.ethp2pCtx))
 	}
-	return payload, err
+	return payload, ethp2pError(err)
 }
 
 func (c *ethp2pConn) Close() error {
@@ -250,19 +250,19 @@ func (c *ethp2pConn) CloseWithCode(code protocol.Code) error {
 // PeerHello waits for the peer's validated Hello. Its result owns its slices.
 func (c *ethp2pConn) PeerHello(ctx context.Context) (Hello, error) {
 	if c.ethp2pCtx.Err() != nil {
-		return Hello{}, context.Cause(c.ethp2pCtx)
+		return Hello{}, ethp2pError(context.Cause(c.ethp2pCtx))
 	}
 	select {
 	case <-c.control.helloReady:
 		if c.ethp2pCtx.Err() != nil {
-			return Hello{}, context.Cause(c.ethp2pCtx)
+			return Hello{}, ethp2pError(context.Cause(c.ethp2pCtx))
 		}
 		c.control.mu.Lock()
 		h := cloneHello(c.control.peerHello)
 		c.control.mu.Unlock()
 		return h, nil
 	case <-c.ethp2pCtx.Done():
-		return Hello{}, context.Cause(c.ethp2pCtx)
+		return Hello{}, ethp2pError(context.Cause(c.ethp2pCtx))
 	case <-ctx.Done():
 		return Hello{}, ctx.Err()
 	}

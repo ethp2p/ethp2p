@@ -271,11 +271,13 @@ func TestFullLibp2pQueueKeepsDialedEthp2pView(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_ = serverConn.Close()
 	view := conn.(*ethp2pConn)
 	if view.closed.Load()&uint32(sideEthp2p) != 0 {
 		t.Fatal("dial returned a closed ethp2p view")
 	}
+	// Check queue rejection before deliberately closing the peer's view;
+	// its GoAway or connection close can immediately release our view too.
+	_ = serverConn.Close()
 	if err := conn.Close(); err != nil {
 		t.Fatal(err)
 	}

@@ -57,7 +57,7 @@ func (t *SharedTransport) admit(ctx context.Context, c *ethp2pConn, sink Sink) e
 		err = ctx.Err()
 	}
 	if err == nil {
-		err = context.Cause(c.ethp2pCtx)
+		err = ethp2pError(context.Cause(c.ethp2pCtx))
 	}
 	if err != nil {
 		_ = c.Close()
@@ -98,7 +98,7 @@ func (t *SharedTransport) pump(c *ethp2pConn, sink Sink) {
 		sink.Stream(c, sel, stream)
 	}
 	cancel()
-	err := errors.Join(context.Cause(c.ethp2pCtx), uniErr, <-done)
+	err := ethp2pError(errors.Join(context.Cause(c.ethp2pCtx), uniErr, <-done))
 	code := protocol.Unspecified
 	if closed, ok := errors.AsType[*ViewClosedError](err); ok {
 		code = closed.Code

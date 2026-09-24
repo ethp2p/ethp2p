@@ -109,7 +109,7 @@ type controlState struct {
 // view becomes visible. The writer and reader both belong to the transport wg.
 func (c *ethp2pConn) startControl(h Hello) error {
 	if c.ethp2pCtx.Err() != nil {
-		return context.Cause(c.ethp2pCtx)
+		return ethp2pError(context.Cause(c.ethp2pCtx))
 	}
 	out, err := c.conn.OpenUniStream()
 	if err != nil {
@@ -143,6 +143,9 @@ func (c *sharedConn) writeHello(h Hello) {
 	ctl.helloWritten = err == nil
 	ctl.writeMu.Unlock()
 	if err != nil {
+		if _, ok := errors.AsType[*quic.ApplicationError](err); ok {
+			c.cancelEthp2p(ethp2pError(err))
+		}
 		c.closeControl(protocol.Unspecified, false, true, protocol.Closing)
 	}
 }
@@ -223,6 +226,13 @@ func readControlFrame(in *quic.ReceiveStream) (*pb.Control, error) {
 }
 
 func (c *sharedConn) controlReadError(err error, first bool) {
+	// QUIC wakes blocked stream reads before cancellation has necessarily
+	// propagated to raw.Context. A connection close is not malformed control
+	// input, even in that interval. Preserve its cause before any local close.
+	if _, ok := errors.AsType[*quic.ApplicationError](err); ok {
+		c.cancelEthp2p(ethp2pError(err))
+		return
+	}
 	if c.ethp2pCtx.Err() != nil || c.conn.Context().Err() != nil {
 		return
 	}
@@ -276,6 +286,6 @@ func (c *sharedConn) closeControl(code protocol.Code, remote, sendGoAway bool, c
 		}
 		c.cancelEthp2p(&ViewClosedError{Code: code, Remote: remote})
 		ctl.mu.Unlock()
-		c.closeSide(sideEthp2p, appNoError, code.String())
+		c.closeSide(sideEthp2p, quic.ApplicationErrorCode(code.Wire()), code.String())
 	})
 }
