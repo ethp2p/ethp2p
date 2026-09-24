@@ -13,7 +13,6 @@ import (
 	"testing"
 	"time"
 
-	wire "github.com/ethp2p/ethp2p/protocol"
 	"github.com/ethp2p/ethp2p/transport"
 	"github.com/libp2p/go-libp2p"
 	"github.com/libp2p/go-libp2p/core/crypto"
@@ -94,7 +93,9 @@ func (h *harness) ethp2pNode(options ...libp2p.Option) *node {
 		h.t.Fatal(err)
 	}
 	// Register ethp2p interest as a production node would, so assertNoEthp2p is meaningful.
-	shared.Ethp2p()
+	if err := shared.Ethp2p().SetHello(transport.Hello{}); err != nil {
+		h.t.Fatal(err)
+	}
 	opts := []libp2p.Option{
 		libp2p.Identity(identity),
 		libp2p.NoTransports,
@@ -253,22 +254,22 @@ func (h *harness) echo(from, to *node, name string, payload []byte) {
 }
 
 func (h *harness) exchangeEth(ctx context.Context, pair ethPair, payload []byte) error {
-	out, err := pair.dialed.OpenStream(ctx)
+	out, err := pair.dialed.OpenStream(ctx, 1)
 	if err != nil {
 		return err
 	}
 	defer out.Close()
-	if err := wire.WriteSelector(out, 1); err != nil {
-		return err
-	}
 	if _, err := out.Write(payload); err != nil {
 		return err
 	}
-	in, err := pair.accepted.AcceptBiStream(ctx)
+	in, selector, err := pair.accepted.AcceptStream(ctx)
 	if err != nil {
 		return err
 	}
-	want := append([]byte{1, 1}, payload...)
+	if selector != 1 {
+		return fmt.Errorf("selector = %d, want 1", selector)
+	}
+	want := payload
 	got := make([]byte, len(want))
 	if _, err := io.ReadFull(in, got); err != nil {
 		return err
@@ -486,7 +487,7 @@ func TestInteropMalformedSelectorsRecover(t *testing.T) {
 			pair := h.connectEthp2p(client, server)
 			ctx, cancel := h.context()
 			defer cancel()
-			stream, err := pair.dialed.OpenStream(ctx)
+			stream, err := transport.RawOpenStream(ctx, pair.dialed)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -507,7 +508,7 @@ func TestInteropStalledSelectorRecovers(t *testing.T) {
 	pair := h.connectEthp2p(client, server)
 	ctx, cancel := h.context()
 	defer cancel()
-	stream, err := pair.dialed.OpenStream(ctx)
+	stream, err := transport.RawOpenStream(ctx, pair.dialed)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -519,6 +520,8 @@ func TestInteropStalledSelectorRecovers(t *testing.T) {
 	}
 	if _, err := stream.Read(make([]byte, 1)); err == nil {
 		t.Fatal("stalled selector was not reset")
+	} else if reset, ok := errors.AsType[*quic.StreamError](err); !ok || !reset.Remote || uint64(reset.ErrorCode) != 6 {
+		t.Fatalf("stalled selector reset = %v, want remote wire 6", err)
 	}
 	h.echoEth(pair, []byte("after timeout"))
 }
@@ -529,7 +532,7 @@ func TestInteropPeerClosureWhileClassifying(t *testing.T) {
 	first := h.connectEthp2p(client, server)
 	ctx, cancel := h.context()
 	defer cancel()
-	stream, err := first.dialed.OpenStream(ctx)
+	stream, err := transport.RawOpenStream(ctx, first.dialed)
 	if err != nil {
 		t.Fatal(err)
 	}

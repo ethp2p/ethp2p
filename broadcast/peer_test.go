@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	ethp2p "github.com/ethp2p/ethp2p"
 	"github.com/ethp2p/ethp2p/protocol"
 	"github.com/ethp2p/ethp2p/transport"
 )
@@ -82,7 +83,7 @@ func TestHandshakeUsesAuthenticatedPeerIDs(t *testing.T) {
 }
 
 type bufferedReceiveStream struct {
-	transport.ReceiveStream
+	ethp2p.ReceiveStream
 	reader *bufio.Reader
 }
 
@@ -91,7 +92,7 @@ func (s bufferedReceiveStream) Read(p []byte) (int, error) { return s.reader.Rea
 func TestInboundStreamsWaitForHandshake(t *testing.T) {
 	tests := []struct {
 		name   string
-		accept func(*PeerConn, transport.ReceiveStream)
+		accept func(*PeerConn, ethp2p.ReceiveStream)
 	}{
 		{name: "session", accept: (*PeerConn).acceptSession},
 		{name: "chunk", accept: (*PeerConn).acceptChunk},
@@ -120,7 +121,7 @@ func TestInboundStreamsWaitForHandshake(t *testing.T) {
 			case <-time.After(20 * time.Millisecond):
 			}
 
-			peer.finishHandshake(true)
+			peer.finishHandshake(true, nil)
 			select {
 			case <-stream.readStarted:
 			case <-time.After(time.Second):
@@ -140,7 +141,7 @@ func TestBindContextUnblocksChunkBackpressure(t *testing.T) {
 	peer.handlersMu.Lock()
 	peer.ready = true
 	peer.handlersMu.Unlock()
-	peer.finishHandshake(true)
+	peer.finishHandshake(true, nil)
 	peer.chunkSem <- struct{}{}
 
 	stream := newGateStream()
@@ -164,6 +165,52 @@ func TestBindContextUnblocksChunkBackpressure(t *testing.T) {
 	peer.Close()
 }
 
+func TestPeerEnqueueStreamRejectsFullQueuesAsOverloaded(t *testing.T) {
+	for _, test := range []struct {
+		name     string
+		selector protocol.Selector
+	}{
+		{name: "session", selector: SESS},
+		{name: "chunk", selector: CHUNK},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			peer := &PeerConn{
+				ctx:       context.Background(),
+				sessionIn: make(chan ethp2p.ReceiveStream, 1),
+				chunkIn:   make(chan ethp2p.ReceiveStream, 1),
+			}
+			raw, stream := newWrappedRecordingReceiveStream(t, test.selector, nil)
+			if test.selector == SESS {
+				_, queued := newWrappedRecordingReceiveStream(t, test.selector, nil)
+				peer.sessionIn <- queued
+			} else {
+				_, queued := newWrappedRecordingReceiveStream(t, test.selector, nil)
+				peer.chunkIn <- queued
+			}
+
+			peer.enqueueStream(test.selector, stream)
+
+			requireWireCancelCode(t, raw, 4)
+		})
+	}
+}
+
+func TestAcceptSessionRejectsFullHandlerBudgetAsOverloaded(t *testing.T) {
+	peer := &PeerConn{
+		ctx:           context.Background(),
+		sessionSem:    make(chan struct{}, 1),
+		handshakeDone: make(chan struct{}),
+		handshakeOK:   true,
+		ready:         true,
+	}
+	close(peer.handshakeDone)
+	peer.sessionSem <- struct{}{}
+
+	raw, stream := newWrappedRecordingReceiveStream(t, SESS, nil)
+	peer.acceptSession(stream)
+	requireWireCancelCode(t, raw, 4)
+}
+
 type gateStream struct {
 	readStarted chan struct{}
 	canceled    chan struct{}
@@ -183,7 +230,7 @@ func (s *gateStream) Read([]byte) (int, error) {
 	return 0, io.EOF
 }
 
-func (s *gateStream) CancelRead(uint64) {
+func (s *gateStream) CancelRead(protocol.Code) {
 	s.cancelOnce.Do(func() { close(s.canceled) })
 }
 
@@ -191,4 +238,4 @@ func (*gateStream) SetReadDeadline(time.Time) error {
 	return nil
 }
 
-var _ transport.ReceiveStream = (*gateStream)(nil)
+var _ ethp2p.ReceiveStream = (*gateStream)(nil)

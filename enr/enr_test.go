@@ -34,11 +34,11 @@ func TestEIP778Example(t *testing.T) {
 		t.Fatal("Encode did not preserve the example record bytes")
 	}
 
-	addr, ok, err := Get(record, IP)
+	addr, ok, err := record.Get(IP)
 	if err != nil || !ok || addr != netip.MustParseAddr("127.0.0.1") {
 		t.Fatalf("Get(IP) = %v, %t, %v", addr, ok, err)
 	}
-	port, ok, err := Get(record, UDP)
+	port, ok, err := record.Get(UDP)
 	if err != nil || !ok || port != 30303 {
 		t.Fatalf("Get(UDP) = %d, %t, %v", port, ok, err)
 	}
@@ -48,8 +48,8 @@ func TestEIP778Example(t *testing.T) {
 		t.Fatal("decoded public key does not match the EIP-778 example key")
 	}
 	rebuilt, err := Sign(privateKey, 1,
-		Set(IP, netip.MustParseAddr("127.0.0.1")),
-		Set(UDP, uint16(30303)),
+		IP.Set(netip.MustParseAddr("127.0.0.1")),
+		UDP.Set(uint16(30303)),
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -120,16 +120,16 @@ func TestGetPredefinedAndCustomKeys(t *testing.T) {
 		"quic6": uint16(30308),
 	}
 	record, err := Sign(examplePrivateKey(t), 9,
-		Set(IP, want["ip"].(netip.Addr)),
-		Set(IP6, want["ip6"].(netip.Addr)),
-		Set(UDP, want["udp"].(uint16)),
-		Set(UDP6, want["udp6"].(uint16)),
-		Set(TCP, want["tcp"].(uint16)),
-		Set(TCP6, want["tcp6"].(uint16)),
-		Set(QUIC, want["quic"].(uint16)),
-		Set(QUIC6, want["quic6"].(uint16)),
-		Set(BytesKey("attnets"), []byte{0x01, 0x80}),
-		Set(UintKey("custom-seq"), uint64(1<<40+19)),
+		IP.Set(want["ip"].(netip.Addr)),
+		IP6.Set(want["ip6"].(netip.Addr)),
+		UDP.Set(want["udp"].(uint16)),
+		UDP6.Set(want["udp6"].(uint16)),
+		TCP.Set(want["tcp"].(uint16)),
+		TCP6.Set(want["tcp6"].(uint16)),
+		QUIC.Set(want["quic"].(uint16)),
+		QUIC6.Set(want["quic6"].(uint16)),
+		BytesEntry("attnets").Set([]byte{0x01, 0x80}),
+		UintEntry("custom-seq").Set(uint64(1<<40+19)),
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -150,69 +150,69 @@ func TestGetPredefinedAndCustomKeys(t *testing.T) {
 		{name: "quic", want: want["quic"]},
 		{name: "quic6", want: want["quic6"]},
 	}
-	checks[0].got, checks[0].ok, checks[0].err = Get(record, IP)
-	checks[1].got, checks[1].ok, checks[1].err = Get(record, IP6)
-	checks[2].got, checks[2].ok, checks[2].err = Get(record, UDP)
-	checks[3].got, checks[3].ok, checks[3].err = Get(record, UDP6)
-	checks[4].got, checks[4].ok, checks[4].err = Get(record, TCP)
-	checks[5].got, checks[5].ok, checks[5].err = Get(record, TCP6)
-	checks[6].got, checks[6].ok, checks[6].err = Get(record, QUIC)
-	checks[7].got, checks[7].ok, checks[7].err = Get(record, QUIC6)
+	checks[0].got, checks[0].ok, checks[0].err = record.Get(IP)
+	checks[1].got, checks[1].ok, checks[1].err = record.Get(IP6)
+	checks[2].got, checks[2].ok, checks[2].err = record.Get(UDP)
+	checks[3].got, checks[3].ok, checks[3].err = record.Get(UDP6)
+	checks[4].got, checks[4].ok, checks[4].err = record.Get(TCP)
+	checks[5].got, checks[5].ok, checks[5].err = record.Get(TCP6)
+	checks[6].got, checks[6].ok, checks[6].err = record.Get(QUIC)
+	checks[7].got, checks[7].ok, checks[7].err = record.Get(QUIC6)
 	for _, check := range checks {
 		if check.err != nil || !check.ok || check.got != check.want {
 			t.Errorf("%s = %v, %t, %v; want %v", check.name, check.got, check.ok, check.err, check.want)
 		}
 	}
 
-	bytesKey := BytesKey("attnets")
-	gotBytes, ok, err := Get(record, bytesKey)
+	bytesKey := BytesEntry("attnets")
+	gotBytes, ok, err := record.Get(bytesKey)
 	if err != nil || !ok || !bytes.Equal(gotBytes, []byte{0x01, 0x80}) {
 		t.Fatalf("Get(attnets) = %x, %t, %v", gotBytes, ok, err)
 	}
 	gotBytes[0] = 0xff
-	gotBytesAgain, _, _ := Get(record, bytesKey)
+	gotBytesAgain, _, _ := record.Get(bytesKey)
 	if gotBytesAgain[0] != 0x01 {
-		t.Fatal("Get(BytesKey) returned a mutable view of the record")
+		t.Fatal("Get(BytesEntry) returned a mutable view of the record")
 	}
-	gotUint, ok, err := Get(record, UintKey("custom-seq"))
+	gotUint, ok, err := record.Get(UintEntry("custom-seq"))
 	if err != nil || !ok || gotUint != 1<<40+19 {
 		t.Fatalf("Get(custom-seq) = %d, %t, %v", gotUint, ok, err)
 	}
-	if _, ok, err := Get(record, BytesKey("missing")); err != nil || ok {
+	if _, ok, err := record.Get(BytesEntry("missing")); err != nil || ok {
 		t.Fatalf("missing key = %t, %v; want false, nil", ok, err)
 	}
 }
 
 func TestGetMalformedValues(t *testing.T) {
 	record, err := Sign(examplePrivateKey(t), 1,
-		Set(BytesKey("ip"), []byte{127, 0, 1}),
-		Set(BytesKey("ip6"), []byte{0, 0, 0, 0}),
-		Set(BytesKey("quic"), []byte{1, 0, 0}),
+		BytesEntry("ip").Set([]byte{127, 0, 1}),
+		BytesEntry("ip6").Set([]byte{0, 0, 0, 0}),
+		BytesEntry("quic").Set([]byte{1, 0, 0}),
 	)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, ok, err := Get(record, IP); !ok || err == nil {
+	if _, ok, err := record.Get(IP); !ok || err == nil {
 		t.Fatalf("wrong-length IP = %t, %v; want present and malformed", ok, err)
 	}
-	if _, ok, err := Get(record, IP6); !ok || err == nil {
+	if _, ok, err := record.Get(IP6); !ok || err == nil {
 		t.Fatalf("wrong-length IP6 = %t, %v; want present and malformed", ok, err)
 	}
-	if _, ok, err := Get(record, QUIC); !ok || err == nil {
+	if _, ok, err := record.Get(QUIC); !ok || err == nil {
 		t.Fatalf("oversize QUIC port = %t, %v; want present and malformed", ok, err)
 	}
-	if _, err := Sign(examplePrivateKey(t), 1, Set(IP, netip.Addr{})); err == nil {
+	if _, err := Sign(examplePrivateKey(t), 1, IP.Set(netip.Addr{})); err == nil {
 		t.Fatal("Sign accepted an invalid IPv4 address")
 	}
-	if _, err := Sign(examplePrivateKey(t), 1, Set(IP6, netip.MustParseAddr("::ffff:192.0.2.1"))); err == nil {
+	if _, err := Sign(examplePrivateKey(t), 1, IP6.Set(netip.MustParseAddr("::ffff:192.0.2.1"))); err == nil {
 		t.Fatal("Sign accepted an IPv4-mapped IPv6 address")
 	}
 	mapped := netip.MustParseAddr("::ffff:192.0.2.1").As16()
-	mappedRecord, err := Sign(examplePrivateKey(t), 1, Set(BytesKey("ip6"), mapped[:]))
+	mappedRecord, err := Sign(examplePrivateKey(t), 1, BytesEntry("ip6").Set(mapped[:]))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, ok, err := Get(mappedRecord, IP6); !ok || err == nil {
+	if _, ok, err := mappedRecord.Get(IP6); !ok || err == nil {
 		t.Fatalf("IPv4-mapped IP6 = %t, %v; want present and malformed", ok, err)
 	}
 }
@@ -222,8 +222,8 @@ func TestQUICSkipsInvalidAddressesAndZeroPorts(t *testing.T) {
 	validIPv6 := netip.MustParseAddr("2001:db8::7")
 
 	unspecified, err := Sign(key, 1,
-		Set(IP, netip.IPv4Unspecified()), Set(QUIC, uint16(30303)),
-		Set(IP6, validIPv6), Set(QUIC6, uint16(0)),
+		IP.Set(netip.IPv4Unspecified()), QUIC.Set(uint16(30303)),
+		IP6.Set(validIPv6), QUIC6.Set(uint16(0)),
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -233,8 +233,8 @@ func TestQUICSkipsInvalidAddressesAndZeroPorts(t *testing.T) {
 	}
 
 	malformedIPv4, err := Sign(key, 2,
-		Set(BytesKey("ip"), []byte{192, 0, 2}), Set(QUIC, uint16(30303)),
-		Set(IP6, validIPv6), Set(QUIC6, uint16(30304)),
+		BytesEntry("ip").Set([]byte{192, 0, 2}), QUIC.Set(uint16(30303)),
+		IP6.Set(validIPv6), QUIC6.Set(uint16(30304)),
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -245,8 +245,8 @@ func TestQUICSkipsInvalidAddressesAndZeroPorts(t *testing.T) {
 	}
 
 	zeroPorts, err := Sign(key, 3,
-		Set(IP, netip.MustParseAddr("192.0.2.7")), Set(QUIC, uint16(0)),
-		Set(IP6, netip.IPv6Unspecified()), Set(QUIC6, uint16(30304)),
+		IP.Set(netip.MustParseAddr("192.0.2.7")), QUIC.Set(uint16(0)),
+		IP6.Set(netip.IPv6Unspecified()), QUIC6.Set(uint16(30304)),
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -262,8 +262,8 @@ func TestQUICSkipsMulticastAndPreservesCandidateOrder(t *testing.T) {
 	v6 := netip.MustParseAddr("2001:db8::7")
 
 	ipv4Multicast, err := Sign(key, 4,
-		Set(IP, netip.MustParseAddr("224.0.0.1")), Set(QUIC, uint16(9000)),
-		Set(IP6, v6), Set(QUIC6, uint16(9001)),
+		IP.Set(netip.MustParseAddr("224.0.0.1")), QUIC.Set(uint16(9000)),
+		IP6.Set(v6), QUIC6.Set(uint16(9001)),
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -273,8 +273,8 @@ func TestQUICSkipsMulticastAndPreservesCandidateOrder(t *testing.T) {
 	}
 
 	ipv6Multicast, err := Sign(key, 5,
-		Set(IP, v4), Set(QUIC, uint16(9000)),
-		Set(IP6, netip.MustParseAddr("ff02::1")), Set(QUIC6, uint16(9001)),
+		IP.Set(v4), QUIC.Set(uint16(9000)),
+		IP6.Set(netip.MustParseAddr("ff02::1")), QUIC6.Set(uint16(9001)),
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -284,8 +284,8 @@ func TestQUICSkipsMulticastAndPreservesCandidateOrder(t *testing.T) {
 	}
 
 	bothFamilies, err := Sign(key, 6,
-		Set(IP, v4), Set(QUIC, uint16(9000)),
-		Set(IP6, v6), Set(QUIC6, uint16(9001)),
+		IP.Set(v4), QUIC.Set(uint16(9000)),
+		IP6.Set(v6), QUIC6.Set(uint16(9001)),
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -298,16 +298,16 @@ func TestQUICSkipsMulticastAndPreservesCandidateOrder(t *testing.T) {
 
 func TestSignRejectsInvalidEntriesAndOversize(t *testing.T) {
 	key := examplePrivateKey(t)
-	if _, err := Sign(key, 1, Set(UDP, uint16(1)), Set(UDP, uint16(2))); err == nil {
+	if _, err := Sign(key, 1, UDP.Set(uint16(1)), UDP.Set(uint16(2))); err == nil {
 		t.Fatal("Sign accepted duplicate keys")
 	}
-	if _, err := Sign(key, 1, Set(BytesKey("id"), []byte("v4"))); err == nil {
+	if _, err := Sign(key, 1, BytesEntry("id").Set([]byte("v4"))); err == nil {
 		t.Fatal("Sign accepted a reserved id key")
 	}
-	if _, err := Sign(key, 1, Set(BytesKey("secp256k1"), []byte{1})); err == nil {
+	if _, err := Sign(key, 1, BytesEntry("secp256k1").Set([]byte{1})); err == nil {
 		t.Fatal("Sign accepted a reserved secp256k1 key")
 	}
-	if _, err := Sign(key, 1, Set(BytesKey("payload"), bytes.Repeat([]byte{0x01}, 256))); err == nil {
+	if _, err := Sign(key, 1, BytesEntry("payload").Set(bytes.Repeat([]byte{0x01}, 256))); err == nil {
 		t.Fatal("Sign accepted a record larger than 300 bytes")
 	}
 	if _, err := Sign(nil, 1); err == nil {
@@ -315,10 +315,58 @@ func TestSignRejectsInvalidEntriesAndOversize(t *testing.T) {
 	}
 }
 
+func TestUpdate(t *testing.T) {
+	key := examplePrivateKey(t)
+	original, err := Sign(key, 7,
+		IP.Set(netip.MustParseAddr("192.0.2.1")),
+		QUIC.Set(uint16(9000)),
+		BytesEntry("eth2").Set([]byte{0xaa}),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	updated, err := original.Update(key, IP.Set(netip.MustParseAddr("192.0.2.2")), UDP.Set(uint16(9001)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updated.Seq() != 8 {
+		t.Fatalf("Seq() = %d; want 8", updated.Seq())
+	}
+	if addr, _, _ := updated.Get(IP); addr != netip.MustParseAddr("192.0.2.2") {
+		t.Fatalf("Get(IP) = %v; want the replaced address", addr)
+	}
+	if port, _, _ := updated.Get(QUIC); port != 9000 {
+		t.Fatalf("Get(QUIC) = %d; want the kept port", port)
+	}
+	if port, _, _ := updated.Get(UDP); port != 9001 {
+		t.Fatalf("Get(UDP) = %d; want the added port", port)
+	}
+	if eth2, _, _ := updated.Get(BytesEntry("eth2")); !bytes.Equal(eth2, []byte{0xaa}) {
+		t.Fatalf("Get(eth2) = %x; want the kept value", eth2)
+	}
+	if updated.PeerID() != original.PeerID() {
+		t.Fatal("Update changed the identity")
+	}
+	if addr, _, _ := original.Get(IP); addr != netip.MustParseAddr("192.0.2.1") {
+		t.Fatal("Update modified the original record")
+	}
+
+	other, err := secp256k1.GeneratePrivateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := original.Update(other); err == nil {
+		t.Fatal("Update accepted a key that did not sign the record")
+	}
+	if _, err := original.Update(key, BytesEntry("id").Set([]byte("v5"))); err == nil {
+		t.Fatal("Update accepted a reserved key")
+	}
+}
+
 func TestDecodeRejectsMalformedRecords(t *testing.T) {
 	valid, err := Sign(examplePrivateKey(t), 1,
-		Set(IP, netip.MustParseAddr("127.0.0.1")),
-		Set(UDP, uint16(30303)),
+		IP.Set(netip.MustParseAddr("127.0.0.1")),
+		UDP.Set(uint16(30303)),
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -402,7 +450,7 @@ func TestParseRejectsMalformedText(t *testing.T) {
 func TestDecodeKeepsArbitraryRLPValues(t *testing.T) {
 	key := examplePrivateKey(t)
 	listValue := encodeRLPList(append(encodeRLPString([]byte("fork")), encodeRLPList(nil)...))
-	raw := signRawEntries(key, 4, []signedEntry{{name: "custom-list", value: listValue}})
+	raw := signRawPairs(key, 4, []signedPair{{key: "custom-list", value: listValue}})
 	record, err := Decode(raw)
 	if err != nil {
 		t.Fatal(err)
@@ -410,7 +458,7 @@ func TestDecodeKeepsArbitraryRLPValues(t *testing.T) {
 	if !bytes.Equal(record.Encode(), raw) {
 		t.Fatal("Decode did not preserve the original RLP bytes")
 	}
-	if _, ok, err := Get(record, BytesKey("custom-list")); !ok || err == nil {
+	if _, ok, err := record.Get(BytesEntry("custom-list")); !ok || err == nil {
 		t.Fatalf("Get(list as bytes) = %t, %v; want present and malformed", ok, err)
 	}
 }
@@ -419,15 +467,15 @@ func TestDecodeSignRoundTripRandomEntries(t *testing.T) {
 	random := rand.New(rand.NewSource(778))
 	key := examplePrivateKey(t)
 	for i := 0; i < 60; i++ {
-		entries := make([]Entry, 0, 7)
+		pairs := make([]Pair, 0, 7)
 		count := random.Intn(6) + 1
 		for j := 0; j < count; j++ {
 			value := make([]byte, random.Intn(16))
 			_, _ = random.Read(value)
-			entries = append(entries, Set(BytesKey(fmt.Sprintf("custom-%02d-%02d", i, j)), value))
+			pairs = append(pairs, BytesEntry(fmt.Sprintf("custom-%02d-%02d", i, j)).Set(value))
 		}
-		entries = append(entries, Set(UintKey("custom-uint"), random.Uint64()))
-		original, err := Sign(key, uint64(i), entries...)
+		pairs = append(pairs, UintEntry("custom-uint").Set(random.Uint64()))
+		original, err := Sign(key, uint64(i), pairs...)
 		if err != nil {
 			t.Fatalf("Sign case %d: %v", i, err)
 		}
@@ -572,18 +620,18 @@ func mustRLPItem(t *testing.T, raw []byte) rlpItem {
 	return item
 }
 
-func signRawEntries(key *secp256k1.PrivateKey, seq uint64, entries []signedEntry) []byte {
-	pairs := append([]signedEntry(nil), entries...)
+func signRawPairs(key *secp256k1.PrivateKey, seq uint64, extra []signedPair) []byte {
+	pairs := append([]signedPair(nil), extra...)
 	pairs = append(pairs,
-		signedEntry{name: "id", value: encodeRLPString([]byte("v4"))},
-		signedEntry{name: "secp256k1", value: encodeRLPString(key.PubKey().SerializeCompressed())},
+		signedPair{key: "id", value: encodeRLPString([]byte("v4"))},
+		signedPair{key: "secp256k1", value: encodeRLPString(key.PubKey().SerializeCompressed())},
 	)
 	for i := range pairs {
 		pairs[i].value = append([]byte(nil), pairs[i].value...)
 	}
 	for i := 0; i < len(pairs); i++ {
 		for j := i + 1; j < len(pairs); j++ {
-			if pairs[j].name < pairs[i].name {
+			if pairs[j].key < pairs[i].key {
 				pairs[i], pairs[j] = pairs[j], pairs[i]
 			}
 		}
@@ -594,7 +642,7 @@ func signRawEntries(key *secp256k1.PrivateKey, seq uint64, entries []signedEntry
 	body := encodeRLPString(signature)
 	body = append(body, encodeUint64(seq)...)
 	for _, pair := range pairs {
-		body = append(body, encodeRLPString([]byte(pair.name))...)
+		body = append(body, encodeRLPString([]byte(pair.key))...)
 		body = append(body, pair.value...)
 	}
 	return encodeRLPList(body)

@@ -61,7 +61,11 @@ func newEthp2pEndpoint(t *testing.T) (*SharedTransport, *Ethp2pTransport, *net.U
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = shared.Close() })
-	return shared, shared.Ethp2p(), packetConn
+	eth := shared.Ethp2p()
+	if err := eth.SetHello(Hello{}); err != nil {
+		t.Fatal(err)
+	}
+	return shared, eth, packetConn
 }
 
 // newEndpointWith builds an endpoint with an explicit connection profile.
@@ -73,6 +77,9 @@ func newEndpointWith(t *testing.T, profile Profile) (*SharedTransport, quicreuse
 		t.Fatal(err)
 	}
 	libp2p, ethp2p := shared.Libp2p(), shared.Ethp2p()
+	if err := ethp2p.SetHello(Hello{}); err != nil {
+		t.Fatal(err)
+	}
 	if shared.PublicKey() == nil || shared.PublicKey().PeerID() != shared.PeerID() {
 		t.Fatal("transport public key does not match its peer ID")
 	}

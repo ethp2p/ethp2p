@@ -7,6 +7,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/ethp2p/ethp2p/protocol"
 	"github.com/ethp2p/ethp2p/transport"
 )
 
@@ -109,7 +110,7 @@ func (tr *Channel[CI, R, P]) newSession(
 	isOrigin bool,
 	strategy Strategy[CI, R],
 ) *session[CI, R] {
-	sessCtx, sessCancel := context.WithCancel(tr.ctx)
+	sessCtx, sessCancel := context.WithCancelCause(tr.ctx)
 	stage := stageConsuming
 	if isOrigin {
 		stage = stageOrigin
@@ -287,7 +288,7 @@ func (tr *Channel[CI, R, P]) handleChunk(e channelChunkStream) {
 	// applies backpressure to the sender until the session drains it.
 	buf := tr.parked[messageID]
 	if len(buf) >= maxParkedChunks {
-		e.stream.CancelRead(0)
+		e.stream.CancelRead(protocol.Overloaded)
 		return
 	}
 	tr.parked[messageID] = append(buf, e)
@@ -461,8 +462,17 @@ func (tr *Channel[CI, R, P]) disposeSession(messageID MessageID, reason string) 
 		return
 	}
 	delete(tr.sessions, messageID)
+	code := protocol.Unspecified
+	if sess.stage >= stageDecoding {
+		code = Redundant
+	} else if reason == "ttl_expired" {
+		code = protocol.Refused
+	}
+	for _, chunk := range tr.parked[messageID] {
+		chunk.stream.CancelRead(code)
+	}
 	delete(tr.parked, messageID)
-	sess.Close()
+	sess.closeWithCode(code)
 
 	tr.engine.config.Observer.OnSessionDisposed(tr.id, messageID, reason)
 }
@@ -480,7 +490,7 @@ func (tr *Channel[CI, R, P]) cleanup() {
 			// pending stream groups. For now, cancel all streams and
 			// drop the group unconditionally on GC tick.
 			for _, c := range chunks {
-				c.stream.CancelRead(0)
+				c.stream.CancelRead(protocol.Refused)
 			}
 			delete(tr.parked, mid)
 		}
@@ -494,7 +504,7 @@ func (tr *Channel[CI, R, P]) shutdown() {
 	// Cancel all parked chunk streams.
 	for _, chunks := range tr.parked {
 		for _, c := range chunks {
-			c.stream.CancelRead(0)
+			c.stream.CancelRead(protocol.Unspecified)
 		}
 	}
 	tr.watchWg.Wait()

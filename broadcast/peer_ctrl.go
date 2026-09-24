@@ -2,11 +2,13 @@ package broadcast
 
 import (
 	"context"
+	"errors"
 	"time"
 
+	ethp2p "github.com/ethp2p/ethp2p"
 	bcastpb "github.com/ethp2p/ethp2p/broadcast/pb"
 	"github.com/ethp2p/ethp2p/internal/ctxutil"
-	"github.com/ethp2p/ethp2p/transport"
+	"github.com/ethp2p/ethp2p/protocol"
 )
 
 const chunkWriteTimeout = 5 * time.Second
@@ -19,7 +21,7 @@ type sessionKey struct {
 type peerSessionState struct {
 	channelInbox chan<- channelEvent
 	messageID    MessageID
-	sessOut      transport.SendStream
+	sessOut      ethp2p.SendStream
 }
 
 // slotUpdate notifies the data loop about chunk slot changes.
@@ -37,13 +39,16 @@ func (p *PeerConn) runCtrlReader() {
 	if !p.awaitHandshake(p.ctrlIn) {
 		return
 	}
-	stop := ctxutil.OnCancel(p.ctx, func() { p.ctrlIn.CancelRead(0) })
+	stop := ctxutil.OnCancel(p.ctx, func() { p.ctrlIn.CancelRead(streamFailureCode(p.ctx.Err())) })
 	defer stop()
-	defer p.ctrlIn.CancelRead(0)
 	var msg bcastpb.Bcast
 	for {
 		msg.Reset()
 		if err := ReadFrame(p.ctrlIn, &msg); err != nil {
+			stop()
+			// No effect if the read failed, which already cancelled the stream;
+			// ends it for a malformed frame.
+			p.ctrlIn.CancelRead(protocol.Unspecified)
 			return
 		}
 		switch {
@@ -56,7 +61,8 @@ func (p *PeerConn) runCtrlReader() {
 			p.engine.onPeerUnsubscribed(p, channelID)
 
 		default:
-			// Unknown message type; skip.
+			p.ctrlIn.CancelRead(protocol.Refused)
+			return
 		}
 	}
 }
@@ -68,10 +74,12 @@ const slotUpdateCap = 32
 func (p *PeerConn) runCtrlLoop(slotCh chan<- slotUpdate) {
 	sessions := make(map[sessionKey]*peerSessionState)
 	defer func() {
-		p.ctrlOut.CancelWrite(0)
+		if !p.ctrlOutEnded.Swap(true) {
+			p.ctrlOut.CancelWrite(protocol.Unspecified)
+		}
 		for _, session := range sessions {
 			if session.sessOut != nil {
-				session.sessOut.CancelWrite(0)
+				session.sessOut.CancelWrite(protocol.Unspecified)
 			}
 		}
 	}()
@@ -157,7 +165,7 @@ func (p *PeerConn) handleCtrl(evt peerCtrlEvent, sessions map[sessionKey]*peerSe
 	case peerCloseStream:
 		key := sessionKey(e)
 		if ss := sessions[key]; ss != nil && ss.sessOut != nil {
-			ss.sessOut.CancelWrite(sessCodeReconstructed)
+			ss.sessOut.CancelWrite(Reconstructed)
 			ss.sessOut = nil
 		}
 	}
@@ -171,7 +179,7 @@ func (p *PeerConn) handleSessionOpen(e peerOpenSession, sessions map[sessionKey]
 		p.cancel()
 		return
 	}
-	stop := ctxutil.OnCancel(p.ctx, func() { s.CancelWrite(0) })
+	stop := ctxutil.OnCancel(p.ctx, func() { s.CancelWrite(streamFailureCode(p.ctx.Err())) })
 	defer stop()
 	frame := &bcastpb.Sess{Frame: &bcastpb.Sess_SessionOpen{SessionOpen: &bcastpb.Sess_Open{
 		Channel:       string(e.channelID),
@@ -180,7 +188,7 @@ func (p *PeerConn) handleSessionOpen(e peerOpenSession, sessions map[sessionKey]
 		InitialUpdate: e.initialRouting,
 	}}}
 	if err := WriteFrame(s, frame); err != nil {
-		s.CancelWrite(0)
+		stop()
 		p.cancel()
 		return
 	}
@@ -197,15 +205,19 @@ func (p *PeerConn) handleSessionOpen(e peerOpenSession, sessions map[sessionKey]
 	select {
 	case slotCh <- slotUpdate{key: key, slot: e.chunkOutbox}:
 	case <-p.ctx.Done():
+		s.CancelWrite(protocol.Unspecified)
+		ss.sessOut = nil
 	}
 }
 
 // writeCtrl writes a control frame to the outbound BCAST stream. On
 // failure, cancels the peer context so all goroutines shut down.
 func (p *PeerConn) writeCtrl(msg *bcastpb.Bcast) error {
-	stop := ctxutil.OnCancel(p.ctx, func() { p.ctrlOut.CancelWrite(0) })
+	stop := ctxutil.OnCancel(p.ctx, func() { p.ctrlOut.CancelWrite(streamFailureCode(p.ctx.Err())) })
 	defer stop()
 	if err := WriteFrame(p.ctrlOut, msg); err != nil {
+		p.ctrlOutEnded.Store(true)
+		stop()
 		p.cancel()
 		return err
 	}
@@ -219,13 +231,12 @@ func (p *PeerConn) handleSendRoutingUpdate(e peerSendRouting, sessions map[sessi
 		return
 	}
 	stream := ss.sessOut
-	stop := ctxutil.OnCancel(p.ctx, func() { stream.CancelWrite(0) })
+	stop := ctxutil.OnCancel(p.ctx, func() { stream.CancelWrite(streamFailureCode(p.ctx.Err())) })
 	defer stop()
 	frame := &bcastpb.Sess{Frame: &bcastpb.Sess_RoutingUpdate{RoutingUpdate: &bcastpb.Sess_Update{
 		Data: e.update,
 	}}}
 	if err := WriteFrame(ss.sessOut, frame); err != nil {
-		ss.sessOut.CancelWrite(0)
 		ss.sessOut = nil
 	}
 }
@@ -251,7 +262,7 @@ func (p *PeerConn) handleUnsubscribe(e peerUnsubscribe) {
 func (p *PeerConn) handleSessionDone(e peerCloseSession, sessions map[sessionKey]*peerSessionState, slotCh chan<- slotUpdate) {
 	key := sessionKey(e)
 	if ss := sessions[key]; ss != nil && ss.sessOut != nil {
-		ss.sessOut.Close()
+		_ = ss.sessOut.Close()
 	}
 	delete(sessions, key)
 
@@ -286,7 +297,7 @@ func (p *PeerConn) doSendChunk(e peerSendChunk) (int, error) {
 	}
 
 	s.SetWriteDeadline(deadline)
-	stop := ctxutil.OnCancel(ctx, func() { s.CancelWrite(0) })
+	stop := ctxutil.OnCancel(ctx, func() { s.CancelWrite(streamFailureCode(errors.Join(ctx.Err(), p.ctx.Err()))) })
 	defer stop()
 
 	frame := &bcastpb.Chunk_Header{
@@ -296,13 +307,13 @@ func (p *PeerConn) doSendChunk(e peerSendChunk) (int, error) {
 		DataLength: uint32(len(e.payload)),
 	}
 	if err := WriteFrame(s, frame); err != nil {
-		s.CancelWrite(0)
 		return 0, ErrChunkWriteFail
 	}
 	if _, err := s.Write(e.payload); err != nil {
-		s.CancelWrite(0)
 		return 0, ErrChunkWriteFail
 	}
-	s.Close()
+	if err := s.Close(); err != nil {
+		return 0, ErrChunkWriteFail
+	}
 	return len(e.payload), nil
 }

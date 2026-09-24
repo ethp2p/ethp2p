@@ -4,6 +4,7 @@ modules:
     includes:
       - broadcast/pb
       - broadcast/rs/pb
+      - transport/pb
 lint:
   use:
     - STANDARD

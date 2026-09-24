@@ -181,6 +181,21 @@ The broadcast package declares these stable codepoints for Stack registration:
 | `0x02`    | `SESS`   |
 | `0x03`    | `CHUNK`  |
 
+Protocol-specific stream cancellation outcomes use the protocol namespace
+(`value<<1 | 1` on the wire).
+Values are stable per selector.
+Value `0` means no protocol-specific reason.
+The selector code tables are:
+
+| Selector | Value | Name | Meaning |
+| -------- | ----: | ---- | ------- |
+| `SESS` | 1 | `Reconstructed` | The sender has reconstructed the message. |
+| `CHUNK` | 1 | `Redundant` | The receiver no longer needs this chunk. |
+
+The Go values are declared beside the selectors in `broadcast/protocol.go`:
+`Reconstructed = SESS.Code(1)` and `Redundant = CHUNK.Code(1)`.
+Shared stack outcomes are referenced from `protocol` directly.
+
 Codepoint `0` is reserved for Stack's selector advertisement stream.
 Codepoint `0x2f` is reserved for libp2p routing because its encoded byte is `/`.
 Streams with unregistered codepoints are cancelled.
@@ -340,8 +355,8 @@ that need to drain cleanly, but a departed peer can be removed immediately.
 The signaling mechanism reflects that distinction.
 
 When a node's strategy reports that it has enough chunks to decode,
-the node cancels its outbound `SESS` write side for
-that session with application error code `0x01` (`reconstructed`).
+it cancels its outbound `SESS` write side for that session with `SESS.Code(1)` (`Reconstructed`),
+encoded as application error code `0x03`.
 This happens before decoding completes and tells the remote peer
 that further chunk sends are unnecessary.
 The remote peer then cancels pending chunk sends to that peer.
@@ -594,8 +609,8 @@ type Strategy[CI ChunkIdent, R Wire] interface {
 	AttachPeer(peer PeerID, stats *PeerSessionStats)
 
 	// DetachPeer removes a peer. completed=true means the peer
-	// signaled successful reconstruction (SESS stream reset with
-	// code 0x01); false means disconnection or unsubscribe. The
+	// signaled successful reconstruction (SESS value 1); false means
+	// disconnection or unsubscribe. The
 	// session cancels all in-flight sends for this peer before
 	// calling DetachPeer, so any subsequent ChunkSent callbacks for
 	// this peer will arrive with ok=false.

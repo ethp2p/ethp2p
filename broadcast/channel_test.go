@@ -9,18 +9,22 @@ import (
 	"testing/synctest"
 	"time"
 
+	ethp2p "github.com/ethp2p/ethp2p"
 	bcastpb "github.com/ethp2p/ethp2p/broadcast/pb"
+	"github.com/ethp2p/ethp2p/protocol"
 	"github.com/ethp2p/ethp2p/transport"
 )
 
-// fakeReceiveStream wraps a bytes.Reader to satisfy transport.ReceiveStream
+// fakeReceiveStream wraps a bytes.Reader to satisfy ethp2p.ReceiveStream
 // in tests. CancelRead and SetReadDeadline are no-ops.
 type fakeReceiveStream struct {
 	*bytes.Reader
 }
 
-func (f *fakeReceiveStream) CancelRead(uint64)               {}
+func (f *fakeReceiveStream) CancelRead(protocol.Code)        {}
 func (f *fakeReceiveStream) SetReadDeadline(time.Time) error { return nil }
+
+var _ ethp2p.ReceiveStream = (*fakeReceiveStream)(nil)
 
 // newFakeChunk builds a channelChunkStream with a fakeReceiveStream backed by
 // the given payload. Convenience helper for tests that need to send
@@ -659,4 +663,20 @@ func TestChannel_PeerChurnMidSession(t *testing.T) {
 		channel.Stop()
 		engine.Close()
 	})
+}
+
+func TestChannelRejectsFullParkedChunkQueueAsOverloaded(t *testing.T) {
+	const messageID MessageID = "msg-full"
+	channel := &Channel[*testChunk, *testRouting, *testPreamble]{
+		parked: map[MessageID][]channelChunkStream{
+			messageID: make([]channelChunkStream, maxParkedChunks),
+		},
+	}
+	raw, stream := newWrappedRecordingReceiveStream(t, CHUNK, nil)
+	chunk := newFakeChunk("peer1", messageID, nil)
+	chunk.stream = stream
+
+	channel.handleChunk(chunk)
+
+	requireWireCancelCode(t, raw, 4)
 }

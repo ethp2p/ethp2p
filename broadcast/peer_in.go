@@ -2,51 +2,53 @@ package broadcast
 
 import (
 	"errors"
+	"io"
 	"time"
 
+	ethp2p "github.com/ethp2p/ethp2p"
 	bcastpb "github.com/ethp2p/ethp2p/broadcast/pb"
 	"github.com/ethp2p/ethp2p/internal/ctxutil"
-	"github.com/ethp2p/ethp2p/transport"
+	"github.com/ethp2p/ethp2p/protocol"
 )
 
 const (
 	chunkReadTimeout = 5 * time.Second
 	maxChunkDataSize = 1 << 20 // 1 MiB
-
-	// sessCodeReconstructed is the QUIC application error code used to
-	// reset a SESS stream when the sender has reconstructed the message.
-	sessCodeReconstructed uint64 = 0x01
 )
 
-func (p *PeerConn) acceptBcast(stream transport.ReceiveStream) {
+func (p *PeerConn) acceptBcast(stream ethp2p.ReceiveStream) {
 	if stream == nil {
 		return
 	}
 	if p.ctx != nil && p.ctx.Err() != nil {
-		stream.CancelRead(0)
+		stream.CancelRead(protocol.Unspecified)
 		return
 	}
 	// Each side opens exactly one outbound BCAST stream per connection, so a
 	// second inbound one is a protocol violation, not a simultaneous open.
 	if !p.bcastAccepted.CompareAndSwap(false, true) {
-		stream.CancelRead(0)
+		stream.CancelRead(protocol.Refused)
 		return
 	}
 	select {
 	case p.bcastIn <- stream:
 	case <-p.ctx.Done():
-		stream.CancelRead(0)
+		stream.CancelRead(protocol.Unspecified)
 	}
 }
 
-func (p *PeerConn) acceptSession(stream transport.ReceiveStream) {
+func (p *PeerConn) acceptSession(stream ethp2p.ReceiveStream) {
 	if !p.awaitHandshake(stream) {
 		return
 	}
 	p.handlersMu.Lock()
 	defer p.handlersMu.Unlock()
 	if !p.ready {
-		stream.CancelRead(0)
+		if p.ctx.Err() != nil {
+			stream.CancelRead(protocol.Unspecified)
+		} else {
+			stream.CancelRead(protocol.Refused)
+		}
 		return
 	}
 	select {
@@ -56,20 +58,24 @@ func (p *PeerConn) acceptSession(stream transport.ReceiveStream) {
 			p.runInboundSession(stream)
 		})
 	case <-p.ctx.Done():
-		stream.CancelRead(0)
+		stream.CancelRead(protocol.Unspecified)
 	default:
-		stream.CancelRead(0)
+		stream.CancelRead(protocol.Overloaded)
 	}
 }
 
-func (p *PeerConn) acceptChunk(stream transport.ReceiveStream) {
+func (p *PeerConn) acceptChunk(stream ethp2p.ReceiveStream) {
 	if !p.awaitHandshake(stream) {
 		return
 	}
 	p.handlersMu.Lock()
 	defer p.handlersMu.Unlock()
 	if !p.ready {
-		stream.CancelRead(0)
+		if p.ctx.Err() != nil {
+			stream.CancelRead(protocol.Unspecified)
+		} else {
+			stream.CancelRead(protocol.Refused)
+		}
 		return
 	}
 	select {
@@ -79,11 +85,13 @@ func (p *PeerConn) acceptChunk(stream transport.ReceiveStream) {
 			p.processChunk(stream)
 		})
 	case <-p.ctx.Done():
-		stream.CancelRead(0)
+		stream.CancelRead(protocol.Unspecified)
+	default:
+		stream.CancelRead(protocol.Overloaded)
 	}
 }
 
-func (p *PeerConn) awaitHandshake(stream transport.ReceiveStream) bool {
+func (p *PeerConn) awaitHandshake(stream ethp2p.ReceiveStream) bool {
 	select {
 	case <-p.handshakeDone:
 		if p.handshakeOK {
@@ -91,7 +99,11 @@ func (p *PeerConn) awaitHandshake(stream transport.ReceiveStream) bool {
 		}
 	case <-p.ctx.Done():
 	}
-	stream.CancelRead(0)
+	if p.ctx.Err() != nil {
+		stream.CancelRead(protocol.Unspecified)
+	} else {
+		stream.CancelRead(protocol.Refused)
+	}
 	return false
 }
 
@@ -99,20 +111,22 @@ func (p *PeerConn) awaitHandshake(stream transport.ReceiveStream) bool {
 // The first frame must be SessionOpen (which may carry initial routing);
 // subsequent frames are RoutingUpdate. EOF signals the peer has
 // reconstructed (completed).
-func (p *PeerConn) runInboundSession(s transport.ReceiveStream) {
-	stop := ctxutil.OnCancel(p.ctx, func() { s.CancelRead(0) })
+func (p *PeerConn) runInboundSession(s ethp2p.ReceiveStream) {
+	stop := ctxutil.OnCancel(p.ctx, func() { s.CancelRead(streamFailureCode(p.ctx.Err())) })
 	defer stop()
-	defer s.CancelRead(0)
 
 	// Read the first frame: must be SessionOpen.
 	var frame bcastpb.Sess
 	if err := ReadFrame(s, &frame); err != nil {
-		s.CancelRead(0)
+		stop()
+		// No effect if the read failed, which already cancelled the stream;
+		// ends it for a malformed frame.
+		s.CancelRead(protocol.Unspecified)
 		return
 	}
 	so := frame.GetSessionOpen()
 	if so == nil {
-		s.CancelRead(0)
+		s.CancelRead(protocol.Refused)
 		return
 	}
 
@@ -123,7 +137,7 @@ func (p *PeerConn) runInboundSession(s transport.ReceiveStream) {
 
 	ch := p.channelInboxFor(channelID)
 	if ch == nil {
-		s.CancelRead(0)
+		s.CancelRead(protocol.Refused)
 		return
 	}
 
@@ -134,6 +148,7 @@ func (p *PeerConn) runInboundSession(s transport.ReceiveStream) {
 		msg:    so,
 	}:
 	case <-p.ctx.Done():
+		s.CancelRead(streamFailureCode(p.ctx.Err()))
 		return
 	}
 
@@ -141,35 +156,49 @@ func (p *PeerConn) runInboundSession(s transport.ReceiveStream) {
 	for {
 		frame.Reset()
 		if err := ReadFrame(s, &frame); err != nil {
-			if re, ok := errors.AsType[*transport.StreamResetError](err); ok && re.Code == sessCodeReconstructed {
-				select {
-				case ch <- channelPeerReconstructed{messageID: messageID, peerID: p.id}:
-				case <-p.ctx.Done():
-				}
+			stop()
+			if errors.Is(err, io.EOF) {
+				return
 			}
+			if re, ok := errors.AsType[*ethp2p.ResetError](err); ok {
+				if re.Code == Reconstructed {
+					select {
+					case ch <- channelPeerReconstructed{messageID: messageID, peerID: p.id}:
+					case <-p.ctx.Done():
+					}
+				}
+				return
+			}
+			s.CancelRead(protocol.Unspecified)
 			return
 		}
 		ru := frame.GetRoutingUpdate()
 		if ru == nil {
-			continue
+			s.CancelRead(protocol.Refused)
+			return
 		}
 		select {
 		case ch <- channelRoutingUpdate{peerID: p.id, messageID: messageID, msg: ru}:
 		case <-p.ctx.Done():
+			s.CancelRead(streamFailureCode(p.ctx.Err()))
 			return
 		}
 	}
 }
 
-func (p *PeerConn) processChunk(s transport.ReceiveStream) {
+func (p *PeerConn) processChunk(s ethp2p.ReceiveStream) {
 	s.SetReadDeadline(time.Now().Add(chunkReadTimeout))
 
 	var frame bcastpb.Chunk_Header
-	stop := ctxutil.OnCancel(p.ctx, func() { s.CancelRead(0) })
+	stop := ctxutil.OnCancel(p.ctx, func() { s.CancelRead(streamFailureCode(p.ctx.Err())) })
 	err := ReadFrame(s, &frame)
 	stop()
-	if err != nil || p.ctx.Err() != nil {
-		s.CancelRead(0)
+	if err != nil {
+		s.CancelRead(protocol.Unspecified)
+		return
+	}
+	if p.ctx.Err() != nil {
+		s.CancelRead(streamFailureCode(p.ctx.Err()))
 		return
 	}
 
@@ -179,7 +208,7 @@ func (p *PeerConn) processChunk(s transport.ReceiveStream) {
 
 	ch := p.channelInboxFor(ChannelID(frame.Channel))
 	if ch == nil {
-		s.CancelRead(0)
+		s.CancelRead(protocol.Refused)
 		return
 	}
 
@@ -191,6 +220,6 @@ func (p *PeerConn) processChunk(s transport.ReceiveStream) {
 	select {
 	case ch <- chnk:
 	case <-p.ctx.Done():
-		s.CancelRead(0)
+		s.CancelRead(streamFailureCode(p.ctx.Err()))
 	}
 }

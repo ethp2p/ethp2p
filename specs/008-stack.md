@@ -1,6 +1,6 @@
 # The ethp2p stack: routing, delivery, and connections
 
-Status: draft, not implemented.
+Status: units 1–5 implemented; datagram delivery remains deferred.
 Supersedes the connection-ownership proposal in [006](006-stack-connection-management.md)
 and the selector advertisement stream.
 
@@ -10,19 +10,17 @@ The shared QUIC transport has landed.
 It authenticates peers, shares one endpoint and one set of connections with libp2p,
 gives each stack an independent view of a connection,
 and runs one dispatcher per physical connection.
-The layers above it were built while the transport was deliberately minimal,
-and they compensate for that in ways that no longer make sense:
-the application runs its own accept loop, dials, and connection list;
-`Stack.ServeConn` runs two routing goroutines per connection;
-subsystems receive peers and streams on two unordered channels;
-and broadcast re-queues every stream through its engine actor and a per-peer queue
-before it can handle it.
+The original layers above it were built while the transport was deliberately minimal.
+Applications owned accept loops and connection lists, the stack ran routing goroutines,
+and subsystems received peers and streams on separate unordered channels.
+The implementation described here moves connection pumps into transport
+and gives protocols ordered delivery queues.
 
 This document redesigns the layers above QUIC around four principles.
 
 1. **ethp2p is a library with minimal runtime and state.**
    The stack is a meeting point between connections and protocols.
-   It owns registration, a connection table, and bounded queues.
+   It owns registration, a connection table, and delivery queues bounded by QUIC credit.
    It runs no goroutines of its own.
 2. **One runtime per connection, where one already exists.**
    The transport's per-connection dispatcher already reads the first bytes of every stream.
@@ -108,6 +106,24 @@ The dispatcher MUST bound the number of streams it classifies concurrently per c
 and per direction, so that slow streams in one direction cannot delay the other,
 and a slow stream cannot delay faster streams beyond that bound.
 
+The dispatcher consumes a bidirectional stream's selector frame before handing it to the stack.
+It only peeks at a non-control unidirectional stream's frame;
+the delivered receive adapter skips that frame on its first read.
+A unidirectional stream carrying only its selector therefore holds stream credit
+until the protocol reads it.
+The control stream consumes its frame before entering the control reader.
+The ethp2p connection view writes the selector frame when it opens a stream.
+It validates the frame length and the selector's minimal encoding with the same codec used by the
+stack.
+
+Classified ethp2p streams wait in a per-connection queue, in completion order,
+until the stack takes them, including streams that arrive before `Hello`.
+The control stream bypasses that queue.
+Each queued stream holds QUIC stream credit until it completes,
+so incoming stream limits bound the queue and push back on the peer (section 9.3).
+The dispatcher never resets an ethp2p stream because a queue is full.
+A classifier releases its slot as soon as it enqueues the stream.
+
 Because classification depends on the length byte rather than the first payload byte,
 selector `0x2f` is no longer reserved.
 
@@ -118,9 +134,8 @@ After classification, the dispatcher routes the stream by selector:
 - Selector `0` on a unidirectional stream is the peer's control stream (section 4).
   A second one, or selector `0` on a bidirectional stream, is a control violation (section 4.5).
 - A selector that is not shared is reset with `UnsupportedSelector`.
-- A stream that arrives before the peer's `Hello` waits in a bounded per-connection queue
-  and is routed when the `Hello` is processed.
-  If that queue is full, the stream is reset with `Overloaded`.
+- A stream that arrives before the peer's `Hello` waits and is routed when the `Hello` is processed.
+  Like every queued stream, it is bounded by stream credit (section 9.3).
 - Otherwise, the stream is delivered to the protocol that registered the selector (section 9).
 
 ## 4. The control stream
@@ -174,6 +189,12 @@ the view with `ControlViolation`.
 A `Hello` is invalid if its selectors are not strictly ascending, exceed 1024, or include `0`,
 or if `record` is present and fails verification,
 or if the record's identity differs from the identity authenticated by the TLS handshake.
+
+The transport validates selectors on both send and receive.
+
+The stack validates each non-empty record.
+It closes the view with `ControlViolation` when verification or identity matching fails.
+
 An invalid `Hello` is a control violation.
 
 After both `Hello` messages have been exchanged,
@@ -187,8 +208,16 @@ An endpoint that receives `GoAway` or FIN on the peer's control stream MUST trea
 as closed: it stops delivering new streams and datagrams for the connection to protocols,
 ends every peer handle for the connection, and releases its own view.
 
-A reset of the control stream, or FIN without a preceding `GoAway`,
-is treated as `GoAway` with code `Unspecified`.
+A stack-namespace reset of the control stream closes the peer view with the reset's code.
+
+A protocol-namespace reset is a control violation.
+
+FIN without a preceding `GoAway` closes the peer view with `Unspecified`.
+
+The endpoint answers a peer's closure with FIN on its own control stream, without `GoAway`.
+
+`GoAway` is best-effort when releasing this view also closes the physical connection:
+the connection close may overtake it, leaving the peer with a connection error.
 
 This signal is the only way a peer learns that an ethp2p view closed
 while libp2p keeps the physical connection open.
@@ -202,8 +231,10 @@ The receiver does not depend on stream order
 
 ### 4.5. Control violations
 
-On a control violation the endpoint sends `GoAway` with `ControlViolation` if it can,
-resets the control stream, and releases its view.
+On a control violation the endpoint sends `GoAway(ControlViolation)` and FIN on its control stream.
+It cancels reading the peer's control stream with `ControlViolation` and releases its view.
+
+Resetting its own stream could let the peer discard the `GoAway` frame.
 
 ### 4.6. Stateless resets
 
@@ -248,20 +279,27 @@ Values below 32 encode in one byte in either namespace, and values below 8192 in
 | 12 | `NoSharedProtocols` | stack | No local protocol accepted the peer. |
 | 13 | `Duplicate` | stack | Another connection to the same peer was kept. |
 
-Values 0 to 7 are shared: any protocol MAY send them on its own streams,
-and SHOULD use them instead of defining its own equivalents,
+Values 0 to 3 are shared: either endpoint MAY send them on any stream,
+and protocols SHOULD use them instead of defining their own equivalents,
 so that senders can handle overload and refusal uniformly.
+Values 4 to 7 are unassigned and decode as `Unspecified`.
 Values 8 to 31 are sent only by the stack.
 Values 14 to 31 are reserved for future stack codes, keeping every stack code to one byte.
 
 A receiver MUST treat an unknown stack value as `Unspecified`.
+When a reset carries a defined stack-only value,
+`ResetError.Code` preserves it for the receiving protocol.
+If a protocol passes that code to a stream cancellation method, the wrapper sends `Unspecified`;
+only stack-owned paths send stack-only values.
 A protocol-namespace code on the control stream is a control violation.
 
 ### 5.3. Protocol codes
 
 Each protocol defines its code values per selector in its own specification.
 Value `0` in the protocol namespace means "no protocol-specific reason".
-A receiver MUST treat an unknown protocol value as `Unspecified`.
+The stack does not keep per-selector code tables:
+it preserves every received protocol value and binds it to the stream's selector.
+The receiving protocol applies its own fallback for values it does not define.
 
 ### 5.4. Keeping codes small
 
@@ -286,13 +324,18 @@ Selector `0x2f` is an ordinary selector for datagrams as it is for streams.
 ## 7. Connection admission
 
 A view is admitted when both `Hello` messages have been exchanged.
-Admission then evaluates, in order:
+Admission validates the Hello record and evaluates protocol policies before taking the table mutex.
+Policies may inspect Connections and must return promptly.
+An invalid record is rejected with `ControlViolation`; if no protocol accepts,
+the view is rejected with `NoSharedProtocols`.
+Thus a view that matches no protocol never displaces a working view.
 
-1. The stack is open.
-2. The duplicate rule (section 10.4).
-   The losing view is closed with `Duplicate`.
-3. Each protocol whose selectors intersect the shared selectors applies its policy.
-   If no protocol accepts the peer, the view is closed with `NoSharedProtocols`.
+Under the mutex, admission checks that the stack is open and
+that an outbound dial has not been abandoned by Disconnect
+(section 10.5), rejecting with `Closing` otherwise.
+It then applies the duplicate rule (section 10.4), closing the loser with `Duplicate`.
+When replacing a view, its peer contexts are cancelled
+and its `PeerDown(Duplicate)` events are queued before the winner's `PeerUp` events.
 
 Only then do protocols learn about the peer.
 A view that loses the duplicate rule or matches no protocol never produces a peer handle.
@@ -310,25 +353,31 @@ protocols (broadcast, ...)    their own state and loops, fed by Next
 application                   Connect, Disconnect, shutdown order
 ```
 
-The dispatcher delivers into the stack through a narrow,
-non-blocking interface that the stack binds to the ethp2p side of the endpoint:
+The dispatcher delivers into the stack through this interface bound to the ethp2p endpoint:
 
 ```go
-// In package transport. Every method must return promptly and must not block on
-// protocols; the dispatcher calls them from its per-connection goroutine.
+// In package transport. Methods must never block on protocols. They may close
+// other views, which waits at most the GoAway timeout.
 type Sink interface {
-	Admit(conn Conn, hello Hello) bool                  // false closes the view
-	Stream(conn Conn, sel Selector, s ReceiveStream)    // takes ownership; resets s itself if it cannot queue it
-	Datagram(conn Conn, sel Selector, payload []byte)   // discards when full
-	Closed(conn Conn, code Code)                        // the view closed, locally or by the peer
+	Admit(conn Conn, hello Hello) (code protocol.Code, ok bool)
+	Stream(conn Conn, sel protocol.Selector, s ReceiveStream) // takes ownership
+	Closed(conn Conn, code protocol.Code)
 }
 ```
 
-The exact signatures are left to implementation.
-The requirement is that every call is a table update, a queue operation, and a wake signal.
+The transport owns every connection pump and stream-loop goroutine.
+Accepted views wait for Hello and call Admit in the pump.
+Dialed views wait for Hello and call Admit inside Dial, in its caller's goroutine.
+Dial returns only after admission, starting the transport-owned stream loops on success.
+Rejection closes the view with the returned code, with no Stream or Closed calls.
+Closed is called exactly once for an admitted view, after both stream loops finish.
+Its code is the ViewClosedError code, otherwise Closing for transport shutdown,
+Timeout for a timeout error, or Unspecified.
 
-The only places the stack blocks are in its callers' goroutines: `Connect` waiting for a dial,
-and `Disconnect` or `Close` waiting for views to be released.
+The root stack starts no persistent goroutines.
+Its close fan-out goroutines are joined before Close returns.
+Connect waits for a dial or a shared attempt; Disconnect and Close wait for release.
+Admission may close an evicted view after unlocking, in the transport's caller.
 
 ## 9. Delivery to protocols
 
@@ -346,6 +395,15 @@ Registration and configuration MUST finish before `Start`.
 ### 9.2. Events
 
 ```go
+type Event struct {
+	Kind     EventKind
+	Peer     *Peer
+	Selector protocol.Selector // StreamIn (also DatagramIn in unit 6)
+	Stream   ReceiveStream     // StreamIn; bidi streams also implement Stream
+	Code     protocol.Code     // PeerDown
+	// Payload []byte          // DatagramIn, added in unit 6
+}
+
 for ev, ok := sub.Next(); ok; ev, ok = sub.Next() {
 	switch ev.Kind {
 	case ethp2p.PeerUp:     // ev.Peer
@@ -374,23 +432,32 @@ The stack guarantees:
   so a peer with a large backlog cannot delay other peers' events.
 
 Ownership of a delivered stream passes to the protocol when `Next` returns it.
+The peer's context ends before `PeerDown` is queued.
 
 ### 9.3. Bounds
 
-The stack bounds each queue and never grows memory with peer input:
+QUIC supplies stream backpressure; the stack does not count streams:
 
-- **Streams per peer and selector.**
-  When full, new streams for that selector are reset with `Overloaded`.
-- **Streams per connection.**
-  The total of all queued streams on a connection stays below the connection's incoming stream
-  limit, so a protocol that stops draining cannot use up the stream credit other protocols need.
-  When full, new streams are reset with `Overloaded`.
+- **Queued streams.**
+  Every queued stream holds QUIC stream credit until the protocol reads it to completion
+  or cancels it.
+  This includes a stream ending with its selector, because classification only peeks at it
+  (section 3.2).
+  Each connection's incoming stream limits therefore bound its queued streams,
+  and QUIC flow control bounds their buffered bytes.
+  When a protocol falls behind, the peer's stream opens block instead of streams being dropped.
+  The stack never resets a stream because a queue is full:
+  a unidirectional sender may already have closed successfully, making that loss silent.
+- **Shared credit.**
+  Protocols share each connection's stream credit.
+  One that stops draining eventually blocks the others on that connection.
+  Protocols shed load by taking a stream and cancelling it with `Overloaded`.
 - **Datagrams per peer and selector.**
   A ring buffer that discards the oldest datagram, as 007 requires.
 - **Peer state.**
-  Memory is proportional to live connections; there is no log of past peer events.
+  Memory is proportional to live connections plus `PeerDown` events not yet drained.
 
-The defaults are implementation constants; protocols MAY lower their own per-selector bounds.
+The datagram ring's default is an implementation constant.
 
 ### 9.4. The peer handle
 
@@ -413,25 +480,79 @@ Protocols never receive the raw `transport.Conn`.
 
 ### 9.5. Streams and codes
 
-Protocols receive stream wrappers whose cancellation methods take a `protocol.Code` instead of an
-integer:
+`protocol` owns the code vocabulary.
+`protocol.Code` is comparable, and its zero value is `protocol.Unspecified`.
+A protocol creates selector-bound values with `Selector.Code`:
 
 ```go
-type Code struct{ /* selector, value */ }
-func (s Selector) Code(value uint16) Code    // panics for selector 0
+package protocol
 
-var sessReconstructed = SESS.Code(1)         // broadcast
-stream.CancelWrite(sessReconstructed)
-stream.CancelRead(ethp2p.Overloaded)         // shared stack code
+type Code struct{ /* selector Selector; value uint64; protocol bool */ }
+func (s Selector) Code(value uint16) Code // panics for selector 0
+
+func (c Code) WireFor(sel Selector) uint64
+func ParseCode(sel Selector, wire uint64) Code
 ```
 
-A stream accepts shared stack codes and codes of its own selector.
-Any other code is a programming error, and the method panics,
-so a wrong code can never reach the wire.
-Stack-only codes are unexported.
-Reads that end in a reset return `*ethp2p.ResetError`,
-whose `Code` field is reconstructed from the stream's selector
-and compares directly with the protocol's values.
+`WireFor` encodes `value<<1 | namespace`.
+It panics when a protocol code is sent on a different selector,
+and maps stack-only values to `Unspecified`.
+`ParseCode` preserves protocol-namespace values for the stream selector
+and maps unknown stack values to `Unspecified`.
+The shared codes `Unspecified`, `Refused`, `Overloaded`, and `Timeout` are valid on any selector.
+Stack-only codes are exported from `protocol` so protocols can inspect them after a reset;
+only stack-owned send paths encode their wire values.
+
+The root `ethp2p` package owns the stream interfaces and wrappers:
+
+```go
+package ethp2p
+
+type SendStream interface {
+	CancelWrite(protocol.Code)
+}
+type ReceiveStream interface {
+	CancelRead(protocol.Code)
+}
+type Stream interface {
+	CancelRead(protocol.Code)
+	CancelWrite(protocol.Code)
+}
+type ResetError struct {
+	Code protocol.Code
+}
+func (e Event) Cancel(protocol.Code) // StreamIn only; other kinds are no-ops
+func (e Event) Reject() // deliberate refusal; sends Refused for StreamIn
+```
+
+The wrappers are unexported and retain the stream selector locally.
+Their cancellation methods call `Code.WireFor` with that selector.
+They expose no numeric code API.
+`Stream` has no `Reset` method: callers cancel each side with its outcome.
+Reads that end in a reset return `*ethp2p.ResetError`, whose `Unwrap` returns the transport error.
+
+Cancelling a side is idempotent: the first code is the one sent, and later calls have no effect.
+A failed `Read`, `Write`, or `Close` cancels its side before returning the error,
+with `Timeout` if a deadline expired and `Unspecified` otherwise.
+Callers may therefore cancel with their own code after any error.
+The call takes effect only when no I/O failed, for example on a malformed frame,
+so protocols need not tell stream errors apart from decode errors.
+A peer reset ends the read side; `Read` returns it as `ResetError`, and nothing is sent in reply.
+Deadline expiry is terminal, unlike Go's usual deadlines, which can be extended to resume I/O.
+A protocol that stops disposes of the events it has not handled with
+`Event.Cancel(protocol.Unspecified)`; `Event.Reject` is reserved for deliberate refusals.
+
+Broadcast keeps its protocol-specific codes beside its selectors:
+
+```go
+var (
+	Reconstructed = SESS.Code(1)
+	Redundant = CHUNK.Code(1)
+)
+
+stream.CancelWrite(broadcast.Reconstructed)
+stream.CancelRead(protocol.Overloaded)
+```
 
 This gives protocols typed codes without generic types in the stack's API.
 A protocol that wants compile-time checks can wrap its own streams in local types.
@@ -441,9 +562,9 @@ A protocol that wants compile-time checks can wrap its own streams in local type
 ### 10.1. Lifetime
 
 ```go
-stack := ethp2p.NewStack(shared.Ethp2p(), ethp2p.Config{})
+stack, err := ethp2p.NewStack(shared.Ethp2p(), ethp2p.Config{})
 // Register protocols and call Notify here.
-err := stack.Start()   // binds the sink and starts listening; reports listener errors synchronously
+err = stack.Start()    // installs the sink and starts listening; reports listener errors synchronously
 ...
 err = stack.Close()    // sends GoAway(Closing), releases every view, resets queued streams
 ```
@@ -470,8 +591,16 @@ and a peer without ethp2p negotiates libp2p and is handed to libp2p.
 
 - returns `nil` at once if an admitted connection to the record's peer exists;
 - otherwise dials each QUIC endpoint in order, requiring the record's identity, until one succeeds;
-- returns `nil` once the view is admitted (section 7), or the error that prevented admission:
-  a dial error, `transport.ErrDialLegacyPeer`, `NoSharedProtocols`, or `Duplicate`.
+- returns `nil` once the view is admitted
+  (section 7),
+  or the error that prevented admission: a dial error, `transport.ErrDialLegacyPeer`,
+  or an admission rejection such as `NoSharedProtocols`.
+
+Connect returns nil when the peer has an active view at the end of its attempt,
+including a view that beat its own under the duplicate rule.
+It never returns Duplicate when the peer ends up connected.
+An attempt cancelled by Disconnect returns `ErrDisconnected` if no active view remains;
+stack closure returns `ErrStackClosed`.
 
 A legacy result never creates a table entry and never triggers a retry.
 
@@ -516,7 +645,11 @@ err := stack.Disconnect(peerID)
 
 `Disconnect` abandons any dial attempt for the peer, sends `GoAway(Closing)` on the peer's view,
 releases it, and returns once the view has been released.
-A per-peer generation counter prevents a dial that completes afterwards from being admitted.
+A per-peer generation counter prevents an outbound dial
+that completes afterwards from being admitted.
+The gate applies after policy evaluation, before committing the outbound view.
+Generation entries remain only while a view or dial record exists:
+any stale admission still has its driver's dial record carrying the old generation.
 Disconnecting an unknown peer is not an error.
 The peer learns of the disconnection from `GoAway`,
 even when libp2p keeps the physical connection open.
@@ -548,12 +681,14 @@ They can be layered on `Connect`, `Disconnect`, and admission policies later.
 
 ## 11. Migration
 
-**Broadcast.**
-The engine registers BCAST, SESS, and CHUNK and drains `Next` from its event loop,
-routing events to `PeerConn` directly.
+**Broadcast.** `Engine.Register(stack)` registers BCAST, SESS, and CHUNK before Start,
+with a policy requiring all three selectors and a wake channel owned by the engine.
+The engine drains `Next` from its event loop, routing events to `PeerConn` directly:
+`PeerUp` creates a binding, `StreamIn` routes to an existing binding or is refused,
+and `PeerDown` closes the binding.
 The two notification channels, `Serve`,
 and the logic for a stream that arrives before its peer disappear.
-`PeerConn` keeps one small bounded queue for SESS and CHUNK streams that arrive
+`PeerConn` keeps its own bounded per-peer queues for SESS and CHUNK streams that arrive
 before its BCAST handshake completes,
 because that ordering is broadcast's rule rather than the stack's.
 Broadcast defines its code tables in spec 002, for example:
@@ -564,6 +699,8 @@ Broadcast defines its code tables in spec 002, for example:
 | `CHUNK` | 1 | `Redundant` | The receiver no longer needs this chunk. |
 
 Overload of broadcast's own per-peer limits uses the shared `Overloaded`.
+In Go, `Reconstructed` and `Redundant` are declared in `broadcast/protocol.go`;
+shared stack codes are referenced from `protocol` directly.
 
 **Simulation and tests.**
 They build records for their nodes with `enr.Sign`, call `Start`, `Connect`, and `Close`,
@@ -603,6 +740,8 @@ A later `Update` message could announce selector changes if protocols need to at
 **Priorities.**
 The stack does not prioritize between protocols.
 Stream and datagram priorities from spec 001 need their own design.
+Protocols share each connection's stream credit
+(section 9.3), so per-protocol fairness belongs to that design.
 
 **Subsystem shutdown.**
 A protocol cannot unregister while the stack runs.

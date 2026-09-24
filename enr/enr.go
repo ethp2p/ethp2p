@@ -8,6 +8,7 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"math"
 	"net/netip"
 	"sort"
 	"strings"
@@ -30,8 +31,8 @@ type Record struct {
 	values    map[string][]byte
 }
 
-type signedEntry struct {
-	name  string
+type signedPair struct {
+	key   string
 	value []byte
 }
 
@@ -190,13 +191,13 @@ func (r *Record) PeerID() transport.PeerID {
 // Callers should try each returned endpoint.
 func (r *Record) QUIC() []netip.AddrPort {
 	var endpoints []netip.AddrPort
-	if addr, ok, err := Get(r, IP); ok && err == nil && addr.IsValid() && !addr.IsUnspecified() && !addr.IsMulticast() {
-		if port, ok, err := Get(r, QUIC); ok && err == nil && port != 0 {
+	if addr, ok, err := r.Get(IP); ok && err == nil && addr.IsValid() && !addr.IsUnspecified() && !addr.IsMulticast() {
+		if port, ok, err := r.Get(QUIC); ok && err == nil && port != 0 {
 			endpoints = append(endpoints, netip.AddrPortFrom(addr, port))
 		}
 	}
-	if addr, ok, err := Get(r, IP6); ok && err == nil && addr.IsValid() && !addr.IsUnspecified() && !addr.IsMulticast() && !addr.Is4In6() {
-		if port, ok, err := Get(r, QUIC6); ok && err == nil && port != 0 {
+	if addr, ok, err := r.Get(IP6); ok && err == nil && addr.IsValid() && !addr.IsUnspecified() && !addr.IsMulticast() && !addr.Is4In6() {
+		if port, ok, err := r.Get(QUIC6); ok && err == nil && port != 0 {
 			endpoints = append(endpoints, netip.AddrPortFrom(addr, port))
 		}
 	}
@@ -216,54 +217,82 @@ func (r *Record) encodeCanonical() []byte {
 	return encodeRLPList(body)
 }
 
+// Update returns a new record signed by key with sequence number Seq()+1. It
+// keeps r's entries and replaces or adds those in pairs. key must be the key
+// that signed r.
+func (r *Record) Update(key *secp256k1.PrivateKey, pairs ...Pair) (*Record, error) {
+	if r == nil {
+		return nil, errors.New("nil ENR")
+	}
+	if key == nil || !key.PubKey().IsEqual(r.pub) {
+		return nil, errors.New("key did not sign this ENR")
+	}
+	if r.seq == math.MaxUint64 {
+		return nil, errors.New("ENR sequence number exhausted")
+	}
+	replaced := make(map[string]bool, len(pairs))
+	for _, pair := range pairs {
+		replaced[pair.key] = true
+	}
+	merged := make([]Pair, 0, len(r.keys)+len(pairs))
+	for _, k := range r.keys {
+		if k == "id" || k == "secp256k1" || replaced[k] {
+			continue
+		}
+		raw := r.values[k]
+		merged = append(merged, Pair{key: k, encode: func() ([]byte, error) { return raw, nil }})
+	}
+	return Sign(key, r.seq+1, append(merged, pairs...)...)
+}
+
 // Sign creates and verifies a v4 record, adding the required id and identity
-// entries and sorting all entries by their key bytes.
-func Sign(key *secp256k1.PrivateKey, seq uint64, entries ...Entry) (*Record, error) {
+// pairs and sorting all pairs by key.
+func Sign(key *secp256k1.PrivateKey, seq uint64, pairs ...Pair) (*Record, error) {
 	if key == nil || key.Key.IsZero() {
 		return nil, errors.New("invalid ENR signing key")
 	}
-	pairs := make([]signedEntry, 0, len(entries)+2)
-	seen := make(map[string]struct{}, len(entries)+2)
-	for _, entry := range entries {
-		if entry.name == "id" || entry.name == "secp256k1" {
-			return nil, fmt.Errorf("ENR key %q is reserved", entry.name)
+	signed := make([]signedPair, 0, len(pairs)+2)
+	seen := make(map[string]struct{}, len(pairs)+2)
+	for _, pair := range pairs {
+		if pair.key == "id" || pair.key == "secp256k1" {
+			return nil, fmt.Errorf("ENR key %q is reserved", pair.key)
 		}
-		if _, duplicate := seen[entry.name]; duplicate {
-			return nil, fmt.Errorf("duplicate ENR key %q", entry.name)
+		if _, duplicate := seen[pair.key]; duplicate {
+			return nil, fmt.Errorf("duplicate ENR key %q", pair.key)
 		}
-		seen[entry.name] = struct{}{}
-		if entry.err != nil {
-			return nil, fmt.Errorf("encode ENR key %q: %w", entry.name, entry.err)
+		seen[pair.key] = struct{}{}
+		if pair.err != nil {
+			return nil, fmt.Errorf("encode ENR key %q: %w", pair.key, pair.err)
 		}
-		if entry.encode == nil {
-			return nil, fmt.Errorf("ENR key %q has no encoder", entry.name)
+		if pair.encode == nil {
+			return nil, fmt.Errorf("ENR key %q has no encoder", pair.key)
 		}
-		value, err := entry.encode()
+		value, err := pair.encode()
 		if err != nil {
-			return nil, fmt.Errorf("encode ENR key %q: %w", entry.name, err)
+			return nil, fmt.Errorf("encode ENR key %q: %w", pair.key, err)
 		}
 		if _, err := decodeSingleRLP(value); err != nil {
-			return nil, fmt.Errorf("encode ENR key %q: invalid RLP value: %w", entry.name, err)
+			return nil, fmt.Errorf("encode ENR key %q: invalid RLP value: %w", pair.key, err)
 		}
-		pairs = append(pairs, signedEntry{name: entry.name, value: value})
+		signed = append(signed, signedPair{key: pair.key, value: value})
 	}
-	pairs = append(pairs,
-		signedEntry{name: "id", value: encodeRLPString([]byte("v4"))},
-		signedEntry{name: "secp256k1", value: encodeRLPString(key.PubKey().SerializeCompressed())},
+	signed = append(signed,
+		signedPair{key: "id", value: encodeRLPString([]byte("v4"))},
+		signedPair{key: "secp256k1", value: encodeRLPString(key.PubKey().SerializeCompressed())},
 	)
-	sort.Slice(pairs, func(i, j int) bool {
-		return bytes.Compare([]byte(pairs[i].name), []byte(pairs[j].name)) < 0
+	sort.Slice(signed, func(i, j int) bool {
+		return signed[i].key < signed[j].key
 	})
 
-	content := encodeRLPList(encodeSignedContent(seq, pairs))
+	content := encodeRLPList(encodeSignedContent(seq, signed))
 	hash := keccak256(content)
 	compact := decrecdsa.SignCompact(key, hash, true)
 	signature := compact[1:]
 
 	body := encodeRLPString(signature)
 	body = append(body, encodeUint64(seq)...)
-	for _, pair := range pairs {
-		body = append(body, encodeRLPString([]byte(pair.name))...)
+	for _, pair := range signed {
+		body = append(body, encodeRLPString([]byte(pair.key))...)
 		body = append(body, pair.value...)
 	}
 	raw := encodeRLPList(body)
@@ -273,11 +302,11 @@ func Sign(key *secp256k1.PrivateKey, seq uint64, entries ...Entry) (*Record, err
 	return Decode(raw)
 }
 
-func encodeSignedContent(seq uint64, entries []signedEntry) []byte {
+func encodeSignedContent(seq uint64, pairs []signedPair) []byte {
 	content := encodeUint64(seq)
-	for _, entry := range entries {
-		content = append(content, encodeRLPString([]byte(entry.name))...)
-		content = append(content, entry.value...)
+	for _, pair := range pairs {
+		content = append(content, encodeRLPString([]byte(pair.key))...)
+		content = append(content, pair.value...)
 	}
 	return content
 }

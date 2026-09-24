@@ -5,8 +5,10 @@ import (
 	"maps"
 	"slices"
 	"sync"
+	"sync/atomic"
 
 	ethp2p "github.com/ethp2p/ethp2p"
+	"github.com/ethp2p/ethp2p/protocol"
 	"github.com/ethp2p/ethp2p/transport"
 )
 
@@ -29,8 +31,7 @@ func (c *EngineConfig) maxInboundChunkStreams() int {
 }
 
 // Engine manages channels, peers, and message routing via a single-goroutine
-// event loop. Its maps belong to run(); a separate lock only coordinates
-// Serve admission with Close.
+// event loop. Its maps belong to run(); registration is synchronized with Close.
 type Engine struct {
 	config EngineConfig
 
@@ -45,12 +46,8 @@ type Engine struct {
 	// replacement.
 	peers map[transport.PeerID]*PeerConn
 
-	// bindings lets a stream event create the same PeerConn that a peer event
-	// would create. The root stack deliberately does not promise processing
-	// order between the two notification channels, so the stable *Peer pointer
-	// is the connection identity even when an authenticated ID is reused. Failed
-	// bindings stay here until Peer.Context ends: a delayed notification must
-	// not start a second handshake on the same connection.
+	// bindings routes streams by the stable subsystem peer handle. Only PeerUp
+	// creates a binding; PeerDown removes it.
 	bindings map[*ethp2p.Peer]*PeerConn
 
 	// peerSubs tracks which channels each remote peer is subscribed to.
@@ -64,11 +61,9 @@ type Engine struct {
 	ctx    context.Context
 	cancel context.CancelFunc
 
-	// serveMu coordinates Engine.Close with Serve producers. The event actor
-	// drains eventCh only after every producer has stopped, so an event cannot
-	// be queued after shutdown's final drain.
-	serveMu sync.Mutex
-	serveWG sync.WaitGroup
+	registerMu   sync.Mutex
+	subsystem    atomic.Pointer[ethp2p.Subsystem]
+	deliveryWake chan struct{}
 }
 
 // NewEngine constructs an Engine and starts its event loop.
@@ -79,14 +74,15 @@ func NewEngine(config EngineConfig) *Engine {
 	ctx, cancel := context.WithCancel(context.Background())
 
 	e := &Engine{
-		config:   config,
-		channels: make(map[ChannelID]*channelHandle),
-		peers:    make(map[transport.PeerID]*PeerConn),
-		bindings: make(map[*ethp2p.Peer]*PeerConn),
-		peerSubs: make(map[transport.PeerID]map[ChannelID]struct{}),
-		eventCh:  make(chan engineEvent, 128),
-		ctx:      ctx,
-		cancel:   cancel,
+		config:       config,
+		channels:     make(map[ChannelID]*channelHandle),
+		peers:        make(map[transport.PeerID]*PeerConn),
+		bindings:     make(map[*ethp2p.Peer]*PeerConn),
+		peerSubs:     make(map[transport.PeerID]map[ChannelID]struct{}),
+		eventCh:      make(chan engineEvent, 128),
+		deliveryWake: make(chan struct{}, 1),
+		ctx:          ctx,
+		cancel:       cancel,
 	}
 	e.wg.Go(e.run)
 	return e
@@ -104,9 +100,9 @@ func (e *Engine) notifyPeerGone(p *PeerConn) {
 
 // Close stops the engine and waits for its goroutines to exit.
 func (e *Engine) Close() error {
-	e.serveMu.Lock()
+	e.registerMu.Lock()
 	e.cancel()
-	e.serveMu.Unlock()
+	e.registerMu.Unlock()
 	e.wg.Wait()
 	return nil
 }
@@ -167,6 +163,12 @@ func (e *Engine) run() {
 		case <-e.ctx.Done():
 			e.shutdown()
 			return
+		case <-e.deliveryWake:
+			if sub := e.subsystem.Load(); sub != nil {
+				for event, ok := sub.Next(); ok; event, ok = sub.Next() {
+					e.handleDelivery(event)
+				}
+			}
 		case evt := <-e.eventCh:
 			e.handle(evt)
 		}
@@ -212,12 +214,6 @@ func (e *Engine) handle(ev engineEvent) {
 		delete(e.channels, ev.channelID)
 		e.config.Observer.OnChannelDropped(ev.channelID)
 
-	case evPeerEvent:
-		e.bindPeer(ev.appPeer)
-
-	case evStreamEvent:
-		e.handleStreamEvent(ev.stream)
-
 	case evPeerHandshake:
 		e.handlePeerHandshake(ev)
 
@@ -258,28 +254,26 @@ func (e *Engine) bindPeer(peer *ethp2p.Peer) *PeerConn {
 		return p
 	}
 
-	p := newPeerConn(e, peer.Context, peer.ID, peer)
+	p := newPeerConn(e, peer.Context(), peer.ID(), peer)
 	p.peer = peer
 	e.bindings[peer] = p
-	e.wg.Go(func() {
-		select {
-		case <-peer.Context.Done():
-			e.notifyPeerGone(p)
-		case <-e.ctx.Done():
-		}
-	})
+
 	channels := slices.Collect(maps.Keys(e.channels))
 	e.wg.Go(func() { _ = p.Run(channels) })
 	return p
 }
 
-func (e *Engine) handleStreamEvent(event ethp2p.StreamEvent) {
+func (e *Engine) handleStreamEvent(event ethp2p.Event) {
 	if event.Stream == nil {
 		return
 	}
-	if _, ok := event.Stream.(transport.Stream); ok {
+	if e.ctx.Err() != nil {
+		event.Cancel(protocol.Unspecified)
+		return
+	}
+	if _, ok := event.Stream.(ethp2p.Stream); ok {
 		// Broadcast's wire protocols use unidirectional streams. A bidi
-		// event is a routing mismatch; reset both halves before dropping it.
+		// event is a routing mismatch; cancel both halves before dropping it.
 		event.Reject()
 		return
 	}
@@ -288,7 +282,7 @@ func (e *Engine) handleStreamEvent(event ethp2p.StreamEvent) {
 		return
 	}
 
-	p := e.bindPeer(event.Peer)
+	p := e.bindings[event.Peer]
 	if p == nil {
 		event.Reject()
 		return
@@ -325,7 +319,7 @@ func (e *Engine) handlePeerHandshake(ev engineEvent) {
 		e.enrolPeerToChannel(p, channelID)
 	}
 	e.peerSubs[p.id] = subs
-	p.finishHandshake(true)
+	p.finishHandshake(true, nil)
 	e.config.Observer.OnPeerHandshook(p.id, p.version, ev.channels)
 	for _, channelID := range ev.channels {
 		e.config.Observer.OnPeerSubscribed(p.id, channelID)
@@ -373,7 +367,7 @@ func (e *Engine) removeBinding(p *PeerConn) {
 	if p == nil || p.peer == nil {
 		return
 	}
-	if p.peer.Context != nil && p.peer.Context.Err() == nil {
+	if p.peer.Context() != nil && p.peer.Context().Err() == nil {
 		return
 	}
 	if e.bindings[p.peer] == p {
@@ -394,10 +388,11 @@ func (e *Engine) enrolPeerToChannel(p *PeerConn, channelID ChannelID) {
 }
 
 func (e *Engine) shutdown() {
-	// Serve may still be publishing adapter events after Engine.Close cancels
-	// the lifetime. Join those producers before draining eventCh so no stream
-	// arrives after the final disposal pass.
-	e.serveWG.Wait()
+	if sub := e.subsystem.Load(); sub != nil {
+		for event, ok := sub.Next(); ok; event, ok = sub.Next() {
+			event.Cancel(protocol.Unspecified)
+		}
+	}
 
 	// Phase 1: close all peers and wait for their goroutines to exit.
 	// ponytail: PeerConn.Close is idempotent; overlap needs no tracking map.
@@ -413,8 +408,6 @@ func (e *Engine) shutdown() {
 		select {
 		case ev := <-e.eventCh:
 			switch ev.kind {
-			case evStreamEvent:
-				ev.stream.Reject()
 			case evPeerHandshake:
 				if ev.peer != nil {
 					ev.peer.Close()
@@ -432,6 +425,19 @@ waitChannels:
 	for _, th := range e.channels {
 		if th.done != nil {
 			<-th.done
+		}
+	}
+}
+
+func (e *Engine) handleDelivery(event ethp2p.Event) {
+	switch event.Kind {
+	case ethp2p.PeerUp:
+		e.bindPeer(event.Peer)
+	case ethp2p.StreamIn:
+		e.handleStreamEvent(event)
+	case ethp2p.PeerDown:
+		if p := e.bindings[event.Peer]; p != nil {
+			e.handlePeerGone(engineEvent{kind: evPeerGone, peer: p})
 		}
 	}
 }

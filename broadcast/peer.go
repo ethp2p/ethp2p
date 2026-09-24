@@ -23,7 +23,7 @@ const (
 )
 
 type uniStreamOpener interface {
-	OpenUniStream(context.Context, protocol.Selector) (transport.SendStream, error)
+	OpenUniStream(context.Context, protocol.Selector) (ethp2p.SendStream, error)
 }
 
 // PeerConn holds the broadcast state for one connected remote peer.
@@ -39,17 +39,18 @@ type PeerConn struct {
 	streams uniStreamOpener
 
 	bcastAccepted atomic.Bool
-	bcastIn       chan transport.ReceiveStream
+	bcastIn       chan ethp2p.ReceiveStream
 	// The bounded handoff queues keep a stream that arrives before the BCAST
 	// handshake from blocking the engine's event actor. Dedicated loops wait for
 	// handshake completion and then start the owned stream readers.
-	sessionIn chan transport.ReceiveStream
-	chunkIn   chan transport.ReceiveStream
+	sessionIn chan ethp2p.ReceiveStream
+	chunkIn   chan ethp2p.ReceiveStream
 	// handshakeDone publishes the engine's channel bindings, not just the
 	// completed wire handshake. Readers must wait before looking up channels.
 	handshakeDone chan struct{}
 	handshakeOnce sync.Once
 	handshakeOK   bool
+	handshakeErr  error
 	handlersMu    sync.Mutex
 	ready         bool
 
@@ -65,8 +66,11 @@ type PeerConn struct {
 	// ctrlOut is our outbound BCAST stream (we opened it, we write to it).
 	// bcastIn is the peer's outbound BCAST stream (they opened it, we read from it).
 	// Both set during handshake, then owned by outbound loop and control reader respectively.
-	ctrlOut transport.SendStream
-	ctrlIn  transport.ReceiveStream
+	ctrlOut ethp2p.SendStream
+	ctrlIn  ethp2p.ReceiveStream
+	// ctrlOutEnded records a write failure so shutdown does not overwrite its
+	// more specific cancellation code with Unspecified.
+	ctrlOutEnded atomic.Bool
 
 	// wakeCh is a coalesce notification: sessions signal this channel
 	// (buffered 1) after depositing a chunk into their per-session slot.
@@ -100,9 +104,9 @@ func newPeerConn(engine *Engine, bindCtx context.Context, id transport.PeerID, s
 		wakeCh:        make(chan struct{}, 1),
 		chunkSem:      make(chan struct{}, engine.config.maxInboundChunkStreams()),
 		sessionSem:    make(chan struct{}, streamQueueCap),
-		bcastIn:       make(chan transport.ReceiveStream, 1),
-		sessionIn:     make(chan transport.ReceiveStream, streamQueueCap),
-		chunkIn:       make(chan transport.ReceiveStream, streamQueueCap),
+		bcastIn:       make(chan ethp2p.ReceiveStream, 1),
+		sessionIn:     make(chan ethp2p.ReceiveStream, streamQueueCap),
+		chunkIn:       make(chan ethp2p.ReceiveStream, streamQueueCap),
 		handshakeDone: make(chan struct{}),
 		engine:        engine,
 		ctx:           ctx,
@@ -151,6 +155,7 @@ func (p *PeerConn) UnbindChannel(channelID ChannelID) {
 // It blocks until the peer is closed or the context is cancelled.
 // ourChannels is the engine's channel list captured at spawn time.
 func (p *PeerConn) Run(ourChannels []ChannelID) error {
+	controlLoopsStarted := false
 	defer func() {
 		p.stop()
 		p.handlersMu.Lock()
@@ -159,11 +164,11 @@ func (p *PeerConn) Run(ourChannels []ChannelID) error {
 		p.wg.Wait()
 		// Handshake may have succeeded just as Close canceled the context,
 		// before the control loops could take ownership of these streams.
-		if p.ctrlIn != nil {
-			p.ctrlIn.CancelRead(0)
+		if !controlLoopsStarted && p.ctrlIn != nil {
+			p.ctrlIn.CancelRead(streamFailureCode(p.ctx.Err()))
 		}
-		if p.ctrlOut != nil {
-			p.ctrlOut.CancelWrite(0)
+		if !controlLoopsStarted && p.ctrlOut != nil {
+			p.ctrlOut.CancelWrite(streamFailureCode(p.ctx.Err()))
 		}
 		p.engine.notifyPeerGone(p)
 	}()
@@ -186,7 +191,7 @@ func (p *PeerConn) Run(ourChannels []ChannelID) error {
 	version, channels, err := p.handshake(hsCtx, ourChannels)
 	hsCancel()
 	if err != nil {
-		p.finishHandshake(false)
+		p.finishHandshake(false, err)
 		p.engine.onPeerHandshake(p, nil, err)
 		return fmt.Errorf("handshake: %w", err)
 	}
@@ -206,6 +211,7 @@ func (p *PeerConn) Run(ourChannels []ChannelID) error {
 	p.wg.Go(func() { p.runDataLoop(slotCh) })
 	p.wg.Go(p.runCtrlReader)
 	p.ready = true
+	controlLoopsStarted = true
 	p.handlersMu.Unlock()
 
 	p.engine.onPeerHandshake(p, channels, nil)
@@ -242,12 +248,12 @@ func (p *PeerConn) runChunkAcceptLoop() {
 // enqueueStream transfers an incoming stream from the root Stack adapter to
 // the stream-class loop. Queues are bounded so unread streams cannot grow
 // without limit under a peer-controlled stream burst.
-func (p *PeerConn) enqueueStream(selector protocol.Selector, stream transport.ReceiveStream) {
+func (p *PeerConn) enqueueStream(selector protocol.Selector, stream ethp2p.ReceiveStream) {
 	if stream == nil {
 		return
 	}
 	if p.ctx.Err() != nil {
-		stream.CancelRead(0)
+		stream.CancelRead(protocol.Unspecified)
 		return
 	}
 	switch selector {
@@ -257,32 +263,32 @@ func (p *PeerConn) enqueueStream(selector protocol.Selector, stream transport.Re
 		select {
 		case p.sessionIn <- stream:
 		case <-p.ctx.Done():
-			stream.CancelRead(0)
+			stream.CancelRead(protocol.Unspecified)
 		default:
-			stream.CancelRead(0)
+			stream.CancelRead(protocol.Overloaded)
 		}
 	case CHUNK:
 		select {
 		case p.chunkIn <- stream:
 		case <-p.ctx.Done():
-			stream.CancelRead(0)
+			stream.CancelRead(protocol.Unspecified)
 		default:
-			stream.CancelRead(0)
+			stream.CancelRead(protocol.Overloaded)
 		}
 	default:
-		stream.CancelRead(0)
+		stream.CancelRead(protocol.Refused)
 	}
 }
 
 func (p *PeerConn) disposeQueuedStreams() {
 	// Engine calls Close on the same actor that enqueues streams. Run only
 	// reports completion; draining here therefore cannot race a final enqueue.
-	for _, streams := range []chan transport.ReceiveStream{p.bcastIn, p.sessionIn, p.chunkIn} {
+	for _, streams := range []chan ethp2p.ReceiveStream{p.bcastIn, p.sessionIn, p.chunkIn} {
 		for streams != nil {
 			select {
 			case stream := <-streams:
 				if stream != nil {
-					stream.CancelRead(0)
+					stream.CancelRead(protocol.Unspecified)
 				}
 			default:
 				streams = nil
@@ -320,7 +326,7 @@ func (p *PeerConn) handshake(ctx context.Context, ourChannels []ChannelID) (Prot
 	}
 
 	type writeResult struct {
-		stream transport.SendStream
+		stream ethp2p.SendStream
 		err    error
 	}
 	writeCh := make(chan writeResult, 1)
@@ -339,7 +345,7 @@ func (p *PeerConn) handshake(ctx context.Context, ourChannels []ChannelID) (Prot
 		if result.err != nil {
 			return
 		}
-		stop := ctxutil.OnCancel(ctx, func() { result.stream.CancelWrite(0) })
+		stop := ctxutil.OnCancel(ctx, func() { result.stream.CancelWrite(streamFailureCode(ctx.Err())) })
 		result.err = WriteFrame(result.stream, hsMsg)
 		stop()
 		if result.err == nil {
@@ -347,14 +353,22 @@ func (p *PeerConn) handshake(ctx context.Context, ourChannels []ChannelID) (Prot
 		}
 	}()
 
-	var incoming transport.ReceiveStream
+	var incoming ethp2p.ReceiveStream
 	var response bcastpb.Bcast
 	var readErr error
+	var readFrameSucceeded bool
+	rejectionCode := protocol.Unspecified
 	select {
 	case incoming = <-p.bcastIn:
-		stop := ctxutil.OnCancel(ctx, func() { incoming.CancelRead(0) })
+		stop := ctxutil.OnCancel(ctx, func() { incoming.CancelRead(streamFailureCode(ctx.Err())) })
 		readErr = ReadFrame(incoming, &response)
 		stop()
+		readFrameSucceeded = readErr == nil
+		if readErr != nil {
+			// No effect if the read failed, which already cancelled the stream;
+			// ends it for a malformed frame.
+			incoming.CancelRead(protocol.Unspecified)
+		}
 		if readErr == nil {
 			readErr = ctx.Err()
 		}
@@ -363,6 +377,7 @@ func (p *PeerConn) handshake(ctx context.Context, ourChannels []ChannelID) (Prot
 	}
 	if readErr == nil && response.GetPeerHandshake() == nil {
 		readErr = ErrUnexpectedMsgType
+		rejectionCode = protocol.Refused
 	}
 	if readErr != nil {
 		cancel()
@@ -372,13 +387,30 @@ func (p *PeerConn) handshake(ctx context.Context, ourChannels []ChannelID) (Prot
 	var peerVersion uint32
 	if err == nil {
 		peerVersion, err = validateProtocolVersion(response.GetPeerHandshake().Version)
+		if err != nil {
+			rejectionCode = protocol.Refused
+		}
 	}
 	if err != nil {
-		if written.stream != nil {
-			written.stream.CancelWrite(0)
+		if written.stream != nil && written.err == nil {
+			code := rejectionCode
+			if code == protocol.Unspecified {
+				code = streamFailureCode(readErr)
+				if readErr == nil {
+					code = streamFailureCode(written.err)
+				}
+			}
+			written.stream.CancelWrite(code)
 		}
-		if incoming != nil {
-			incoming.CancelRead(0)
+		if incoming != nil && readFrameSucceeded {
+			code := rejectionCode
+			if code == protocol.Unspecified {
+				code = streamFailureCode(readErr)
+				if readErr == nil {
+					code = streamFailureCode(written.err)
+				}
+			}
+			incoming.CancelRead(code)
 		}
 		return 0, nil, err
 	}
@@ -408,12 +440,13 @@ func (p *PeerConn) Close() {
 
 func (p *PeerConn) stop() {
 	p.cancel()
-	p.finishHandshake(false)
+	p.finishHandshake(false, p.ctx.Err())
 }
 
-func (p *PeerConn) finishHandshake(ok bool) {
+func (p *PeerConn) finishHandshake(ok bool, err error) {
 	p.handshakeOnce.Do(func() {
 		p.handshakeOK = ok
+		p.handshakeErr = err
 		close(p.handshakeDone)
 	})
 }

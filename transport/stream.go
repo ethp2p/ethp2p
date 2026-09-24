@@ -10,7 +10,7 @@ import (
 var (
 	_ Stream        = stream{}
 	_ SendStream    = sendStream{}
-	_ ReceiveStream = receiveStream{}
+	_ ReceiveStream = (*receiveStream)(nil)
 )
 
 // SendStream is the writable side of a locally opened unidirectional QUIC
@@ -51,8 +51,6 @@ type Stream interface {
 	// Close sends the stream FIN after all written data. The read side remains
 	// open.
 	Close() error
-	// Reset aborts both sides with application error code 0.
-	Reset() error
 	// CancelRead stops reading and sends the given QUIC application error code to
 	// the peer.
 	CancelRead(uint64)
@@ -83,23 +81,30 @@ func (s stream) CancelRead(code uint64) { s.Stream.CancelRead(quic.StreamErrorCo
 
 func (s stream) CancelWrite(code uint64) { s.Stream.CancelWrite(quic.StreamErrorCode(code)) }
 
-func (s stream) Reset() error {
-	s.Stream.CancelRead(streamReset)
-	s.Stream.CancelWrite(streamReset)
-	return s.Stream.Close()
-}
-
 // sendStream adapts quic.SendStream to SendStream.
 type sendStream struct{ *quic.SendStream }
 
 func (s sendStream) CancelWrite(code uint64) { s.SendStream.CancelWrite(quic.StreamErrorCode(code)) }
 
-// receiveStream adapts quic.ReceiveStream to ReceiveStream.
-type receiveStream struct{ *quic.ReceiveStream }
+// receiveStream defers consuming the peeked selector until protocol delivery.
+// Even a selector-only stream retains credit while queued. skip survives a
+// partial read interrupted by a deadline so a later read can resume it.
+type receiveStream struct {
+	*quic.ReceiveStream
+	skip int
+}
 
 // Read translates QUIC stream cancellations into [StreamResetError] so callers
 // do not depend on quic-go error types.
-func (s receiveStream) Read(p []byte) (int, error) {
+func (s *receiveStream) Read(p []byte) (int, error) {
+	var scratch [11]byte
+	for s.skip > 0 {
+		n, err := s.ReceiveStream.Read(scratch[:s.skip])
+		s.skip -= n
+		if err != nil {
+			return 0, readError(err)
+		}
+	}
 	n, err := s.ReceiveStream.Read(p)
 	return n, readError(err)
 }
@@ -111,6 +116,6 @@ func readError(err error) error {
 	return err
 }
 
-func (s receiveStream) CancelRead(code uint64) {
+func (s *receiveStream) CancelRead(code uint64) {
 	s.ReceiveStream.CancelRead(quic.StreamErrorCode(code))
 }

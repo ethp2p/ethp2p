@@ -6,6 +6,7 @@ import (
 	"io"
 	"time"
 
+	ethp2p "github.com/ethp2p/ethp2p"
 	"github.com/ethp2p/ethp2p/protocol"
 	"github.com/ethp2p/ethp2p/transport"
 )
@@ -43,23 +44,23 @@ func newHighCapTransport(ctx context.Context) *testTransport {
 	}
 }
 
-func (t *testTransport) OpenUniStream(ctx context.Context, selector protocol.Selector) (transport.SendStream, error) {
+func (t *testTransport) OpenUniStream(ctx context.Context, selector protocol.Selector) (ethp2p.SendStream, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
 	stream := &testStream{send: t.streamSend, recv: t.streamRecv, ctx: t.ctx}
 	if err := protocol.WriteSelector(stream, selector); err != nil {
-		stream.CancelWrite(0)
+		stream.CancelWrite(protocol.Unspecified)
 		return nil, err
 	}
 	return stream, nil
 }
 
-func (t *testTransport) AcceptUniStream(context.Context) (transport.ReceiveStream, error) {
+func (t *testTransport) AcceptUniStream(context.Context) (ethp2p.ReceiveStream, error) {
 	return &testStream{send: t.streamSend, recv: t.streamRecv, ctx: t.ctx}, nil
 }
 
-// testStream implements transport.Stream for in-process testing.
+// testStream implements ethp2p.Stream for in-process broadcast testing.
 type testStream struct {
 	send   chan []byte
 	recv   chan []byte
@@ -107,18 +108,17 @@ func (s *testStream) Close() error {
 	return nil
 }
 
-func (s *testStream) CancelRead(code uint64)             {}
-func (s *testStream) CancelWrite(code uint64)            {}
-func (s *testStream) Reset() error                       { return nil }
+func (s *testStream) CancelRead(protocol.Code)           {}
+func (s *testStream) CancelWrite(protocol.Code)          {}
 func (s *testStream) SetDeadline(t time.Time) error      { return nil }
 func (s *testStream) SetReadDeadline(t time.Time) error  { return nil }
 func (s *testStream) SetWriteDeadline(t time.Time) error { return nil }
 
-var _ transport.Stream = (*testStream)(nil)
+var _ ethp2p.Stream = (*testStream)(nil)
 
 // newTestBcastStreams returns a pair of streams suitable for use as bcastOut/bcastIn
 // in tests where no real control I/O is needed.
-func newTestBcastStreams(ctx context.Context) (transport.SendStream, transport.ReceiveStream) {
+func newTestBcastStreams(ctx context.Context) (ethp2p.SendStream, ethp2p.ReceiveStream) {
 	ch := make(chan []byte, 256)
 	out := &testStream{send: ch, recv: ch, ctx: ctx}
 	in := &testStream{send: ch, recv: ch, ctx: ctx}

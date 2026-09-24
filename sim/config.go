@@ -9,7 +9,6 @@ import (
 	"os"
 	"time"
 
-	"github.com/ethp2p/ethp2p"
 	"github.com/ethp2p/ethp2p/broadcast"
 	"github.com/ethp2p/ethp2p/broadcast/rs"
 	"gopkg.in/yaml.v3"
@@ -165,23 +164,9 @@ type StrategyFunc func(nodeNum int, conn net.PacketConn, logger *slog.Logger, ob
 
 // ECStrategy returns a StrategyFunc that creates broadcast nodes using
 // the given erasure coding scheme. The application owns the stack, engine,
-// transport endpoint, and all serving goroutines.
+// and transport endpoint; transport owns the connection pumps.
 func ECStrategy[CI broadcast.ChunkIdent, R broadcast.Wire, P broadcast.Wire](scheme broadcast.Scheme[CI, R, P]) StrategyFunc {
 	return func(nodeNum int, conn net.PacketConn, logger *slog.Logger, obs broadcast.Observer, tw *TraceWriter) (Node, error) {
-		stack := new(ethp2p.Stack)
-		subsystem, err := stack.RegisterSubsystem("broadcast", broadcast.BCAST, broadcast.SESS, broadcast.CHUNK)
-		if err != nil {
-			return nil, fmt.Errorf("register broadcast subsystem: %w", err)
-		}
-		peers := make(chan *ethp2p.Peer, 64)
-		streams := make(chan ethp2p.StreamEvent, 1024)
-		if err := subsystem.NotifyPeers(peers); err != nil {
-			return nil, fmt.Errorf("configure broadcast peer notifications: %w", err)
-		}
-		if err := subsystem.NotifyStreams(streams); err != nil {
-			return nil, fmt.Errorf("configure broadcast stream notifications: %w", err)
-		}
-
 		engine := broadcast.NewEngine(broadcast.EngineConfig{Observer: obs})
 		channel := broadcast.AttachChannel(engine, "broadcast", scheme)
 		recvCh := make(chan broadcast.FullMessage, 64)
@@ -191,10 +176,7 @@ func ECStrategy[CI broadcast.ChunkIdent, R broadcast.Wire, P broadcast.Wire](sch
 			return nil, fmt.Errorf("failed to subscribe: %w", err)
 		}
 		return newBroadcastNode(
-			stack,
 			engine,
-			peers,
-			streams,
 			func(mid broadcast.MessageID, data []byte) error { return channel.Publish(mid, data) },
 			channel.Stop,
 			recvCh,

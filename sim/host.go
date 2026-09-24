@@ -8,9 +8,30 @@ import (
 	"fmt"
 	"math/rand/v2"
 	"net"
+	"net/netip"
 
+	"github.com/decred/dcrd/dcrec/secp256k1/v4"
+	"github.com/ethp2p/ethp2p/enr"
 	"github.com/ethp2p/ethp2p/transport"
 )
+
+// nodeRecord derives the simulation identity and advertises its bound endpoint.
+// Shadow processes can reconstruct a peer's record from its node number.
+func nodeRecord(nodeNum int, addr net.Addr) (*enr.Record, error) {
+	key, _, err := nodeIdentity(nodeNum)
+	if err != nil {
+		return nil, err
+	}
+	endpoint, err := netip.ParseAddrPort(addr.String())
+	if err != nil {
+		return nil, err
+	}
+	ip := endpoint.Addr().Unmap()
+	if ip.Is4() {
+		return enr.Sign(secp256k1.PrivKeyFromBytes(key.Bytes()), 1, enr.IP.Set(ip), enr.QUIC.Set(endpoint.Port()))
+	}
+	return enr.Sign(secp256k1.PrivKeyFromBytes(key.Bytes()), 1, enr.IP6.Set(ip), enr.QUIC6.Set(endpoint.Port()))
+}
 
 // nodeIdentity returns the transport identity for a simulation node. Deriving it
 // from the node number keeps experiments reproducible and lets a run predict

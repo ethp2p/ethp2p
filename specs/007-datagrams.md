@@ -40,8 +40,9 @@ Sections 3 through 7 use RFC 2119 language such as MUST, SHOULD, and MAY.
 **Selector.**
 The unsigned integer identifying an ethp2p protocol on the wire.
 Selector `0` is reserved for the stack's control stream.
-Selector `0x2f` is reserved because its one-byte encoding is `/`,
-which the shared QUIC dispatcher routes to libp2p.
+Selector `0x2f` is an ordinary protocol selector.
+
+The shared QUIC dispatcher classifies bidirectional streams by the selector frame's length byte.
 
 **Selector frame.**
 An unsigned-varint length `n`, followed by the selector's minimal unsigned-varint encoding,

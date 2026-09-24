@@ -7,6 +7,8 @@ import (
 	"sync"
 	"time"
 
+	ethp2p "github.com/ethp2p/ethp2p"
+	"github.com/ethp2p/ethp2p/protocol"
 	"github.com/ethp2p/ethp2p/transport"
 )
 
@@ -24,7 +26,7 @@ type outboundKey struct {
 // VerdictAccepted, the group is cancelled, aborting the others.
 type dedupGroup struct {
 	ctx    context.Context
-	cancel context.CancelFunc
+	cancel context.CancelCauseFunc
 }
 
 // sessionPeer is Session's per-peer state.
@@ -96,7 +98,7 @@ type session[CI ChunkIdent, R Wire] struct {
 	// sessCtx is a child of the channel context. Cancelling it cancels all
 	// outstanding outbound chunk sends AND inbound reads for this session.
 	sessCtx    context.Context
-	sessCancel context.CancelFunc
+	sessCancel context.CancelCauseFunc
 
 	// ctx is the channel's context, used as a fallback in select statements
 	// for channel sends (peerOpenSession, chunkOutbox).
@@ -108,8 +110,21 @@ type session[CI ChunkIdent, R Wire] struct {
 // Cancels all outbound sends and inbound reads, waits for background
 // goroutines to finish, closes strategy, notifies peers, closes the done channel.
 func (s *session[CI, R]) Close() error {
+	return s.closeWithCode(protocol.Unspecified)
+}
+
+// closeWithCode propagates the reason for session disposal to active stream
+// readers before waiting for their cancellation to complete.
+func (s *session[CI, R]) closeWithCode(code protocol.Code) error {
 	s.notifyPeersSessionDone()
-	s.sessCancel()
+	cause := error(context.Canceled)
+	switch code {
+	case Redundant:
+		cause = errChunkRedundant
+	case protocol.Refused:
+		cause = errStreamRefused
+	}
+	s.sessCancel(cause)
 	s.wg.Wait()
 	s.strategy.Close()
 	close(s.done)
@@ -165,7 +180,7 @@ func (s *session[CI, R]) notifyPeersSessionDone() {
 // stream. If the chunk is needed, it acquires a semaphore slot, resolves
 // a dedup group, and spawns a goroutine to read the data. The goroutine
 // posts a channelChunkData back to the channel inbox on completion.
-func (s *session[CI, R]) handleChunkStream(peer transport.PeerID, chunkID []byte, dataLen uint32, stream transport.ReceiveStream) {
+func (s *session[CI, R]) handleChunkStream(peer transport.PeerID, chunkID []byte, dataLen uint32, stream ethp2p.ReceiveStream) {
 	chunk := s.newCI()
 	if err := chunk.Unmarshal(chunkID); err != nil {
 		s.observer.OnChunkError(ChunkProcessError{
@@ -174,7 +189,7 @@ func (s *session[CI, R]) handleChunkStream(peer transport.PeerID, chunkID []byte
 			MessageID: s.messageID,
 			Err:       fmt.Errorf("unmarshal chunk id: %w", err),
 		})
-		stream.CancelRead(0)
+		stream.CancelRead(protocol.Unspecified)
 		return
 	}
 	if dataLen > maxChunkDataSize {
@@ -184,7 +199,7 @@ func (s *session[CI, R]) handleChunkStream(peer transport.PeerID, chunkID []byte
 			MessageID: s.messageID,
 			Err:       fmt.Errorf("chunk data length %d exceeds max %d", dataLen, maxChunkDataSize),
 		})
-		stream.CancelRead(0)
+		stream.CancelRead(protocol.Unspecified)
 		return
 	}
 	if s.stage >= stageDecoding || s.strategy.HaveChunk(chunk) {
@@ -195,7 +210,7 @@ func (s *session[CI, R]) handleChunkStream(peer transport.PeerID, chunkID []byte
 			v = VerdictDecoding
 		}
 		s.observer.OnChunkRcvd(peer, s.channelID, s.messageID, v)
-		stream.CancelRead(0)
+		stream.CancelRead(Redundant)
 		return
 	}
 
@@ -203,7 +218,7 @@ func (s *session[CI, R]) handleChunkStream(peer transport.PeerID, chunkID []byte
 	select {
 	case s.readSem <- struct{}{}:
 	default:
-		stream.CancelRead(0)
+		stream.CancelRead(protocol.Overloaded)
 		return
 	}
 
@@ -214,7 +229,7 @@ func (s *session[CI, R]) handleChunkStream(peer transport.PeerID, chunkID []byte
 		key := string(dedupKey)
 		grp, ok := s.dedupGroups[key]
 		if !ok {
-			ctx, cancel := context.WithCancel(s.sessCtx)
+			ctx, cancel := context.WithCancelCause(s.sessCtx)
 			grp = &dedupGroup{ctx: ctx, cancel: cancel}
 			s.dedupGroups[key] = grp
 		}
@@ -231,17 +246,20 @@ func (s *session[CI, R]) handleChunkStream(peer transport.PeerID, chunkID []byte
 		go func() {
 			select {
 			case <-readCtx.Done():
-				stream.CancelRead(0)
+				stream.CancelRead(streamCancellationCode(context.Cause(readCtx)))
 			case <-done:
 			}
 		}()
-		defer close(done)
 
 		_ = stream.SetReadDeadline(time.Now().Add(chunkReadTimeout))
 		defer func() { _ = stream.SetReadDeadline(time.Time{}) }()
 
 		buf := make([]byte, dataLen)
 		if _, err := io.ReadFull(stream, buf); err != nil {
+			close(done)
+			// A failed read was already cancelled by the stream; this only
+			// takes effect for a payload truncated by FIN.
+			stream.CancelRead(protocol.Unspecified)
 			return
 		}
 
@@ -252,7 +270,10 @@ func (s *session[CI, R]) handleChunkStream(peer transport.PeerID, chunkID []byte
 			chunkID:   chunkID,
 			payload:   buf,
 		}:
+			close(done)
 		case <-readCtx.Done():
+			close(done)
+			stream.CancelRead(streamCancellationCode(context.Cause(readCtx)))
 		}
 	})
 }
@@ -377,7 +398,7 @@ func (s *session[CI, R]) buildDedupCancel(chunk CI) *DedupCancel {
 		return nil
 	}
 	return &DedupCancel{CancelFunc: func() {
-		grp.cancel()
+		grp.cancel(errChunkRedundant)
 		delete(s.dedupGroups, key)
 		if cancel, ok := s.pendingVerify[key]; ok {
 			cancel()

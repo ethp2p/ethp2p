@@ -1,32 +1,47 @@
 package transport
 
 import (
+	"bytes"
 	"context"
+	"crypto/hkdf"
+	"crypto/sha256"
+	"errors"
 	"io"
 	"log/slog"
 	"net"
+	"os"
 	"sync"
 	"sync/atomic"
 	"time"
 
+	"github.com/ethp2p/ethp2p/protocol"
 	"github.com/libp2p/go-libp2p/p2p/transport/quicreuse"
-	"github.com/multiformats/go-varint"
 	"github.com/quic-go/quic-go"
 )
 
 const (
-	// maxStreamsPendingDelivery is the limit of streams pending to be delivered, per conn x per outbox.
-	// Unqueueable streams are aborted.
-	// This handles slow application consumers.
-	maxStreamsPendingDelivery = 8
+	// maxLibp2pStreamsPendingDelivery bounds only the libp2p stream queue.
+	maxLibp2pStreamsPendingDelivery = 8
 	// maxStreamsPendingClassify limits concurrent stream classification per conn.
 	// This handles sustained packet loss and malicious peers.
 	maxStreamsPendingClassify = 4
 	// maxConnsPendingDelivery is the limit of conns pending delivery to the downstream stack, per stack.
 	maxConnsPendingDelivery = 16
-
-	classifyTimeout = 5 * time.Second
 )
+
+var classifyTimeout = func() *atomic.Int64 {
+	d := new(atomic.Int64)
+	d.Store(int64(5 * time.Second))
+	return d
+}()
+
+var helloTimeout = func() *atomic.Int64 {
+	d := new(atomic.Int64)
+	d.Store(int64(5 * time.Second))
+	return d
+}()
+
+var goAwayTimeout = time.Second
 
 type side uint32
 
@@ -37,7 +52,7 @@ const (
 )
 
 // SharedTransport owns a QUIC endpoint shared by libp2p and ethp2p.
-// The application owns its shutdown; ethp2p.Stack only borrows its connections.
+// The application owns endpoint shutdown; ethp2p.Stack owns only its views.
 // A closed transport cannot be restarted.
 type SharedTransport struct {
 	raw        *quic.Transport
@@ -55,7 +70,12 @@ type SharedTransport struct {
 
 	// interest records, as a bitmap of side values, the sides whose transport
 	// the application requested. Views for other sides are released at once.
-	interest atomic.Uint32
+	interest  atomic.Uint32
+	helloMu   sync.RWMutex
+	hello     Hello
+	hasHello  bool
+	sink      Sink // protected by helloMu; immutable after Bind
+	sinkBound chan struct{}
 	// libListening is set by the first Libp2pTransport.Listen and never cleared.
 	libListening atomic.Bool
 	// libMu serializes libp2p offers with listener detachment, so no view can
@@ -70,9 +90,13 @@ type SharedTransport struct {
 	lnOnce sync.Once
 	lnErr  error
 
-	// wg tracks every goroutine owned by the transport: the accept loop
-	// plus, per sharedConn, the drainers and per-stream classifiers.
-	// shutdown waits on it after closing the endpoint.
+	// lifetimeMu gates external reservations against cancellation of ctx, the
+	// single source of truth for shutdown. Tracked parents may add children
+	// while shutdown waits, but no external caller may revive a drained wg.
+	lifetimeMu sync.Mutex
+	// wg tracks listener startup, outbound Dial reservations, and all accept,
+	// dispatcher, classifier, control and sink pump goroutines. Dial transfers
+	// its reservation to an admitted pump; shutdown joins them after raw.Close.
 	wg sync.WaitGroup
 }
 
@@ -90,14 +114,22 @@ func NewShared(key *PrivKey, packetConn net.PacketConn, profile Profile) (*Share
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
+	resetBytes, err := hkdf.Key(sha256.New, key.Bytes(), nil, "ethp2p stateless reset", 32)
+	if err != nil {
+		cancel()
+		return nil, err
+	}
+	var resetKey quic.StatelessResetKey
+	copy(resetKey[:], resetBytes)
 	t := &SharedTransport{
-		raw:        &quic.Transport{Conn: packetConn},
+		raw:        &quic.Transport{Conn: packetConn, StatelessResetKey: &resetKey},
 		handshaker: handshaker,
 		profile:    profile,
 		ctx:        ctx,
 		cancel:     cancel,
 		libQ:       make(chan quicreuse.QUICConn, maxConnsPendingDelivery),
 		ethQ:       make(chan Conn, maxConnsPendingDelivery),
+		sinkBound:  make(chan struct{}),
 		libDone:    make(chan struct{}),
 	}
 
@@ -119,11 +151,8 @@ func (t *SharedTransport) Libp2p() quicreuse.QUICTransport {
 	return &Libp2pTransport{t}
 }
 
-// Ethp2p returns the ethp2p transport and registers interest in ethp2p views.
-// Until the first call, the ethp2p view of every new connection is released
-// immediately, so request it before connections arrive.
+// Ethp2p returns the ethp2p transport. SetHello registers interest in views.
 func (t *SharedTransport) Ethp2p() *Ethp2pTransport {
-	t.interest.Or(uint32(sideEthp2p))
 	return &Ethp2pTransport{t}
 }
 
@@ -150,18 +179,34 @@ func (t *SharedTransport) start() error {
 	return t.ensureListener()
 }
 
-// offerEthp2p hands the ethp2p view of a new connection to ethQ. It releases
-// the view instead when ethp2p was never requested or ethQ is full; the
-// libp2p view of the same connection is offered independently.
+// offerEthp2p starts a bound sink pump or queues an unbound view in ethQ.
+// Unclaimed views and unbound queue overflow release only the ethp2p view;
+// libp2p delivery is independent.
 func (t *SharedTransport) offerEthp2p(c *ethp2pConn) {
 	if t.interest.Load()&uint32(sideEthp2p) == 0 {
-		c.closeSide(sideEthp2p, appNoError, "unclaimed")
+		_ = c.Close()
+		return
+	}
+	if err := c.startControl(t.helloSnapshot()); err != nil {
+		_ = c.Close()
+		return
+	}
+	t.helloMu.RLock()
+	sink := t.sink
+	t.helloMu.RUnlock()
+	if sink != nil {
+		t.wg.Go(func() {
+			if err := t.admit(t.ctx, c, sink); err == nil {
+				t.pump(c, sink)
+			}
+		})
 		return
 	}
 	select {
 	case t.ethQ <- c:
 	default:
-		c.closeSide(sideEthp2p, appFailure, "delivery queue full")
+		// A blocked Hello must not delay libp2p delivery or the next accept.
+		t.wg.Go(func() { _ = c.CloseWithCode(protocol.Overloaded) })
 	}
 }
 
@@ -219,6 +264,12 @@ func (t *SharedTransport) ensureListener() error {
 		return nil
 	}
 	t.lnOnce.Do(func() {
+		release, ok := t.reserve()
+		if !ok {
+			t.lnErr = ErrClosed
+			return
+		}
+		defer release()
 		ln, err := t.raw.Listen(t.handshaker.serverConfig(), t.profile.quicConfig())
 		if err != nil {
 			t.lnErr = err
@@ -246,6 +297,7 @@ func (t *SharedTransport) acceptLoop(ln *quic.Listener) {
 			sc := newSharedConn(raw, &t.wg, acceptedPeerID(raw))
 			t.offerEthp2p(sc.ethp2p())
 			t.offerLibp2p(sc.libp2p())
+			sc.startDispatchers()
 		default:
 			_ = raw.CloseWithError(appFailure, "unsupported negotiated protocol")
 		}
@@ -267,10 +319,24 @@ func acceptedPeerID(raw *quic.Conn) PeerID {
 // its goroutines. Closing the endpoint unblocks stream acceptance and
 // classification on every connection, including views still queued for delivery.
 func (t *SharedTransport) shutdown() error {
+	t.lifetimeMu.Lock()
 	t.cancel()
+	t.lifetimeMu.Unlock()
 	err := t.raw.Close()
 	t.wg.Wait()
 	return err
+}
+
+// reserve keeps a caller and any goroutines it starts owned by shutdown.
+// A successful reservation must be released, or transferred to one child.
+func (t *SharedTransport) reserve() (release func(), ok bool) {
+	t.lifetimeMu.Lock()
+	defer t.lifetimeMu.Unlock()
+	if t.ctx.Err() != nil {
+		return nil, false
+	}
+	t.wg.Add(1)
+	return t.wg.Done, true
 }
 
 //
@@ -278,22 +344,28 @@ func (t *SharedTransport) shutdown() error {
 //////////////////////
 
 type sharedConn struct {
-	conn *quic.Conn
-	sem  chan struct{}
+	outbound bool
+	conn     *quic.Conn
+	created  time.Time // one Hello deadline, including control-stream arrival
+	biSem    chan struct{}
+	uniSem   chan struct{}
 	// Each view's context ends when that view closes or the connection does;
 	// pending operations on the view wait on it.
 	libp2pCtx    context.Context
 	cancelLibp2p context.CancelCauseFunc
 	ethp2pCtx    context.Context
 	cancelEthp2p context.CancelCauseFunc
-	// wg owns every goroutine started for this connection, so transport
-	// shutdown waits for the dispatchers and their classifiers.
+	// wg owns this connection's control, dispatcher and sink goroutines.
+	// Starts require a tracked parent: the accept loop or a Dial reservation.
 	wg *sync.WaitGroup
 
 	// delivery queues for classified incoming streams
-	libp2pBi  chan *quic.Stream
-	ethp2pBi  chan *quic.Stream
-	ethp2pUni chan *quic.ReceiveStream
+	libp2pBi       chan *quic.Stream
+	ethp2pBi       *streamQueue[selectedBi]
+	ethp2pUni      *streamQueue[selectedUni]
+	controlIn      chan *quic.ReceiveStream
+	controlClaimed atomic.Bool
+	control        controlState
 
 	// View-closed bitfield over sideLibp2p|sideEthp2p. The raw connection
 	// closes once both views are closed, so closing one view never kills
@@ -304,9 +376,20 @@ type sharedConn struct {
 	remote PeerID
 }
 
+type selectedBi struct {
+	stream   *quic.Stream
+	selector protocol.Selector
+}
+
+type selectedUni struct {
+	stream   *quic.ReceiveStream
+	selector protocol.Selector
+	frameLen int
+}
+
 // newSharedConn splits an ethp2p_0 connection into the shared state backing its
-// two views and starts the stream dispatchers on wg. Callers build the views
-// with ethp2p() and libp2p().
+// two views. Callers initialize or release the control protocol before starting
+// dispatchers, so an inbound violation cannot race outbound control creation.
 //
 // remote is the peer identity the handshake authenticated. An ethp2p_0
 // connection only reaches this point after the verify callback accepted the
@@ -316,23 +399,31 @@ func newSharedConn(raw *quic.Conn, wg *sync.WaitGroup, remote PeerID) *sharedCon
 	ethp2pCtx, cancelEthp2p := context.WithCancelCause(raw.Context())
 	sc := &sharedConn{
 		conn:         raw,
+		created:      time.Now(),
 		libp2pCtx:    libp2pCtx,
 		cancelLibp2p: cancelLibp2p,
 		ethp2pCtx:    ethp2pCtx,
 		cancelEthp2p: cancelEthp2p,
 		wg:           wg,
 		remote:       remote,
-		sem:          make(chan struct{}, maxStreamsPendingClassify),
-		libp2pBi:     make(chan *quic.Stream, maxStreamsPendingDelivery),
-		ethp2pBi:     make(chan *quic.Stream, maxStreamsPendingDelivery),
-		ethp2pUni:    make(chan *quic.ReceiveStream, maxStreamsPendingDelivery),
+		biSem:        make(chan struct{}, maxStreamsPendingClassify),
+		uniSem:       make(chan struct{}, maxStreamsPendingClassify),
+		libp2pBi:     make(chan *quic.Stream, maxLibp2pStreamsPendingDelivery),
+		ethp2pBi:     newStreamQueue[selectedBi](),
+		ethp2pUni:    newStreamQueue[selectedUni](),
+		controlIn:    make(chan *quic.ReceiveStream, 1),
 	}
+	sc.control.helloReady = make(chan struct{})
 	for range maxStreamsPendingClassify {
-		sc.sem <- struct{}{}
+		sc.biSem <- struct{}{}
+		sc.uniSem <- struct{}{}
 	}
-	wg.Go(sc.drainBidi)
-	wg.Go(sc.drainUni)
 	return sc
+}
+
+func (c *sharedConn) startDispatchers() {
+	c.wg.Go(c.drainBidi)
+	c.wg.Go(c.drainUni)
 }
 
 // remotePeerID returns the identity authenticated for the remote endpoint.
@@ -342,9 +433,9 @@ func (c *sharedConn) remotePeerID() PeerID { return c.remote }
 func (c *sharedConn) closeSide(want side, code quic.ApplicationErrorCode, reason string) {
 	switch want {
 	case sideLibp2p:
-		c.cancelLibp2p(errViewClosed)
+		c.cancelLibp2p(ErrViewClosed)
 	case sideEthp2p:
-		c.cancelEthp2p(errViewClosed)
+		c.cancelEthp2p(&ViewClosedError{Code: protocol.Closing})
 	}
 	// Or returns the pre-OR value. RMW atomicity means no other close
 	// can land between its read and write, so old|want is the post-OR value.
@@ -376,8 +467,7 @@ func (c *sharedConn) drainLibp2pQueue() {
 	for {
 		select {
 		case stream := <-c.libp2pBi:
-			stream.CancelRead(streamReset)
-			stream.CancelWrite(streamReset)
+			resetBi(stream, protocol.Closing)
 		default:
 			return
 		}
@@ -385,16 +475,11 @@ func (c *sharedConn) drainLibp2pQueue() {
 }
 
 func (c *sharedConn) drainEthp2pQueues() {
-	for {
-		select {
-		case stream := <-c.ethp2pBi:
-			stream.CancelRead(streamReset)
-			stream.CancelWrite(streamReset)
-		case stream := <-c.ethp2pUni:
-			stream.CancelRead(streamReset)
-		default:
-			return
-		}
+	for _, s := range c.ethp2pBi.close() {
+		resetBi(s.stream, protocol.Closing)
+	}
+	for _, s := range c.ethp2pUni.close() {
+		s.stream.CancelRead(quicCode(protocol.Closing))
 	}
 }
 
@@ -412,61 +497,61 @@ func (c *sharedConn) libp2p() quicreuse.QUICConn {
 // The semaphore limits the number of concurrent classifications.
 func (c *sharedConn) drainBidi() {
 	ctx := c.conn.Context()
-
 	for {
 		select {
-		case <-c.sem:
+		case <-c.biSem:
 		case <-ctx.Done():
 			return
 		}
-
 		stream, err := c.conn.AcceptStream(ctx)
 		if err != nil {
-			c.sem <- struct{}{}
+			c.biSem <- struct{}{}
 			if ctx.Err() == nil {
 				slog.Warn("failed to accept stream", "err", err)
 			}
 			return
 		}
-
 		c.wg.Go(func() {
-			defer func() { c.sem <- struct{}{} }()
-
-			isEthp2p, err := classify(ctx, stream)
+			defer func() { c.biSem <- struct{}{} }()
+			isEthp2p, selector, err := classifyBi(stream)
 			if err != nil {
-				slog.Debug("failed to classify stream", "err", err)
-				stream.CancelRead(streamReset)
-				stream.CancelWrite(streamReset)
-				return
-			}
-
-			queue := c.libp2pBi
-			view := c.libp2pCtx
-			drain := c.drainLibp2pQueue
-			if isEthp2p {
-				queue = c.ethp2pBi
-				view = c.ethp2pCtx
-				drain = c.drainEthp2pQueues
-			}
-			if view.Err() != nil {
-				stream.CancelRead(streamReset)
-				stream.CancelWrite(streamReset)
-				return
-			}
-
-			select {
-			case queue <- stream:
-				if view.Err() != nil {
-					drain()
+				if ctx.Err() == nil {
+					if peerReset(err) {
+						stream.CancelWrite(quicCode(protocol.Unspecified))
+					} else {
+						resetBi(stream, classificationCode(err))
+					}
 				}
-			case <-view.Done():
-				stream.CancelRead(streamReset)
-				stream.CancelWrite(streamReset)
-			case <-ctx.Done():
-				// connection was closed, no stream-level cleanup needed
+				return
+			}
+			if isEthp2p {
+				if c.ethp2pCtx.Err() != nil {
+					resetBi(stream, protocol.Closing)
+					return
+				}
+				if selector == protocol.ControlSelector {
+					resetBi(stream, protocol.ControlViolation)
+					c.controlViolation()
+					return
+				}
+				// The send side stays open until the protocol ends it, so a
+				// queued bidi stream holds credit even after receiving FIN.
+				if !c.ethp2pBi.push(selectedBi{stream, selector}) {
+					resetBi(stream, protocol.Closing)
+				}
+				return
+			}
+			if c.libp2pCtx.Err() != nil {
+				resetBi(stream, protocol.Closing)
+				return
+			}
+			select {
+			case c.libp2pBi <- stream:
+				if c.libp2pCtx.Err() != nil {
+					c.drainLibp2pQueue()
+				}
 			default:
-				stream.CancelRead(streamReset)
-				stream.CancelWrite(streamReset)
+				resetBi(stream, protocol.Overloaded)
 			}
 		})
 	}
@@ -475,90 +560,134 @@ func (c *sharedConn) drainBidi() {
 type peekableStream interface {
 	io.Reader
 	Peek([]byte) (int, error)
-	CancelRead(quic.StreamErrorCode)
 	SetReadDeadline(time.Time) error
 }
 
-// classify identifies the destination from the first frame's length prefix and
-// first payload byte without consuming bytes. '/' routes to libp2p; any other
-// byte routes to ethp2p. It does not validate the full frame.
-func classify[S peekableStream](ctx context.Context, stream S) (ethp2p bool, err error) {
-	stop := context.AfterFunc(ctx, func() { stream.CancelRead(streamReset) })
-	defer stop()
-
-	if err := stream.SetReadDeadline(time.Now().Add(classifyTimeout)); err != nil {
-		return false, err
+// classifyBi consumes the selector for ethp2p, but leaves libp2p's head intact.
+func classifyBi[S peekableStream](stream S) (ethp2p bool, selector protocol.Selector, err error) {
+	if err := stream.SetReadDeadline(time.Now().Add(time.Duration(classifyTimeout.Load()))); err != nil {
+		return false, 0, err
 	}
 	defer func() {
-		if clearErr := stream.SetReadDeadline(time.Time{}); err == nil {
-			err = clearErr
-		}
+		_ = stream.SetReadDeadline(time.Time{})
 	}()
-
-	peekExact := func(dst []byte) error {
-		n, err := stream.Peek(dst)
-		if n == len(dst) {
-			return nil
-		}
-		if err != nil {
-			return err
-		}
-		return io.ErrUnexpectedEOF
+	var head [2]byte
+	if _, err := stream.Peek(head[:1]); err != nil {
+		return false, 0, err
 	}
-
-	var buf [varint.MaxLenUvarint63 + 1]byte
-	for prefixLen := 1; prefixLen <= varint.MaxLenUvarint63; prefixLen++ {
-		if err := peekExact(buf[:prefixLen]); err != nil {
-			return false, err
-		}
-		if buf[prefixLen-1]&byte(0x80) != 0 {
-			continue
-		}
-
-		payloadLen, _, err := varint.FromUvarint(buf[:prefixLen])
-		if err != nil {
-			return false, err
-		}
-		if payloadLen == 0 {
-			return false, errEmptyFirstFrame
-		}
-		if err := peekExact(buf[:prefixLen+1]); err != nil {
-			return false, err
-		}
-		return buf[prefixLen] != '/', nil
+	if head[0] >= 1 && head[0] <= 10 {
+		selector, err := protocol.ReadSelector(stream)
+		return true, selector, err
 	}
-	return false, errInvalidFrame
+	if _, err := stream.Peek(head[:2]); err != nil {
+		return false, 0, err
+	}
+	if head[1] == '/' {
+		return false, 0, nil
+	}
+	return false, 0, protocol.ErrInvalidSelectors
 }
 
-// drainUni routes all incoming unidirectional streams to ethp2p; libp2p uses none.
-// A full queue holds at most one additional accepted stream here and stops
-// acceptance, leaving QUIC to enforce stream and flow-control limits. This
-// wait does not occupy bidirectional classifier slots.
+func classifyUni(stream *quic.ReceiveStream) (protocol.Selector, int, error) {
+	// A truncated frame followed by FIN has no live sender side to notify.
+	if err := stream.SetReadDeadline(time.Now().Add(time.Duration(classifyTimeout.Load()))); err != nil {
+		return 0, 0, err
+	}
+	defer func() { _ = stream.SetReadDeadline(time.Time{}) }()
+	var frame [11]byte
+	if _, err := stream.Peek(frame[:1]); err != nil {
+		return 0, 0, err
+	}
+	if frame[0] < 1 || frame[0] > 10 {
+		return 0, 0, protocol.ErrInvalidSelectors
+	}
+	frameLen := 1 + int(frame[0])
+	if _, err := stream.Peek(frame[:frameLen]); err != nil {
+		return 0, 0, err
+	}
+	selector, err := protocol.ReadSelector(bytes.NewReader(frame[:frameLen]))
+	return selector, frameLen, err
+}
+
+func classificationCode(err error) protocol.Code {
+	if errors.Is(err, os.ErrDeadlineExceeded) || errors.Is(err, context.DeadlineExceeded) {
+		return protocol.Timeout
+	}
+	if timeout, ok := errors.AsType[net.Error](err); ok && timeout.Timeout() {
+		return protocol.Timeout
+	}
+	return protocol.BadSelector
+}
+
+func peerReset(err error) bool {
+	reset, ok := errors.AsType[*quic.StreamError](err)
+	return ok && reset.Remote
+}
+
+func quicCode(code protocol.Code) quic.StreamErrorCode { return quic.StreamErrorCode(code.Wire()) }
+
+func resetBi(stream *quic.Stream, code protocol.Code) {
+	stream.CancelRead(quicCode(code))
+	stream.CancelWrite(quicCode(code))
+}
+
+// drainUni classifies unidirectional streams independently of bidirectional streams.
 func (c *sharedConn) drainUni() {
 	ctx := c.conn.Context()
-
 	for {
+		select {
+		case <-c.uniSem:
+		case <-ctx.Done():
+			return
+		}
 		stream, err := c.conn.AcceptUniStream(ctx)
 		if err != nil {
+			c.uniSem <- struct{}{}
 			if ctx.Err() == nil {
 				slog.Warn("failed to accept stream", "err", err)
 			}
 			return
 		}
-		if c.ethp2pCtx.Err() != nil {
-			stream.CancelRead(streamReset)
-			continue
-		}
-		select {
-		case c.ethp2pUni <- stream:
-			if c.ethp2pCtx.Err() != nil {
-				c.drainEthp2pQueues()
+		c.wg.Go(func() {
+			defer func() { c.uniSem <- struct{}{} }()
+			selector, frameLen, err := classifyUni(stream)
+			if err == nil && selector == protocol.ControlSelector {
+				// Control bypasses delivery queues and is owned by the view.
+				var frame [11]byte
+				_, err = io.ReadFull(stream, frame[:frameLen])
 			}
-		case <-c.ethp2pCtx.Done():
-			stream.CancelRead(streamReset)
-		case <-ctx.Done():
-			// connection was closed, no stream-level cleanup needed
-			return
-		}
+			if err != nil {
+				if ctx.Err() == nil && !peerReset(err) {
+					stream.CancelRead(quicCode(classificationCode(err)))
+				}
+				return
+			}
+			if c.ethp2pCtx.Err() != nil {
+				stream.CancelRead(quicCode(protocol.Closing))
+				return
+			}
+			if selector == protocol.ControlSelector {
+				if !c.controlClaimed.CompareAndSwap(false, true) {
+					stream.CancelRead(quicCode(protocol.ControlViolation))
+					c.controlViolation()
+					return
+				}
+				c.control.mu.Lock()
+				if c.ethp2pCtx.Err() != nil {
+					code := c.control.peerCancel
+					c.control.mu.Unlock()
+					stream.CancelRead(quicCode(code))
+					return
+				}
+				c.control.peer = stream
+				// Only the first control stream enters this one-slot channel.
+				c.controlIn <- stream
+				c.control.mu.Unlock()
+				return
+			}
+			if !c.ethp2pUni.push(selectedUni{stream, selector, frameLen}) {
+				stream.CancelRead(quicCode(protocol.Closing))
+			}
+		})
 	}
 }

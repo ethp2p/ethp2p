@@ -4,6 +4,7 @@ import (
 	"context"
 
 	ethp2p "github.com/ethp2p/ethp2p"
+
 	bcastpb "github.com/ethp2p/ethp2p/broadcast/pb"
 	"github.com/ethp2p/ethp2p/transport"
 )
@@ -17,8 +18,6 @@ type engineEventKind uint8
 const (
 	evChannelCreated engineEventKind = iota + 1
 	evChannelRemoved
-	evPeerEvent
-	evStreamEvent
 	evPeerHandshake
 	evPeerGone
 	evPeerSubscribed
@@ -28,8 +27,6 @@ const (
 type engineEvent struct {
 	kind      engineEventKind
 	channelID ChannelID
-	appPeer   *ethp2p.Peer        // evPeerEvent
-	stream    ethp2p.StreamEvent  // evStreamEvent
 	peer      *PeerConn           // handshake, departure, and subscription events
 	channels  []ChannelID         // evPeerHandshake
 	err       error               // evPeerHandshake
@@ -52,7 +49,7 @@ type channelEvent interface {
 type channelChunkStream struct {
 	peerID transport.PeerID
 	frame  *bcastpb.Chunk_Header
-	stream transport.ReceiveStream
+	stream ethp2p.ReceiveStream
 }
 
 // channelChunkData is posted by a read goroutine (spawned by session) after

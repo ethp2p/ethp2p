@@ -8,25 +8,35 @@
 //
 // [NewShared] wraps a packet connection. Lend [SharedTransport.Libp2p] to
 // libp2p through quicreuse.ConnManager.LendTransport. The application passes
-// connections from [Ethp2pTransport.Accept] and [Ethp2pTransport.Dial] to
-// ethp2p.Stack.ServeConn. The first [Libp2pTransport.Listen] or
-// [Ethp2pTransport.Accept] starts listening.
+// the ethp2p endpoint to ethp2p.NewStack, registers protocols, and calls Stack.Start.
+// Stack.Start calls [Ethp2pTransport.Bind] to install a [Sink] and start listening.
+// Unbound users can still call [Ethp2pTransport.SetHello], [Ethp2pTransport.Accept],
+// and [Ethp2pTransport.Dial] directly. The first Bind, Accept, or
+// [Libp2pTransport.Listen] starts listening.
 // [SharedTransport.PeerID], [SharedTransport.PublicKey], and
 // [SharedTransport.Addr] report endpoint identity and address without
 // registering interest in either connection view.
 //
-// Calling [SharedTransport.Libp2p] or [SharedTransport.Ethp2p] registers
-// interest in that side's connection views. Until then, the transport releases
+// Calling [SharedTransport.Libp2p] registers interest in libp2p views;
+// [Ethp2pTransport.SetHello] or [Ethp2pTransport.Bind] registers ethp2p interest. Until then,
+// the transport releases
 // that side's view of every new connection immediately, so a process that
-// never uses a side never accumulates its views. Request both transports
-// before connections arrive. Each interested side has a bounded delivery
-// queue; a full queue releases only that side's view.
+// never uses a side never accumulates its views. Configure Hello before
+// connections arrive. Unbound connection delivery has a bounded queue;
+// a full queue releases only that side's view. Bound ethp2p views bypass this
+// queue and run a transport-owned pump.
+//
+// Bind may succeed once. Afterwards Accept and SetHello return [ErrSinkBound].
+// The pump waits for Hello, calls Sink.Admit, and delivers streams only for
+// admitted views. Dial performs admission synchronously in its caller before
+// starting the stream loops and returning. Sink.Closed fires once after both
+// loops finish and the admitted view is released; rejected views get no Closed.
 //
 // The application owns endpoint shutdown. [SharedTransport.Close] closes all
 // connections and stops listening. [Libp2pTransport.Close] is a no-op; closing
 // its listener detaches libp2p and releases its queued views while ethp2p
-// continues. Close the libp2p host first, then SharedTransport, then the
-// supplied packet connection. Stack.ServeConn borrows connections and never
+// continues. Close Stack first, then protocol workers and the libp2p host,
+// then SharedTransport, then the supplied packet connection. Stack never
 // closes the endpoint. On a shared connection, closing one view releases only
 // that view. Its pending and later accept, open, and datagram calls fail, and
 // streams arriving for it are reset. Streams already handed out remain usable
@@ -47,7 +57,8 @@
 // The shared listener and [Ethp2pTransport.Dial] authenticate secp256k1 identities
 // using the libp2p TLS certificate format. Dial can require a specific [PeerID].
 // The handshake verify callback is the security boundary; [Conn.RemotePeerID]
-// reports the identity it authenticated.
+// reports the identity it authenticated. NewShared derives a stable QUIC
+// stateless reset key from the private identity key with HKDF-SHA256.
 //
 // # Connection views
 //
@@ -59,21 +70,34 @@
 // # Stream allocation
 //
 // Every ethp2p stream begins with a selector frame: an unsigned-varint payload
-// length followed by the selector's unsigned-varint encoding. The first
-// unidirectional stream from each endpoint is its selector advertisement; it
-// begins with the reserved advertisement selector frame, then carries the
-// endpoint's selector frames until FIN.
+// length followed by the selector's unsigned-varint encoding. The dispatcher
+// owns selector zero as one outbound and one inbound control stream per view.
+// [Ethp2pTransport.SetHello] snapshots the Hello sent first on each new view; [Conn.PeerHello]
+// waits for the peer's validated Hello and returns its own copy.
+// [Conn.CloseWithCode] sends GoAway and FIN before releasing the view. A peer
+// GoAway, FIN, or reset also releases the view. View methods then return a
+// [ViewClosedError] with the stack code and closure origin; [ErrViewClosed]
+// matches all control-protocol closures. GoAway can be overtaken by connection
+// close if this view is the last one on the physical connection.
+// The peer's closure is answered with FIN alone. Raw connection errors remain
+// quic-go errors, without mapping their codes. Dial before SetHello or Bind
+// returns [ErrNoHello]; unbound Accept waits for a claimed view.
 //
-// The shared dispatcher classifies only incoming bidirectional streams. It
-// routes one to libp2p when the first frame's payload starts with '/', as
-// libp2p multistream-select frames do; other nonempty payloads route to ethp2p.
+// For each incoming bidirectional stream, the dispatcher checks the first byte.
+// Bytes 1 through 10 begin an ethp2p selector frame. Otherwise a second byte
+// of '/' identifies libp2p, and both bytes remain available to libp2p. All
+// other heads are reset with protocol.BadSelector. Unidirectional streams are
+// always ethp2p because libp2p opens none.
 //
-// Classification leaves all bytes available to the receiving stack. It reads
-// only the length prefix and first payload byte, not the full frame. Invalid
-// prefixes, empty payloads, classification timeouts, and full delivery queues
-// reset only the affected stream.
-//
-// Incoming unidirectional streams route directly to ethp2p because libp2p does
-// not open unidirectional QUIC streams. QUIC datagrams are exposed only through
-// the ethp2p Conn and do not require stream classification.
+// The dispatcher validates the complete selector frame under one
+// five-second deadline, then returns the selector with the ethp2p stream.
+// Independent per-connection bounds limit bidirectional and unidirectional
+// classification. Classified non-control streams wait in per-direction queues
+// until the stack accepts them. Each holds stream credit until it completes,
+// so QUIC applies backpressure without resetting streams when a queue grows.
+// Uni classification only peeks at the selector; the receive adapter skips it on
+// its first read, so even a selector-only stream retains credit until read.
+// Classifiers never wait for delivery queue space. [Conn.OpenStream] and
+// [Conn.OpenUniStream] write the selector frame before returning. QUIC
+// datagrams do not require stream classification.
 package transport

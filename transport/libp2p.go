@@ -5,6 +5,7 @@ import (
 	"crypto/tls"
 	"net"
 
+	"github.com/ethp2p/ethp2p/protocol"
 	"github.com/libp2p/go-libp2p/p2p/transport/quicreuse"
 	"github.com/quic-go/quic-go"
 )
@@ -127,8 +128,7 @@ func (c *libp2pConn) AcceptStream(ctx context.Context) (*quic.Stream, error) {
 	select {
 	case stream := <-c.libp2pBi:
 		if c.libp2pCtx.Err() != nil {
-			stream.CancelRead(streamReset)
-			stream.CancelWrite(streamReset)
+			resetBi(stream, protocol.Closing)
 			return nil, context.Cause(c.libp2pCtx)
 		}
 		return stream, nil

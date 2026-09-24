@@ -365,8 +365,8 @@ func (s *Stack) Init() error
 func (s *Stack) ServeConn(context.Context, transport.Conn) error
 ```
 
-The current `Stack` has since become a subsystem router with `RegisterSubsystem`, `NotifyPeers`,
-`NotifyStreams`, `SetPolicy`, and `ServeConn`.
+The current `Stack` has since become a subsystem router with `Register`, `Notify`, `Next`,
+and the connection ownership API implemented in spec 008.
 The proposed connection ownership model still applies.
 At the baseline, `Key` participated in stack validation while transport performed authentication.
 The proposed constructor derives identity from its endpoint:

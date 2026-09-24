@@ -706,55 +706,53 @@ func TestSession_HandleInboundStream_OriginRejects(t *testing.T) {
 }
 
 func TestSession_HandleInboundStream_HaveChunkRejects(t *testing.T) {
-	synctest.Test(t, func(t *testing.T) {
-		strat := newMockStrategy()
-		strat.haveChunk = true
-		inbox := make(chan channelEvent, 16)
-		s := newTestSession(strat, inbox)
+	strat := newMockStrategy()
+	strat.haveChunk = true
+	inbox := make(chan channelEvent, 16)
+	s := newTestSession(strat, inbox)
 
-		stream := &fakeReceiveStream{bytes.NewReader([]byte("data"))}
-		s.handleChunkStream("p1", []byte("data"), 4, stream)
-		synctest.Wait()
+	raw, stream := newWrappedRecordingReceiveStream(t, CHUNK, []byte("data"))
+	s.handleChunkStream("p1", []byte("data"), 4, stream)
+	requireWireCancelCode(t, raw, 3)
 
-		select {
-		case <-inbox:
-			t.Fatal("should reject when HaveChunk=true")
-		default:
-		}
+	select {
+	case <-inbox:
+		t.Fatal("should reject when HaveChunk=true")
+	default:
+	}
 
-		s.Close()
-	})
+	s.Close()
+
 }
 
 func TestSession_HandleInboundStream_SemaphoreFull(t *testing.T) {
-	synctest.Test(t, func(t *testing.T) {
-		strat := newMockStrategy()
-		inbox := make(chan channelEvent, 64)
-		s := newTestSession(strat, inbox)
+	strat := newMockStrategy()
+	inbox := make(chan channelEvent, 64)
+	s := newTestSession(strat, inbox)
 
-		// Fill the semaphore to capacity.
-		for range maxConcurrentReads {
-			s.readSem <- struct{}{}
-		}
+	// Fill the semaphore to capacity.
+	for range maxConcurrentReads {
+		s.readSem <- struct{}{}
+	}
 
-		// This stream should be rejected because the semaphore is full.
-		stream := &fakeReceiveStream{bytes.NewReader([]byte("data"))}
-		s.handleChunkStream("p1", []byte("data"), 4, stream)
-		synctest.Wait()
+	// This stream should be rejected because the semaphore is full.
+	raw, stream := newWrappedRecordingReceiveStream(t, CHUNK, []byte("data"))
+	s.handleChunkStream("p1", []byte("data"), 4, stream)
+	requireWireCancelCode(t, raw, 4)
 
-		select {
-		case <-inbox:
-			t.Fatal("should reject when semaphore is full")
-		default:
-		}
+	select {
+	case <-inbox:
+		t.Fatal("should reject when semaphore is full")
+	default:
+	}
 
-		// Drain semaphore so Close can proceed.
-		for range maxConcurrentReads {
-			<-s.readSem
-		}
+	// Drain semaphore so Close can proceed.
+	for range maxConcurrentReads {
+		<-s.readSem
+	}
 
-		s.Close()
-	})
+	s.Close()
+
 }
 
 func TestSession_HandleChunkData_DedupCancellation(t *testing.T) {

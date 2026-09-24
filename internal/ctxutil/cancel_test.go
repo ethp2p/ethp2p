@@ -13,6 +13,7 @@ func TestOnCancel(t *testing.T) {
 		stop := OnCancel(ctx, func() { close(called) })
 		stop()
 		cancel()
+		stop()
 		select {
 		case <-called:
 			t.Fatal("callback ran after stop")
@@ -46,5 +47,6 @@ func TestOnCancel(t *testing.T) {
 		case <-time.After(time.Second):
 			t.Fatal("stop did not return after callback finished")
 		}
+		stop()
 	})
 }

@@ -12,7 +12,6 @@ import (
 	ethp2p "github.com/ethp2p/ethp2p"
 	"github.com/ethp2p/ethp2p/broadcast"
 	"github.com/ethp2p/ethp2p/protocol"
-	"github.com/ethp2p/ethp2p/transport"
 )
 
 // TestSessionDone verifies that Session.Done() is closed after the
@@ -58,15 +57,16 @@ func TestEngineCloseCleanup(t *testing.T) {
 			channelID := broadcast.ChannelID("close-channel")
 			const probeSelector protocol.Selector = 17
 
-			if _, err := a.stack.RegisterSubsystem("probe", probeSelector); err != nil {
-				t.Fatal(err)
-			}
-			probe, err := b.stack.RegisterSubsystem("probe", probeSelector)
+			localProbe, err := a.stack.Register("probe", []protocol.Selector{probeSelector}, ethp2p.SubsystemConfig{})
 			if err != nil {
 				t.Fatal(err)
 			}
-			probeEvents := make(chan ethp2p.StreamEvent, 1)
-			if err := probe.NotifyStreams(probeEvents); err != nil {
+			probe, err := b.stack.Register("probe", []protocol.Selector{probeSelector}, ethp2p.SubsystemConfig{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			probeWake := make(chan struct{}, 1)
+			if err := probe.Notify(probeWake); err != nil {
 				t.Fatal(err)
 			}
 
@@ -98,28 +98,23 @@ func TestEngineCloseCleanup(t *testing.T) {
 				t.Fatal("Engine.Close blocked on a live peer")
 			}
 
-			a.mu.Lock()
-			if len(a.conns) == 0 {
-				a.mu.Unlock()
-				t.Fatal("node a has no tracked connection")
+			localEvent, ok := localProbe.Next()
+			if !ok || localEvent.Kind != ethp2p.PeerUp {
+				t.Fatal("missing probe peer")
 			}
-			conn := a.conns[0]
-			a.mu.Unlock()
+			peer := localEvent.Peer
 
 			// Engine.Close must not close the borrowed connection: another
 			// subsystem can still use the application's live Stack.
 			probeCtx, probeCancel := context.WithTimeout(t.Context(), defaultTimeout)
 			defer probeCancel()
 			deadline := time.Now().Add(defaultTimeout)
-			out, err := conn.OpenStream(probeCtx)
+			out, err := peer.OpenStream(probeCtx, probeSelector)
 			if err != nil {
 				t.Fatalf("open probe stream after Engine.Close: %v", err)
 			}
 			if err := out.SetDeadline(deadline); err != nil {
 				t.Fatalf("set probe write deadline: %v", err)
-			}
-			if err := protocol.WriteSelector(out, probeSelector); err != nil {
-				t.Fatalf("write probe selector: %v", err)
 			}
 			if _, err := out.Write([]byte("ping")); err != nil {
 				t.Fatalf("write probe request: %v", err)
@@ -128,18 +123,24 @@ func TestEngineCloseCleanup(t *testing.T) {
 				t.Fatalf("close probe request: %v", err)
 			}
 
-			var event ethp2p.StreamEvent
-			select {
-			case event = <-probeEvents:
-			case <-probeCtx.Done():
-				t.Fatalf("receive probe event after Engine.Close: %v", probeCtx.Err())
+			var event ethp2p.Event
+			for event.Kind != ethp2p.StreamIn {
+				if next, ok := probe.Next(); ok {
+					event = next
+					continue
+				}
+				select {
+				case <-probeWake:
+				case <-probeCtx.Done():
+					t.Fatalf("receive probe event after Engine.Close: %v", probeCtx.Err())
+				}
 			}
 			if event.Selector != probeSelector {
 				t.Fatalf("probe selector = %d, want %d", event.Selector, probeSelector)
 			}
-			probeStream, ok := event.Stream.(transport.Stream)
+			probeStream, ok := event.Stream.(ethp2p.Stream)
 			if !ok {
-				t.Fatalf("probe stream type = %T, want transport.Stream", event.Stream)
+				t.Fatalf("probe stream type = %T, want ethp2p.Stream", event.Stream)
 			}
 			if err := probeStream.SetDeadline(deadline); err != nil {
 				t.Fatalf("set probe read deadline: %v", err)

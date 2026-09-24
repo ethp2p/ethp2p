@@ -4,9 +4,12 @@ package transporttest
 import (
 	"context"
 	"net"
+	"net/netip"
 	"testing"
 	"time"
 
+	"github.com/decred/dcrd/dcrec/secp256k1/v4"
+	"github.com/ethp2p/ethp2p/enr"
 	"github.com/ethp2p/ethp2p/transport"
 )
 
@@ -15,6 +18,28 @@ type Endpoint struct {
 	Shared *transport.SharedTransport
 	Eth    *transport.Ethp2pTransport
 	Packet net.PacketConn
+	Key    *transport.PrivKey
+}
+
+// Record signs this endpoint's identity and bound QUIC address at seq.
+func (e *Endpoint) Record(tb testing.TB, seq uint64) *enr.Record {
+	tb.Helper()
+	addr, err := netip.ParseAddrPort(e.Packet.LocalAddr().String())
+	if err != nil {
+		tb.Fatal(err)
+	}
+	ip := addr.Addr().Unmap()
+	var entries []enr.Pair
+	if ip.Is4() {
+		entries = []enr.Pair{enr.IP.Set(ip), enr.QUIC.Set(addr.Port())}
+	} else {
+		entries = []enr.Pair{enr.IP6.Set(ip), enr.QUIC6.Set(addr.Port())}
+	}
+	rec, err := enr.Sign(secp256k1.PrivKeyFromBytes(e.Key.Bytes()), seq, entries...)
+	if err != nil {
+		tb.Fatal(err)
+	}
+	return rec
 }
 
 // NewEndpoint builds an endpoint with a fresh identity and the Interop profile.
@@ -34,7 +59,10 @@ func NewEndpoint(tb testing.TB) *Endpoint {
 		_ = packet.Close()
 		tb.Fatal(err)
 	}
-	endpoint := &Endpoint{Shared: shared, Eth: shared.Ethp2p(), Packet: packet}
+	endpoint := &Endpoint{Shared: shared, Eth: shared.Ethp2p(), Packet: packet, Key: key}
+	if err := endpoint.Eth.SetHello(transport.Hello{}); err != nil {
+		tb.Fatal(err)
+	}
 	tb.Cleanup(func() {
 		_ = shared.Close()
 		_ = packet.Close()

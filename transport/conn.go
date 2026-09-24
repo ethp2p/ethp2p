@@ -2,6 +2,8 @@ package transport
 
 import (
 	"context"
+
+	"github.com/ethp2p/ethp2p/protocol"
 )
 
 // PeerID is the binary multihash representation used by libp2p peer.ID. A
@@ -11,25 +13,31 @@ type PeerID string
 // Conn is the ethp2p view of an authenticated QUIC connection. A Conn can be
 // used concurrently by multiple goroutines.
 type Conn interface {
-	// OpenStream waits for permission to open a bidirectional stream. It returns
-	// when the stream opens, ctx ends, or the connection closes.
-	OpenStream(context.Context) (Stream, error)
-	// AcceptBiStream waits for the next bidirectional stream routed to ethp2p. It
-	// returns when a stream arrives, ctx ends, or the connection closes.
-	AcceptBiStream(context.Context) (Stream, error)
-	// OpenUniStream waits for permission to open a unidirectional send stream.
-	// It returns when the stream opens, ctx ends, or the connection closes.
-	OpenUniStream(context.Context) (SendStream, error)
-	// AcceptUniStream waits for the next unidirectional receive stream. All
-	// incoming unidirectional streams on an ethp2p_0 connection route here.
-	AcceptUniStream(context.Context) (ReceiveStream, error)
+	// Outbound reports whether this view was created by Dial.
+	Outbound() bool
+	// OpenStream waits for permission to open a bidirectional stream and writes
+	// its selector frame before returning it.
+	OpenStream(context.Context, protocol.Selector) (Stream, error)
+	// AcceptStream returns a bidirectional stream with its selector frame consumed.
+	AcceptStream(context.Context) (Stream, protocol.Selector, error)
+	// OpenUniStream waits for permission to open a unidirectional send stream
+	// and writes its selector frame before returning it.
+	OpenUniStream(context.Context, protocol.Selector) (SendStream, error)
+	// AcceptUniStream returns a unidirectional stream that skips its selector
+	// frame on its first Read. The dispatcher consumes control streams separately.
+	AcceptUniStream(context.Context) (ReceiveStream, protocol.Selector, error)
 	// SendDatagram queues payload as one QUIC datagram. It does not wait for
 	// delivery and does not inspect ctx.
 	SendDatagram(context.Context, []byte) error
 	// RecvDatagram waits for the next QUIC datagram. It returns when a datagram
 	// arrives, ctx ends, or the connection closes.
 	RecvDatagram(context.Context) ([]byte, error)
-	// Close releases the ethp2p view. Pending and later accepts, opens, and
+	// PeerHello waits for the peer's validated Hello and returns a fresh copy.
+	// It may be called repeatedly and returns the closure cause if the view closes.
+	PeerHello(context.Context) (Hello, error)
+	// CloseWithCode sends GoAway with a stack code, then releases this view.
+	CloseWithCode(protocol.Code) error
+	// Close is CloseWithCode(protocol.Closing). Pending and later accepts, opens, and
 	// datagram calls fail, and streams arriving for this view are reset. Streams
 	// already handed out remain usable until the physical connection closes.
 	// The QUIC connection closes when both views are released.

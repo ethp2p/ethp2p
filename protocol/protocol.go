@@ -8,10 +8,10 @@ import (
 	"slices"
 )
 
-// AdvertisementSelector identifies the selector advertisement stream.
-const AdvertisementSelector Selector = 0
+// ControlSelector identifies the view's control stream.
+const ControlSelector Selector = 0
 
-// MaxSelectors bounds the number of selectors in one connection advertisement.
+// MaxSelectors bounds the number of selectors in one Hello.
 const MaxSelectors = 1024
 
 var (
@@ -26,6 +26,119 @@ var (
 
 // Selector identifies an ethp2p stream protocol on the wire.
 type Selector uint64
+
+// Code is a stream outcome, scoped to a selector when it is protocol-defined.
+// It is comparable; its zero value is [Unspecified].
+type Code struct {
+	selector Selector
+	value    uint64
+	protocol bool
+}
+
+// Shared stack codes may be sent by either endpoint on any stream.
+var (
+	// Unspecified means no specific reason, including ordinary cancellation.
+	Unspecified = Code{}
+	// Refused means the receiver will not process this stream.
+	Refused = Code{value: 1}
+	// Overloaded means a bounded queue or budget is full.
+	Overloaded = Code{value: 2}
+	// Timeout means a deadline expired.
+	Timeout = Code{value: 3}
+
+	// BadSelector means the stream head was not a valid selector frame.
+	BadSelector = Code{value: 8}
+	// UnsupportedSelector means the selector is not shared on this connection.
+	UnsupportedSelector = Code{value: 9}
+	// Closing means the stack view is closing.
+	Closing = Code{value: 10}
+	// ControlViolation means the control stream protocol was violated.
+	ControlViolation = Code{value: 11}
+	// NoSharedProtocols means no local protocol accepted the peer.
+	NoSharedProtocols = Code{value: 12}
+	// Duplicate means another connection to the same peer was kept.
+	Duplicate = Code{value: 13}
+)
+
+// Code constructs a protocol-namespace outcome for s. Selector zero cannot
+// have protocol-specific outcomes.
+func (s Selector) Code(value uint16) Code {
+	if s == 0 {
+		panic("protocol: selector zero has no protocol outcome codes")
+	}
+	return Code{selector: s, value: uint64(value), protocol: true}
+}
+
+// WireFor returns the QUIC application error code for c on a stream with
+// selector sel. A protocol code for another selector panics. Stack-only codes
+// are encoded as [Unspecified]; only stack-owned paths may send them.
+func (c Code) WireFor(sel Selector) uint64 {
+	if c.protocol && c.selector != sel {
+		panic(fmt.Sprintf("protocol: code for selector %d sent on selector %d", c.selector, sel))
+	}
+	if !c.protocol && c.value > 3 {
+		return Unspecified.Wire()
+	}
+	return c.Wire()
+}
+
+// Wire returns the QUIC application error code for c, value<<1 | namespace,
+// without the checks WireFor applies. It is for the stack's own send paths,
+// which may send stack-only codes. Protocols never hold streams that take a
+// raw code, so they cannot use it to bypass WireFor.
+func (c Code) Wire() uint64 {
+	if c.protocol {
+		return c.value<<1 | 1
+	}
+	return c.value << 1
+}
+
+// ParseCode decodes a received QUIC application error code on a stream with
+// selector sel. Protocol-namespace values remain bound to sel. Unknown stack
+// values decode as [Unspecified].
+func ParseCode(sel Selector, wire uint64) Code {
+	value := wire >> 1
+	if wire&1 != 0 {
+		return Code{selector: sel, value: value, protocol: true}
+	}
+	switch value {
+	case 0, 1, 2, 3, 8, 9, 10, 11, 12, 13:
+		return Code{value: value}
+	default:
+		return Unspecified
+	}
+}
+
+// String formats the outcome for errors and logs.
+func (c Code) String() string {
+	if c.protocol {
+		return fmt.Sprintf("protocol selector %d value %d", c.selector, c.value)
+	}
+	switch c.value {
+	case 0:
+		return "Unspecified"
+	case 1:
+		return "Refused"
+	case 2:
+		return "Overloaded"
+	case 3:
+		return "Timeout"
+	case 8:
+		return "BadSelector"
+	case 9:
+		return "UnsupportedSelector"
+	case 10:
+		return "Closing"
+	case 11:
+		return "ControlViolation"
+	case 12:
+		return "NoSharedProtocols"
+	case 13:
+		return "Duplicate"
+	default:
+		return "Unspecified"
+	}
+}
 
 // AppendFrame appends one frame containing payload to dst.
 func AppendFrame(dst, payload []byte) []byte {
@@ -74,9 +187,6 @@ func ReadFrame(r io.Reader, maxLen int) ([]byte, error) {
 // WriteSelector writes one selector frame in a single write. The selected
 // protocol applies to the rest of the stream; this function does not close w.
 func WriteSelector(w io.Writer, selector Selector) error {
-	if err := ValidateSelector(selector); err != nil {
-		return err
-	}
 	encoded := binary.AppendUvarint(nil, uint64(selector))
 	frame := AppendFrame(nil, encoded)
 	n, err := w.Write(frame)
@@ -123,75 +233,19 @@ func Intersect(a, b []Selector) []Selector {
 	return intersection
 }
 
-// WriteSelectors writes an advertisement stream in one write: the reserved
-// advertisement selector frame followed by the strictly ascending selector
-// frames. It validates the complete list before writing anything and never
-// closes w.
-func WriteSelectors(w io.Writer, selectors []Selector) error {
-	if err := validateSelectors(selectors); err != nil {
-		return err
-	}
-
-	encoded := AppendFrame(nil, binary.AppendUvarint(nil, uint64(AdvertisementSelector)))
-	for _, selector := range selectors {
-		encoded = AppendFrame(encoded, binary.AppendUvarint(nil, uint64(selector)))
-	}
-	n, err := w.Write(encoded)
-	if err == nil && n != len(encoded) {
-		return io.ErrShortWrite
-	}
-	return err
-}
-
-// ReadSelectors reads an advertisement stream. The first frame must contain
-// AdvertisementSelector; subsequent selector frames end at a clean EOF (FIN).
-// Entries must be strictly ascending, within MaxSelectors, and valid for stream
-// use. EOF inside a frame is an error.
-func ReadSelectors(r io.Reader) ([]Selector, error) {
-	header, err := readSelectorFrame(r)
-	if err != nil {
-		return nil, invalidSelectors(err)
-	}
-	if header != AdvertisementSelector {
-		return nil, fmt.Errorf("%w: advertisement starts with selector %d, want %d", ErrInvalidSelectors, header, AdvertisementSelector)
-	}
-
-	selectors := make([]Selector, 0)
-	for {
-		selector, err := readSelectorFrame(r)
-		if err == io.EOF {
-			return selectors, nil
-		}
-		if err != nil {
-			return nil, invalidSelectors(err)
-		}
-		if len(selectors) >= MaxSelectors {
-			return nil, fmt.Errorf("%w: maximum is %d", ErrTooManySelectors, MaxSelectors)
-		}
-		if err := ValidateSelector(selector); err != nil {
-			return nil, err
-		}
-		if len(selectors) > 0 && selector <= selectors[len(selectors)-1] {
-			return nil, fmt.Errorf("%w: selectors must be strictly ascending", ErrInvalidSelectors)
-		}
-		selectors = append(selectors, selector)
-	}
-}
-
-// ValidateSelector rejects the reserved advertisement selector and '/' as
-// stream selectors. '/' is the first byte of libp2p multistream-select frames.
+// ValidateSelector rejects the reserved control selector as a protocol selector.
 func ValidateSelector(selector Selector) error {
 	switch selector {
-	case AdvertisementSelector:
-		return fmt.Errorf("%w: advertisement selector %d", ErrReservedSelector, AdvertisementSelector)
-	case Selector('/'):
-		return fmt.Errorf("%w: %d conflicts with libp2p", ErrReservedSelector, selector)
+	case ControlSelector:
+		return fmt.Errorf("%w: control selector %d", ErrReservedSelector, ControlSelector)
 	default:
 		return nil
 	}
 }
 
-func validateSelectors(selectors []Selector) error {
+// ValidateSelectors requires a strictly ascending list of at most MaxSelectors
+// nonzero selectors.
+func ValidateSelectors(selectors []Selector) error {
 	if len(selectors) > MaxSelectors {
 		return fmt.Errorf("%w: maximum is %d", ErrTooManySelectors, MaxSelectors)
 	}

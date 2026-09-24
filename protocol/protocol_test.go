@@ -10,6 +10,108 @@ import (
 	"testing"
 )
 
+func TestSelectorCodeIsScopedAndControlSelectorPanics(t *testing.T) {
+	sess := Selector(2)
+	chunk := Selector(3)
+	if sess.Code(1) != sess.Code(1) {
+		t.Fatal("same selector code values differ")
+	}
+	if sess.Code(1) == chunk.Code(1) {
+		t.Fatal("equal values from different selectors compare equal")
+	}
+	if sess.Code(0) == sess.Code(1) {
+		t.Fatal("different values for one selector compare equal")
+	}
+	defer func() {
+		if recover() == nil {
+			t.Fatal("Selector(0).Code did not panic")
+		}
+	}()
+	Selector(0).Code(1)
+}
+
+func TestCodeWireFor(t *testing.T) {
+	selector := Selector(2)
+	other := Selector(3)
+	for _, test := range []struct {
+		name string
+		code Code
+		want uint64
+	}{
+		{name: "Unspecified", code: Unspecified, want: 0},
+		{name: "Refused", code: Refused, want: 2},
+		{name: "Overloaded", code: Overloaded, want: 4},
+		{name: "Timeout", code: Timeout, want: 6},
+		{name: "protocol value zero", code: selector.Code(0), want: 1},
+		{name: "protocol value one", code: selector.Code(1), want: 3},
+		{name: "protocol max uint16", code: selector.Code(^uint16(0)), want: uint64(^uint16(0))<<1 | 1},
+		{name: "BadSelector sent as Unspecified", code: BadSelector, want: 0},
+		{name: "UnsupportedSelector sent as Unspecified", code: UnsupportedSelector, want: 0},
+		{name: "Closing sent as Unspecified", code: Closing, want: 0},
+		{name: "ControlViolation sent as Unspecified", code: ControlViolation, want: 0},
+		{name: "NoSharedProtocols sent as Unspecified", code: NoSharedProtocols, want: 0},
+		{name: "Duplicate sent as Unspecified", code: Duplicate, want: 0},
+		{name: "unassigned stack value 4", code: Code{value: 4}, want: 0},
+		{name: "unassigned stack value 5", code: Code{value: 5}, want: 0},
+		{name: "unassigned stack value 6", code: Code{value: 6}, want: 0},
+		{name: "unassigned stack value 7", code: Code{value: 7}, want: 0},
+		{name: "unassigned stack value 14", code: Code{value: 14}, want: 0},
+		{name: "unassigned large stack value", code: Code{value: 1 << 20}, want: 0},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if got := test.code.WireFor(selector); got != test.want {
+				t.Fatalf("WireFor(%s) = %d, want %d", test.code, got, test.want)
+			}
+		})
+	}
+	assertCodePanics(t, func() { _ = selector.Code(1).WireFor(other) })
+}
+
+func TestParseCode(t *testing.T) {
+	selector := Selector(7)
+	for _, test := range []struct {
+		name string
+		wire uint64
+		want Code
+	}{
+		{name: "Unspecified", wire: 0, want: Unspecified},
+		{name: "Refused", wire: 2, want: Refused},
+		{name: "Overloaded", wire: 4, want: Overloaded},
+		{name: "Timeout", wire: 6, want: Timeout},
+		{name: "BadSelector", wire: 16, want: BadSelector},
+		{name: "UnsupportedSelector", wire: 18, want: UnsupportedSelector},
+		{name: "Closing", wire: 20, want: Closing},
+		{name: "ControlViolation", wire: 22, want: ControlViolation},
+		{name: "NoSharedProtocols", wire: 24, want: NoSharedProtocols},
+		{name: "Duplicate", wire: 26, want: Duplicate},
+		{name: "gap 4", wire: 8, want: Unspecified},
+		{name: "gap 5", wire: 10, want: Unspecified},
+		{name: "gap 6", wire: 12, want: Unspecified},
+		{name: "gap 7", wire: 14, want: Unspecified},
+		{name: "gap 14", wire: 28, want: Unspecified},
+		{name: "large unknown stack value", wire: 1 << 20, want: Unspecified},
+		{name: "protocol value zero", wire: 1, want: selector.Code(0)},
+		{name: "protocol value one", wire: 3, want: selector.Code(1)},
+		{name: "unknown protocol value preserved", wire: 199, want: selector.Code(99)},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if got := ParseCode(selector, test.wire); got != test.want {
+				t.Fatalf("ParseCode(%d) = %s, want %s", test.wire, got, test.want)
+			}
+		})
+	}
+}
+
+func assertCodePanics(t *testing.T, fn func()) {
+	t.Helper()
+	defer func() {
+		if recover() == nil {
+			t.Fatal("operation did not panic")
+		}
+	}()
+	fn()
+}
+
 func TestFrameRoundTrips(t *testing.T) {
 	for _, test := range []struct {
 		name    string
@@ -133,14 +235,14 @@ func TestSelectorFramesRoundTrip(t *testing.T) {
 	}
 }
 
-func TestSelectorReservedValuesAreRejectedOnWriteAndAcceptedOnRead(t *testing.T) {
-	for _, selector := range []Selector{AdvertisementSelector, Selector('/')} {
+func TestSelectorZeroAndSlashAreValidFrames(t *testing.T) {
+	for _, selector := range []Selector{ControlSelector, Selector('/')} {
 		writer := new(recordingWriter)
-		if err := WriteSelector(writer, selector); !errors.Is(err, ErrReservedSelector) {
-			t.Fatalf("WriteSelector(%d) error = %v, want ErrReservedSelector", selector, err)
+		if err := WriteSelector(writer, selector); err != nil {
+			t.Fatalf("WriteSelector(%d): %v", selector, err)
 		}
-		if writer.calls != 0 || writer.Len() != 0 {
-			t.Fatalf("reserved selector wrote %d times and %d bytes", writer.calls, writer.Len())
+		if !bytes.Equal(writer.Bytes(), selectorFrame(selector)) {
+			t.Fatalf("selector frame = %x", writer.Bytes())
 		}
 
 		got, err := ReadSelector(bytes.NewReader(selectorFrame(selector)))
@@ -173,7 +275,7 @@ func TestReadSelectorRejectsInvalidFrames(t *testing.T) {
 }
 
 func TestReadSelectorAcceptsReservedSelectorFrames(t *testing.T) {
-	for _, selector := range []Selector{AdvertisementSelector, Selector('/')} {
+	for _, selector := range []Selector{ControlSelector} {
 		got, err := ReadSelector(bytes.NewReader(selectorFrame(selector)))
 		if err != nil || got != selector {
 			t.Fatalf("ReadSelector(%d) = (%d, %v)", selector, got, err)
@@ -188,13 +290,16 @@ func TestWriteSelectorReportsShortWrite(t *testing.T) {
 }
 
 func TestValidateSelector(t *testing.T) {
-	for _, selector := range []Selector{AdvertisementSelector, Selector('/')} {
+	for _, selector := range []Selector{ControlSelector} {
 		if err := ValidateSelector(selector); !errors.Is(err, ErrReservedSelector) {
 			t.Fatalf("ValidateSelector(%d) = %v, want ErrReservedSelector", selector, err)
 		}
 	}
 	if err := ValidateSelector(1); err != nil {
 		t.Fatalf("ValidateSelector(1) = %v", err)
+	}
+	if err := ValidateSelector(Selector('/')); err != nil {
+		t.Fatalf("ValidateSelector('/'): %v", err)
 	}
 }
 
@@ -225,67 +330,13 @@ func TestIntersect(t *testing.T) {
 	}
 }
 
-func TestWriteReadSelectorsAdvertisement(t *testing.T) {
-	selectors := []Selector{1, 2, 300, math.MaxUint64}
-	writer := new(recordingWriter)
-	if err := WriteSelectors(writer, selectors); err != nil {
-		t.Fatalf("WriteSelectors: %v", err)
+func TestValidateSelectors(t *testing.T) {
+	if err := ValidateSelectors([]Selector{1, 2, 300, math.MaxUint64}); err != nil {
+		t.Fatal(err)
 	}
-	if writer.calls != 1 {
-		t.Fatalf("WriteSelectors made %d writes, want 1", writer.calls)
+	if err := ValidateSelectors(nil); err != nil {
+		t.Fatal(err)
 	}
-	if want := advertisementWire(selectors...); !bytes.Equal(writer.Bytes(), want) {
-		t.Fatalf("advertisement wire = %x, want %x", writer.Bytes(), want)
-	}
-
-	got, err := ReadSelectors(bytes.NewReader(writer.Bytes()))
-	if err != nil {
-		t.Fatalf("ReadSelectors: %v", err)
-	}
-	if !slices.Equal(got, selectors) {
-		t.Fatalf("ReadSelectors = %v, want %v", got, selectors)
-	}
-}
-
-func TestWriteReadEmptyAdvertisement(t *testing.T) {
-	var writer bytes.Buffer
-	if err := WriteSelectors(&writer, nil); err != nil {
-		t.Fatalf("WriteSelectors(empty): %v", err)
-	}
-	if want := selectorFrame(AdvertisementSelector); !bytes.Equal(writer.Bytes(), want) {
-		t.Fatalf("empty advertisement = %x, want header frame %x", writer.Bytes(), want)
-	}
-	got, err := ReadSelectors(bytes.NewReader(writer.Bytes()))
-	if err != nil || len(got) != 0 {
-		t.Fatalf("ReadSelectors(empty): selectors=%v err=%v", got, err)
-	}
-}
-
-func TestReadSelectorsRejectsMissingOrWrongHeader(t *testing.T) {
-	for _, test := range []struct {
-		name string
-		wire []byte
-	}{
-		{name: "missing header"},
-		{name: "selector instead of advertisement header", wire: selectorFrame(1)},
-	} {
-		t.Run(test.name, func(t *testing.T) {
-			if _, err := ReadSelectors(bytes.NewReader(test.wire)); !errors.Is(err, ErrInvalidSelectors) {
-				t.Fatalf("ReadSelectors error = %v, want ErrInvalidSelectors", err)
-			}
-		})
-	}
-}
-
-func TestReadSelectorsRejectsEOFInsideFrame(t *testing.T) {
-	wire := selectorFrame(AdvertisementSelector)
-	wire = append(wire, 2, 1)
-	if _, err := ReadSelectors(bytes.NewReader(wire)); !errors.Is(err, ErrInvalidSelectors) || !errors.Is(err, io.ErrUnexpectedEOF) {
-		t.Fatalf("ReadSelectors error = %v, want ErrInvalidSelectors and io.ErrUnexpectedEOF", err)
-	}
-}
-
-func TestReadSelectorsRejectsInvalidEntries(t *testing.T) {
 	for _, test := range []struct {
 		name    string
 		entries []Selector
@@ -293,87 +344,29 @@ func TestReadSelectorsRejectsInvalidEntries(t *testing.T) {
 	}{
 		{name: "non-ascending", entries: []Selector{2, 1}, want: ErrInvalidSelectors},
 		{name: "duplicate", entries: []Selector{3, 3}, want: ErrInvalidSelectors},
-		{name: "advertisement selector reserved as entry", entries: []Selector{AdvertisementSelector}, want: ErrReservedSelector},
-		{name: "slash reserved as entry", entries: []Selector{Selector('/')}, want: ErrReservedSelector},
+		{name: "control selector reserved", entries: []Selector{ControlSelector}, want: ErrReservedSelector},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			if _, err := ReadSelectors(bytes.NewReader(advertisementWire(test.entries...))); !errors.Is(err, test.want) {
-				t.Fatalf("ReadSelectors error = %v, want %v", err, test.want)
+			if err := ValidateSelectors(test.entries); !errors.Is(err, test.want) {
+				t.Fatalf("ValidateSelectors error = %v, want %v", err, test.want)
 			}
 		})
 	}
-}
-
-func TestReadSelectorsMaxSelectorsBoundary(t *testing.T) {
 	selectors := make([]Selector, MaxSelectors)
 	for i := range selectors {
 		selectors[i] = Selector(i + 1000)
 	}
-	got, err := ReadSelectors(bytes.NewReader(advertisementWire(selectors...)))
-	if err != nil {
-		t.Fatalf("ReadSelectors(%d selectors): %v", MaxSelectors, err)
+	if err := ValidateSelectors(selectors); err != nil {
+		t.Fatalf("ValidateSelectors(%d selectors): %v", MaxSelectors, err)
 	}
-	if len(got) != MaxSelectors {
-		t.Fatalf("selector count = %d, want %d", len(got), MaxSelectors)
-	}
-
-	tooMany := make([]Selector, MaxSelectors+1)
-	for i := range tooMany {
-		tooMany[i] = Selector(i + 1000)
-	}
-	if _, err := ReadSelectors(bytes.NewReader(advertisementWire(tooMany...))); !errors.Is(err, ErrTooManySelectors) {
-		t.Fatalf("ReadSelectors(%d selectors) error = %v, want ErrTooManySelectors", len(tooMany), err)
-	}
-}
-
-func TestWriteSelectorsValidatesBeforeWriting(t *testing.T) {
-	for _, test := range []struct {
-		name      string
-		selectors []Selector
-		want      error
-	}{
-		{name: "duplicate", selectors: []Selector{1, 1}, want: ErrInvalidSelectors},
-		{name: "descending", selectors: []Selector{2, 1}, want: ErrInvalidSelectors},
-		{name: "advertisement selector reserved", selectors: []Selector{AdvertisementSelector}, want: ErrReservedSelector},
-		{name: "slash reserved", selectors: []Selector{Selector('/')}, want: ErrReservedSelector},
-	} {
-		t.Run(test.name, func(t *testing.T) {
-			writer := new(recordingWriter)
-			if err := WriteSelectors(writer, test.selectors); !errors.Is(err, test.want) {
-				t.Fatalf("WriteSelectors error = %v, want %v", err, test.want)
-			}
-			if writer.calls != 0 || writer.Len() != 0 {
-				t.Fatalf("invalid advertisement wrote %d times and %d bytes", writer.calls, writer.Len())
-			}
-		})
-	}
-
-	tooMany := make([]Selector, MaxSelectors+1)
-	for i := range tooMany {
-		tooMany[i] = Selector(i + 1000)
-	}
-	if err := WriteSelectors(io.Discard, tooMany); !errors.Is(err, ErrTooManySelectors) {
-		t.Fatalf("WriteSelectors(%d selectors) error = %v, want ErrTooManySelectors", len(tooMany), err)
-	}
-}
-
-func TestWriteSelectorsReportsShortWrite(t *testing.T) {
-	if err := WriteSelectors(shortWriter{}, []Selector{17}); !errors.Is(err, io.ErrShortWrite) {
-		t.Fatalf("WriteSelectors error = %v, want io.ErrShortWrite", err)
+	if err := ValidateSelectors(append(selectors, 2024)); !errors.Is(err, ErrTooManySelectors) {
+		t.Fatalf("ValidateSelectors too many = %v", err)
 	}
 }
 
 func selectorFrame(selector Selector) []byte {
 	payload := binary.AppendUvarint(nil, uint64(selector))
 	return AppendFrame(nil, payload)
-}
-
-func advertisementWire(selectors ...Selector) []byte {
-	wire := selectorFrame(AdvertisementSelector)
-	for _, selector := range selectors {
-		wire = append(wire, selectorFrame(selector)...)
-	}
-	return wire
 }
 
 type recordingWriter struct {

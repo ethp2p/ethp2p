@@ -64,14 +64,16 @@ func (s *SimnetDriver) init() {
 // NewNode creates a node using simnet for network simulation.
 func (s *SimnetDriver) NewNode(nodeNum int, logger *slog.Logger) (Node, error) {
 	s.init()
-	ip := simnet.IntToPublicIPv4(nodeNum)
+	// simnet indexes endpoints by raw IP bytes. Match the canonical IPv4 form
+	// produced when Connect decodes an ENR endpoint.
+	ip := simnet.IntToPublicIPv4(nodeNum).To4()
 	ns := s.nodeSpecs[nodeNum]
 	ls := simnet.NodeBiDiLinkSettings{
 		Uplink:   simnet.LinkSettings{BitsPerSecond: ns.UploadBWMbps * simnet.Mibps},
 		Downlink: simnet.LinkSettings{BitsPerSecond: ns.DownloadBWMbps * simnet.Mibps},
 	}
 	udpAddr := &net.UDPAddr{IP: ip, Port: DefaultListenPort}
-	conn := s.simnet.NewEndpoint(udpAddr, ls)
+	conn := canonicalSimnetConn{s.simnet.NewEndpoint(udpAddr, ls)}
 
 	var obs broadcast.Observer
 	var statsObs *Observer
@@ -91,10 +93,24 @@ func (s *SimnetDriver) NewNode(nodeNum int, logger *slog.Logger) (Node, error) {
 	s.mu.Lock()
 	s.nodes[ns.Num] = nd
 	s.observers[ns.Num] = statsObs
-	s.ipToNode[string(ip)] = ns.Num
+	s.ipToNode[ip.String()] = ns.Num
 	s.mu.Unlock()
 
 	return nd, nil
+}
+
+// simnet keys routes by raw address bytes. Both ENR and libp2p dial this
+// socket, and they can represent the same IPv4 address with different lengths.
+// Canonicalize at the simulated network boundary so both use the endpoint key.
+type canonicalSimnetConn struct{ net.PacketConn }
+
+func (c canonicalSimnetConn) WriteTo(p []byte, addr net.Addr) (int, error) {
+	if udp, ok := addr.(*net.UDPAddr); ok && udp.IP.To4() != nil {
+		copyAddr := *udp
+		copyAddr.IP = udp.IP.To4()
+		addr = &copyAddr
+	}
+	return c.PacketConn.WriteTo(p, addr)
 }
 
 func (s *SimnetDriver) latencyFunc(p *simnet.Packet) time.Duration {
@@ -102,8 +118,10 @@ func (s *SimnetDriver) latencyFunc(p *simnet.Packet) time.Duration {
 	dstIP := p.To.(*net.UDPAddr).IP
 
 	s.mu.RLock()
-	src := s.ipToNode[string(senderIP)]
-	dst := s.ipToNode[string(dstIP)]
+	// ENR endpoints use four-byte IPv4 addresses; simnet may use the mapped
+	// sixteen-byte form. Index the address, not its backing representation.
+	src := s.ipToNode[senderIP.String()]
+	dst := s.ipToNode[dstIP.String()]
 	s.mu.RUnlock()
 
 	if _, ok := s.latency[src]; !ok {

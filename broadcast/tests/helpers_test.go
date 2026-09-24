@@ -5,7 +5,6 @@ package tests
 import (
 	"context"
 	"errors"
-	"slices"
 	"sync"
 	"testing"
 	"time"
@@ -58,18 +57,10 @@ var strategies = []struct {
 type testNode struct {
 	endpoint *transporttest.Endpoint
 	stack    *ethp2p.Stack
+	bound    bool
 	engine   *broadcast.Engine
 	obs      *testObserver
-	peers    chan *ethp2p.Peer
-	streams  chan ethp2p.StreamEvent
 
-	ctx    context.Context
-	cancel context.CancelFunc
-
-	mu       sync.Mutex
-	conns    []transport.Conn
-	wg       sync.WaitGroup
-	closed   bool
 	closeErr error
 	once     sync.Once
 }
@@ -79,56 +70,27 @@ func newTestNode(t *testing.T) *testNode {
 	endpoint := transporttest.NewEndpoint(t)
 	obs := newTestObserver()
 	cfg := broadcast.EngineConfig{Observer: obs}
-	stack := new(ethp2p.Stack)
-	subsystem, err := stack.RegisterSubsystem("broadcast", broadcast.BCAST, broadcast.SESS, broadcast.CHUNK)
+	stack, err := ethp2p.NewStack(endpoint.Eth, ethp2p.Config{Record: endpoint.Record(t, 1)})
 	if err != nil {
 		t.Fatal(err)
 	}
-	peers := make(chan *ethp2p.Peer, 64)
-	streams := make(chan ethp2p.StreamEvent, 1024)
-	if err := subsystem.NotifyPeers(peers); err != nil {
-		t.Fatal(err)
-	}
-	if err := subsystem.NotifyStreams(streams); err != nil {
-		t.Fatal(err)
-	}
 	engine := broadcast.NewEngine(cfg)
-	ctx, cancel := context.WithCancel(t.Context())
+	if err := engine.Register(stack); err != nil {
+		t.Fatal(err)
+	}
 	n := &testNode{
 		endpoint: endpoint,
 		stack:    stack,
 		engine:   engine,
 		obs:      obs,
-		peers:    peers,
-		streams:  streams,
-		ctx:      ctx,
-		cancel:   cancel,
 	}
-	n.wg.Go(func() { _ = engine.Serve(ctx, peers, streams) })
 	t.Cleanup(func() { _ = n.Close() })
 	return n
 }
 
 func (n *testNode) Close() error {
 	n.once.Do(func() {
-		n.mu.Lock()
-		n.closed = true
-		conns := slices.Clone(n.conns)
-		n.mu.Unlock()
-
-		n.cancel()
-		var closeErr error
-		for _, conn := range conns {
-			closeErr = errors.Join(closeErr, conn.Close())
-		}
-		closeErr = errors.Join(closeErr, n.endpoint.Shared.Close())
-		n.wg.Wait()
-
-		drainQueuedStreams(n.streams)
-		drainQueuedPeers(n.peers)
-		closeErr = errors.Join(closeErr, n.engine.Close())
-
-		n.closeErr = closeErr
+		n.closeErr = errors.Join(n.stack.Close(), n.engine.Close(), n.endpoint.Shared.Close(), n.endpoint.Packet.Close())
 	})
 	return n.closeErr
 }
@@ -329,48 +291,22 @@ func starEdges(n int) []edge {
 // established but does NOT wait for handshakes to complete.
 func connectNodes(t *testing.T, nodes []*testNode, edges []edge) {
 	t.Helper()
+	for _, node := range nodes {
+		if !node.bound {
+			if err := node.stack.Start(); err != nil {
+				t.Fatal(err)
+			}
+			node.bound = true
+		}
+	}
 	for _, e := range edges {
 		from := nodes[e.from]
 		to := nodes[e.to]
-		dialed, accepted := transporttest.Connect(t, from.endpoint, to.endpoint)
-		from.serveConn(dialed)
-		to.serveConn(accepted)
-	}
-}
-
-func (n *testNode) serveConn(conn transport.Conn) {
-	n.mu.Lock()
-	if n.closed {
-		n.mu.Unlock()
-		_ = conn.Close()
-		return
-	}
-	n.conns = append(n.conns, conn)
-	ctx := n.ctx
-	n.wg.Go(func() {
-		_ = n.stack.ServeConn(ctx, conn)
-		_ = conn.Close()
-	})
-	n.mu.Unlock()
-}
-
-func drainQueuedStreams(streams <-chan ethp2p.StreamEvent) {
-	for {
-		select {
-		case event := <-streams:
-			event.Reject()
-		default:
-			return
-		}
-	}
-}
-
-func drainQueuedPeers(peers <-chan *ethp2p.Peer) {
-	for {
-		select {
-		case <-peers:
-		default:
-			return
+		ctx, cancel := context.WithTimeout(t.Context(), defaultTimeout)
+		err := from.stack.Connect(ctx, to.endpoint.Record(t, 1))
+		cancel()
+		if err != nil {
+			t.Fatal(err)
 		}
 	}
 }

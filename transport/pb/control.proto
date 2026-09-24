@@ -1,0 +1,23 @@
+syntax = "proto3";
+package ethp2p.transport;
+
+option go_package = "github.com/ethp2p/ethp2p/transport/pb";
+
+message Control {
+  oneof message {
+    Hello hello = 1;
+    GoAway go_away = 2;
+  }
+}
+
+message Hello {
+  // Selectors this endpoint serves, strictly ascending, at most 1024, none zero.
+  repeated uint64 selectors = 1;
+  // Optional: the sender's current node record (EIP-778 RLP encoding).
+  bytes record = 2;
+}
+
+message GoAway {
+  // A stack-namespace code value (spec 008 section 5.2).
+  uint64 code = 1;
+}

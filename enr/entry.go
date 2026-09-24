@@ -7,25 +7,26 @@ import (
 	"net/netip"
 )
 
-// Key is a typed ENR key. Get decodes its value only when requested.
-type Key[T any] struct {
-	name   string
+// Entry describes a record entry: its key and the codec for its value, which
+// has type T. Get decodes a value only when requested.
+type Entry[T any] struct {
+	key    string
 	encode func(T) ([]byte, error)
 	decode func([]byte) (T, error)
 }
 
-// Entry is a typed key/value pair created with Set for a signed record.
-type Entry struct {
-	name   string
+// Pair is a key/value pair created with Entry.Set, for Sign and Update.
+type Pair struct {
+	key    string
 	encode func() ([]byte, error)
 	err    error
 }
 
-// BytesKey creates a key whose value is an RLP byte string. Returned values
-// are copied so callers cannot mutate a record through Get.
-func BytesKey(name string) Key[[]byte] {
-	return Key[[]byte]{
-		name: name,
+// BytesEntry describes an entry under key whose value is an RLP byte string.
+// Get returns a copy, so callers cannot mutate a record through it.
+func BytesEntry(key string) Entry[[]byte] {
+	return Entry[[]byte]{
+		key: key,
 		encode: func(value []byte) ([]byte, error) {
 			return encodeRLPString(value), nil
 		},
@@ -42,10 +43,11 @@ func BytesKey(name string) Key[[]byte] {
 	}
 }
 
-// UintKey creates a key whose value is an unsigned RLP integer.
-func UintKey(name string) Key[uint64] {
-	return Key[uint64]{
-		name: name,
+// UintEntry describes an entry under key whose value is an unsigned RLP
+// integer.
+func UintEntry(key string) Entry[uint64] {
+	return Entry[uint64]{
+		key: key,
 		encode: func(value uint64) ([]byte, error) {
 			return encodeUint64(value), nil
 		},
@@ -59,9 +61,9 @@ func UintKey(name string) Key[uint64] {
 	}
 }
 
-// IP is the "ip" ENR key, encoded as exactly four IPv4 bytes.
-var IP = Key[netip.Addr]{
-	name: "ip",
+// IP is the "ip" entry, encoded as exactly four IPv4 bytes.
+var IP = Entry[netip.Addr]{
+	key: "ip",
 	encode: func(addr netip.Addr) ([]byte, error) {
 		if !addr.Is4() {
 			return nil, errors.New("ip must be an IPv4 address")
@@ -83,10 +85,10 @@ var IP = Key[netip.Addr]{
 	},
 }
 
-// IP6 is the "ip6" ENR key, encoded as exactly sixteen IPv6 bytes. IPv4-mapped
+// IP6 is the "ip6" entry, encoded as exactly sixteen IPv6 bytes. IPv4-mapped
 // addresses are rejected.
-var IP6 = Key[netip.Addr]{
-	name: "ip6",
+var IP6 = Entry[netip.Addr]{
+	key: "ip6",
 	encode: func(addr netip.Addr) ([]byte, error) {
 		if !addr.Is6() || addr.Is4In6() {
 			return nil, errors.New("ip6 must be a non-mapped IPv6 address")
@@ -112,61 +114,61 @@ var IP6 = Key[netip.Addr]{
 	},
 }
 
-// UDP is the "udp" ENR key, encoded as a uint16 port.
-var UDP = uint16Key("udp")
+// UDP is the "udp" entry, encoded as a uint16 port.
+var UDP = uint16Entry("udp")
 
-// UDP6 is the "udp6" ENR key, encoded as a uint16 port.
-var UDP6 = uint16Key("udp6")
+// UDP6 is the "udp6" entry, encoded as a uint16 port.
+var UDP6 = uint16Entry("udp6")
 
-// TCP is the "tcp" ENR key, encoded as a uint16 port.
-var TCP = uint16Key("tcp")
+// TCP is the "tcp" entry, encoded as a uint16 port.
+var TCP = uint16Entry("tcp")
 
-// TCP6 is the "tcp6" ENR key, encoded as a uint16 port.
-var TCP6 = uint16Key("tcp6")
+// TCP6 is the "tcp6" entry, encoded as a uint16 port.
+var TCP6 = uint16Entry("tcp6")
 
-// QUIC is the "quic" ENR key, encoded as a uint16 port.
-var QUIC = uint16Key("quic")
+// QUIC is the "quic" entry, encoded as a uint16 port.
+var QUIC = uint16Entry("quic")
 
-// QUIC6 is the "quic6" ENR key, encoded as a uint16 port.
-var QUIC6 = uint16Key("quic6")
+// QUIC6 is the "quic6" entry, encoded as a uint16 port.
+var QUIC6 = uint16Entry("quic6")
 
-// Get returns the value for k. ok is false when the key is absent; err is
-// non-nil when the key is present but malformed for k's type.
-func Get[T any](record *Record, key Key[T]) (value T, ok bool, err error) {
-	if record == nil {
+// Get returns the value of entry in r. ok is false when the key is absent;
+// err is non-nil when it is present but its value is malformed.
+func (r *Record) Get[T any](entry Entry[T]) (value T, ok bool, err error) {
+	if r == nil {
 		return value, false, errors.New("nil ENR")
 	}
-	if key.decode == nil {
-		return value, false, errors.New("key has no decoder")
+	if entry.decode == nil {
+		return value, false, errors.New("entry has no decoder")
 	}
-	raw, ok := record.values[key.name]
+	raw, ok := r.values[entry.key]
 	if !ok {
 		return value, false, nil
 	}
-	value, err = key.decode(raw)
+	value, err = entry.decode(raw)
 	if err != nil {
-		return value, true, fmt.Errorf("decode ENR key %q: %w", key.name, err)
+		return value, true, fmt.Errorf("decode ENR key %q: %w", entry.key, err)
 	}
 	return value, true, nil
 }
 
-// Set creates an entry for Sign. Encoding errors, such as an invalid address,
-// are returned by Sign.
-func Set[T any](key Key[T], value T) Entry {
-	entry := Entry{name: key.name}
-	if key.encode == nil {
-		entry.err = errors.New("key has no encoder")
-		return entry
+// Set pairs the entry's key with value, for Sign and Update. Encoding errors,
+// such as an invalid address, are returned by Sign and Update.
+func (e Entry[T]) Set(value T) Pair {
+	pair := Pair{key: e.key}
+	if e.encode == nil {
+		pair.err = errors.New("entry has no encoder")
+		return pair
 	}
-	entry.encode = func() ([]byte, error) {
-		return key.encode(value)
+	pair.encode = func() ([]byte, error) {
+		return e.encode(value)
 	}
-	return entry
+	return pair
 }
 
-func uint16Key(name string) Key[uint16] {
-	return Key[uint16]{
-		name: name,
+func uint16Entry(key string) Entry[uint16] {
+	return Entry[uint16]{
+		key: key,
 		encode: func(value uint16) ([]byte, error) {
 			return encodeUint64(uint64(value)), nil
 		},

@@ -35,6 +35,7 @@ type Profile struct {
 // control channel, so a five-stream unidirectional limit stalls concurrent
 // broadcasts: eight parallel broadcasts delivered nothing at that limit, and
 // completed in 0.31s once it was raised.
+// The stream limits also bound classified streams waiting for a protocol on one connection.
 func Interop() Profile {
 	return Profile{
 		maxIncomingStreams:         256,
@@ -48,6 +49,7 @@ func Interop() Profile {
 // Shadow returns the profile for Shadow network simulation. It disables path MTU
 // discovery because Shadow cannot set the don't-fragment bit, raises the stream
 // limits for large topologies, and traces to qlog.
+// The stream limits also bound classified streams waiting for a protocol on one connection.
 func Shadow() Profile {
 	return Profile{
 		maxIncomingStreams:      16384,

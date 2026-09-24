@@ -220,8 +220,8 @@ type Strategy[CI ChunkIdent, R Wire] interface {
 	AttachPeer(peer transport.PeerID, stats *PeerSessionStats)
 
 	// DetachPeer removes a peer. completed=true means the peer
-	// signaled successful reconstruction (SESS stream reset with
-	// code 0x01); false means disconnection or unsubscribe. The
+	// signaled successful reconstruction with SESS.Code(1) (wire code 0x03);
+	// false means disconnection or unsubscribe. The
 	// session cancels all in-flight sends for this peer before
 	// calling DetachPeer, so any subsequent ChunkSent callbacks for
 	// this peer will arrive with ok=false.
