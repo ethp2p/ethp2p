@@ -3,12 +3,12 @@ package broadcast
 import (
 	"context"
 	"fmt"
-	"io"
 	"runtime"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/ethp2p/ethp2p/protocol"
 	"github.com/ethp2p/ethp2p/transport"
 )
 
@@ -47,9 +47,9 @@ func benchmarkSessionDispatchFanout(b *testing.B, numPeers int) {
 	ctx, cancel := context.WithCancel(b.Context())
 	defer cancel()
 
-	peerIDs := make([]PeerID, numPeers)
+	peerIDs := make([]transport.PeerID, numPeers)
 	for i := range numPeers {
-		pid := PeerID(fmt.Sprintf("p%d", i))
+		pid := transport.PeerID(fmt.Sprintf("p%d", i))
 		peerIDs[i] = pid
 		peer := testPeer(pid)
 		s.handlePeerAttached(peer)
@@ -116,11 +116,11 @@ func BenchmarkOutboundLoopChunkThroughput(b *testing.B) {
 	ctx, cancel := context.WithCancel(b.Context())
 	defer cancel()
 
-	conn := &blackholeTransport{ctx: ctx}
+	streams := &blackholeOpener{}
 	bcastOut := &blackholeStream{}
 	p := &PeerConn{
 		id:      "bench-peer",
-		conn:    conn,
+		streams: streams,
 		ctrlOut: bcastOut,
 		ctrlQ:   make(chan peerCtrlEvent, ctrlQCap),
 		wakeCh:  make(chan struct{}, 1),
@@ -205,7 +205,7 @@ func BenchmarkSubscriptionChurn(b *testing.B) {
 	b.ReportAllocs()
 
 	for i := 0; b.Loop(); i++ {
-		pid := PeerID(fmt.Sprintf("churn-%d", i))
+		pid := transport.PeerID(fmt.Sprintf("churn-%d", i))
 		conn, _ := newTestTransportPair(b.Context())
 		peer := registerTestPeer(engine, pid, conn, ProtocolVersion(1), []ChannelID{"bench-channel"})
 		engine.notifyPeerGone(peer)
@@ -218,21 +218,21 @@ type dispatchStrategy struct {
 }
 
 func (cs *dispatchStrategy) HaveChunk(_ *testChunk) bool { return false }
-func (cs *dispatchStrategy) VerifyChunk(_ PeerID, _ *testChunk, _ []byte) Verdict {
+func (cs *dispatchStrategy) VerifyChunk(_ transport.PeerID, _ *testChunk, _ []byte) Verdict {
 	return VerdictAccepted
 }
-func (cs *dispatchStrategy) Verified() <-chan VerifyResult[*testChunk] { return nil }
-func (cs *dispatchStrategy) DedupKey(_ *testChunk) []byte              { return nil }
-func (cs *dispatchStrategy) AttachPeer(PeerID, *PeerSessionStats)      {}
-func (cs *dispatchStrategy) DetachPeer(PeerID, bool)                   {}
+func (cs *dispatchStrategy) Verified() <-chan VerifyResult[*testChunk]      { return nil }
+func (cs *dispatchStrategy) DedupKey(_ *testChunk) []byte                   { return nil }
+func (cs *dispatchStrategy) AttachPeer(transport.PeerID, *PeerSessionStats) {}
+func (cs *dispatchStrategy) DetachPeer(transport.PeerID, bool)              {}
 
-func (cs *dispatchStrategy) TakeChunk(_ PeerID, _ *testChunk, _ []byte, _ *DedupCancel) (Verdict, bool, error) {
+func (cs *dispatchStrategy) TakeChunk(_ transport.PeerID, _ *testChunk, _ []byte, _ *DedupCancel) (Verdict, bool, error) {
 	return VerdictAccepted, false, nil
 }
 
 func (cs *dispatchStrategy) Decode() ([]byte, error) { return nil, nil }
 
-func (cs *dispatchStrategy) RoutingUpdate(_ PeerID, _ *testRouting) ([]ChunkHandle, error) {
+func (cs *dispatchStrategy) RoutingUpdate(_ transport.PeerID, _ *testRouting) ([]ChunkHandle, error) {
 	return nil, nil
 }
 
@@ -249,7 +249,7 @@ func (cs *dispatchStrategy) PollRouting(force bool) (*testRouting, bool) {
 	return nil, false
 }
 
-func (cs *dispatchStrategy) ChunkSent(_ PeerID, _ ChunkHandle, _ error) {}
+func (cs *dispatchStrategy) ChunkSent(_ transport.PeerID, _ ChunkHandle, _ error) {}
 
 func (cs *dispatchStrategy) Progress() (have, need int) { return 0, 0 }
 
@@ -264,52 +264,16 @@ func spinUntil(cond func() bool) {
 	}
 }
 
-// blackholeTransport implements transport.Conn with streams that discard
-// all writes immediately. Used in benchmarks to measure outbound loop
-// throughput without transport I/O overhead.
-type blackholeTransport struct {
-	ctx context.Context
-}
+// blackholeOpener discards stream writes to benchmark outbound loop overhead.
+type blackholeOpener struct{}
 
-func (t *blackholeTransport) SupportsStreams() bool             { return true }
-func (t *blackholeTransport) SupportsDatagrams() bool           { return false }
-func (t *blackholeTransport) Close() error                      { return nil }
-func (t *blackholeTransport) ConnectionStats() (uint64, uint64) { return 0, 0 }
-func (t *blackholeTransport) RemotePeerID() transport.PeerID    { return "bench-remote" }
-
-func (t *blackholeTransport) OpenStream(_ context.Context) (transport.Stream, error) {
+func (*blackholeOpener) OpenUniStream(_ context.Context, _ protocol.Selector) (transport.SendStream, error) {
 	return &blackholeStream{}, nil
-}
-
-func (t *blackholeTransport) AcceptBiStream(ctx context.Context) (transport.Stream, error) {
-	<-ctx.Done()
-	return nil, ctx.Err()
-}
-
-func (t *blackholeTransport) OpenUniStream(_ context.Context) (transport.SendStream, error) {
-	return &blackholeStream{}, nil
-}
-
-func (t *blackholeTransport) AcceptUniStream(ctx context.Context) (transport.ReceiveStream, error) {
-	<-ctx.Done()
-	return nil, ctx.Err()
-}
-
-func (t *blackholeTransport) SendDatagram(_ context.Context, _ []byte) error { return nil }
-
-func (t *blackholeTransport) RecvDatagram(ctx context.Context) ([]byte, error) {
-	<-ctx.Done()
-	return nil, ctx.Err()
 }
 
 type blackholeStream struct{}
 
-func (s *blackholeStream) Read([]byte) (int, error)           { return 0, io.EOF }
 func (s *blackholeStream) Write(p []byte) (int, error)        { return len(p), nil }
 func (s *blackholeStream) Close() error                       { return nil }
-func (s *blackholeStream) CancelRead(_ uint64)                {}
 func (s *blackholeStream) CancelWrite(_ uint64)               {}
-func (s *blackholeStream) Reset() error                       { return nil }
-func (s *blackholeStream) SetDeadline(_ time.Time) error      { return nil }
-func (s *blackholeStream) SetReadDeadline(_ time.Time) error  { return nil }
 func (s *blackholeStream) SetWriteDeadline(_ time.Time) error { return nil }

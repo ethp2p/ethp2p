@@ -12,30 +12,20 @@ var _ Conn = (*ethp2pConn)(nil)
 //////////////////////
 
 // Ethp2pTransport provides ethp2p connections on a shared endpoint.
-// It promotes [SharedTransport.Close], so closing this view shuts down the
-// entire endpoint, including libp2p connections. The application owns that call.
-type Ethp2pTransport struct{ *SharedTransport }
-
-// PeerID returns the local identity.
-func (t *Ethp2pTransport) PeerID() PeerID { return t.handshaker.peerID }
-
-// PublicKey returns the local identity key.
-func (t *Ethp2pTransport) PublicKey() *PubKey { return t.handshaker.publicKey }
-
-// Addr returns the local packet connection address.
-func (t *Ethp2pTransport) Addr() net.Addr { return t.raw.Conn.LocalAddr() }
+// The application closes the owning [SharedTransport] to shut down the endpoint.
+type Ethp2pTransport struct{ shared *SharedTransport }
 
 // Accept waits for the next inbound ethp2p connection, starting the listener
 // if needed. Concurrent callers share the same connection queue.
 func (t *Ethp2pTransport) Accept(ctx context.Context) (Conn, error) {
-	if _, err := t.attach(sideEthp2p); err != nil {
+	if err := t.shared.start(); err != nil {
 		return nil, err
 	}
 	select {
-	case c := <-t.ethQ:
+	case c := <-t.shared.ethQ:
 		return c, nil
-	case <-t.ctx.Done():
-		return nil, errClosed
+	case <-t.shared.ctx.Done():
+		return nil, ErrClosed
 	case <-ctx.Done():
 		return nil, ctx.Err()
 	}
@@ -44,41 +34,29 @@ func (t *Ethp2pTransport) Accept(ctx context.Context) (Conn, error) {
 // Dial connects to addr and authenticates the peer. A nonempty expect requires
 // that peer identity. It returns [ErrDialLegacyPeer] if the peer selects libp2p.
 func (t *Ethp2pTransport) Dial(ctx context.Context, addr net.Addr, expect PeerID) (Conn, error) {
-	if t.ctx.Err() != nil {
-		return nil, errClosed
+	if t.shared.ctx.Err() != nil {
+		return nil, ErrClosed
 	}
 
 	slot := &remoteIdentitySlot{}
-	tlsConfig := t.handshaker.dialConfig(slot, expect)
-	raw, err := t.raw.Dial(ctx, addr, tlsConfig, t.profile.quicConfig())
+	tlsConfig := t.shared.handshaker.connConfig(slot, expect)
+	raw, err := t.shared.raw.Dial(ctx, addr, tlsConfig, t.shared.profile.quicConfig())
 	if err != nil {
 		return nil, err
 	}
 
 	alpn := raw.ConnectionState().TLS.NegotiatedProtocol
 	if alpn == AlpnLibp2p {
-		// this is a legacy libp2p peer.
-		// but since we've estalished the connection, we might as well hand
-		// it over to libp2p on a best-effort basis.
-		// If its queue is full, close it because we are not returning a
-		// valid connection to our caller anyway.
-		select {
-		case t.libQ <- raw:
-		default:
-			_ = raw.CloseWithError(appFailure, errClosed.Error())
-		}
+		// Hand a legacy connection to libp2p when that side is interested.
+		t.shared.offerLibp2p(raw)
 		return nil, ErrDialLegacyPeer
 	}
 
 	// Create the shared connection and its dispatchers, then return the ethp2p
 	// side and feed the libp2p side to libp2p.
-	sc := newSharedConn(raw, &t.wg, slot.key.PeerID())
+	sc := newSharedConn(raw, &t.shared.wg, slot.key.PeerID())
 	ethp2p := sc.ethp2p()
-	select {
-	case t.libQ <- sc.libp2p():
-	default:
-		_ = ethp2p.Close()
-	}
+	t.shared.offerLibp2p(sc.libp2p())
 	return ethp2p, nil
 }
 
@@ -97,49 +75,92 @@ type ethp2pConn struct {
 func (c *ethp2pConn) RemotePeerID() PeerID { return c.remotePeerID() }
 
 func (c *ethp2pConn) OpenStream(ctx context.Context) (Stream, error) {
-	s, err := c.conn.OpenStreamSync(ctx)
+	if c.ethp2pCtx.Err() != nil {
+		return nil, context.Cause(c.ethp2pCtx)
+	}
+	bound, cleanup := viewContext(ctx, c.ethp2pCtx)
+	defer cleanup()
+	s, err := c.conn.OpenStreamSync(bound)
 	if err != nil {
+		if c.ethp2pCtx.Err() != nil {
+			return nil, context.Cause(c.ethp2pCtx)
+		}
 		return nil, err
 	}
 	return stream{s}, nil
 }
 
 func (c *ethp2pConn) OpenUniStream(ctx context.Context) (SendStream, error) {
-	s, err := c.conn.OpenUniStreamSync(ctx)
+	if c.ethp2pCtx.Err() != nil {
+		return nil, context.Cause(c.ethp2pCtx)
+	}
+	bound, cleanup := viewContext(ctx, c.ethp2pCtx)
+	defer cleanup()
+	s, err := c.conn.OpenUniStreamSync(bound)
 	if err != nil {
+		if c.ethp2pCtx.Err() != nil {
+			return nil, context.Cause(c.ethp2pCtx)
+		}
 		return nil, err
 	}
 	return sendStream{s}, nil
 }
 
 func (c *ethp2pConn) AcceptBiStream(ctx context.Context) (Stream, error) {
+	if c.ethp2pCtx.Err() != nil {
+		return nil, context.Cause(c.ethp2pCtx)
+	}
 	select {
 	case s := <-c.ethp2pBi:
+		if c.ethp2pCtx.Err() != nil {
+			s.CancelRead(streamReset)
+			s.CancelWrite(streamReset)
+			return nil, context.Cause(c.ethp2pCtx)
+		}
 		return stream{s}, nil
 	case <-ctx.Done():
 		return nil, ctx.Err()
-	case <-c.conn.Context().Done():
-		return nil, c.conn.Context().Err()
+	case <-c.ethp2pCtx.Done():
+		return nil, context.Cause(c.ethp2pCtx)
 	}
 }
 
 func (c *ethp2pConn) AcceptUniStream(ctx context.Context) (ReceiveStream, error) {
+	if c.ethp2pCtx.Err() != nil {
+		return nil, context.Cause(c.ethp2pCtx)
+	}
 	select {
 	case s := <-c.ethp2pUni:
+		if c.ethp2pCtx.Err() != nil {
+			s.CancelRead(streamReset)
+			return nil, context.Cause(c.ethp2pCtx)
+		}
 		return receiveStream{s}, nil
 	case <-ctx.Done():
 		return nil, ctx.Err()
-	case <-c.conn.Context().Done():
-		return nil, c.conn.Context().Err()
+	case <-c.ethp2pCtx.Done():
+		return nil, context.Cause(c.ethp2pCtx)
 	}
 }
 
 func (c *ethp2pConn) SendDatagram(_ context.Context, payload []byte) error {
+	if c.ethp2pCtx.Err() != nil {
+		return context.Cause(c.ethp2pCtx)
+	}
 	return c.conn.SendDatagram(payload)
 }
 
 func (c *ethp2pConn) RecvDatagram(ctx context.Context) ([]byte, error) {
-	return c.conn.ReceiveDatagram(ctx)
+	if c.ethp2pCtx.Err() != nil {
+		return nil, context.Cause(c.ethp2pCtx)
+	}
+	bound, cleanup := viewContext(ctx, c.ethp2pCtx)
+	defer cleanup()
+	payload, err := c.conn.ReceiveDatagram(bound)
+	if err != nil && c.ethp2pCtx.Err() != nil {
+		return nil, context.Cause(c.ethp2pCtx)
+	}
+	return payload, err
 }
 
 func (c *ethp2pConn) Close() error {
@@ -147,8 +168,6 @@ func (c *ethp2pConn) Close() error {
 	c.closeSide(sideEthp2p, appNoError, "closed")
 	return nil
 }
-
-func (c *ethp2pConn) SupportsStreams() bool { return true }
 
 func (c *ethp2pConn) SupportsDatagrams() bool {
 	support := c.conn.ConnectionState().SupportsDatagrams

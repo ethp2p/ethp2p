@@ -4,6 +4,7 @@ import (
 	"sync"
 
 	"github.com/ethp2p/ethp2p/broadcast"
+	"github.com/ethp2p/ethp2p/transport"
 )
 
 type sessionKey struct {
@@ -43,14 +44,14 @@ func (o *Observer) OnSessionStarted(channelID broadcast.ChannelID, messageID bro
 	o.mu.Unlock()
 }
 
-func (o *Observer) OnChunkSent(_ broadcast.PeerID, channelID broadcast.ChannelID, messageID broadcast.MessageID, bytesSent int) {
+func (o *Observer) OnChunkSent(_ transport.PeerID, channelID broadcast.ChannelID, messageID broadcast.MessageID, bytesSent int) {
 	o.mu.Lock()
 	role := o.roles[sessionKey{channelID, messageID}]
 	o.sent[role] += bytesSent
 	o.mu.Unlock()
 }
 
-func (o *Observer) OnChunkRcvd(_ broadcast.PeerID, _ broadcast.ChannelID, _ broadcast.MessageID, verdict broadcast.Verdict) {
+func (o *Observer) OnChunkRcvd(_ transport.PeerID, _ broadcast.ChannelID, _ broadcast.MessageID, verdict broadcast.Verdict) {
 	o.mu.Lock()
 	if int(verdict) < len(o.verdicts) {
 		o.verdicts[verdict]++

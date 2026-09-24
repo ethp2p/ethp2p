@@ -3,7 +3,6 @@
 package ethp2p
 
 import (
-	"bufio"
 	"context"
 	"errors"
 	"fmt"
@@ -12,6 +11,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/ethp2p/ethp2p/internal/ctxutil"
 	"github.com/ethp2p/ethp2p/protocol"
 	"github.com/ethp2p/ethp2p/transport"
 )
@@ -31,9 +31,12 @@ type Stack struct {
 	selectors  map[protocol.Selector]*Subsystem
 }
 
-// ServeConn exchanges selectors on each endpoint's first outgoing unidirectional
-// stream, notifies matching subsystems, and routes subsequent streams. The caller
-// must invoke it once per connection, before opening other unidirectional streams.
+// ServeConn exchanges selector advertisements on each endpoint's first outgoing
+// unidirectional stream. Each advertisement begins with the reserved selector
+// frame for protocol.AdvertisementSelector, followed by ascending selector frames
+// and FIN. It then notifies matching subsystems and routes subsequent streams,
+// which also begin with one selector frame. The caller must invoke it once per
+// connection, before opening other unidirectional streams.
 // It blocks until ctx ends, connection I/O fails, or negotiation fails. While
 // peer notification is blocked by backpressure, only ctx can interrupt the send;
 // the application must cancel ctx when it stops consuming notifications.
@@ -99,7 +102,7 @@ func writeSelectors(ctx context.Context, conn transport.Conn, selectors []protoc
 	if err != nil {
 		return err
 	}
-	stop := onCancel(ctx, func() { stream.CancelWrite(0) })
+	stop := ctxutil.OnCancel(ctx, func() { stream.CancelWrite(0) })
 	err = protocol.WriteSelectors(stream, selectors)
 	if err == nil {
 		err = stream.Close() // FIN terminates the selector list.
@@ -117,8 +120,8 @@ func readSelectors(ctx context.Context, conn transport.Conn) ([]protocol.Selecto
 	if err != nil {
 		return nil, err
 	}
-	stop := onCancel(ctx, func() { stream.CancelRead(0) })
-	selectors, err := protocol.ReadSelectors(bufio.NewReader(stream))
+	stop := ctxutil.OnCancel(ctx, func() { stream.CancelRead(0) })
+	selectors, err := protocol.ReadSelectors(stream)
 	stop()
 	// Cancellation aborts QUIC I/O with a reset; preserve its context cause too.
 	err = errors.Join(err, ctx.Err())
@@ -128,29 +131,13 @@ func readSelectors(ctx context.Context, conn transport.Conn) ([]protocol.Selecto
 	return selectors, err
 }
 
-// onCancel returns cleanup that joins a callback already in flight. A stream
-// must not reach its handler while selector cancellation can still reset it.
-func onCancel(ctx context.Context, cancel func()) func() {
-	done := make(chan struct{})
-	stop := context.AfterFunc(ctx, func() {
-		defer close(done)
-		cancel()
-	})
-	return func() {
-		if !stop() {
-			<-done
-		}
-	}
-}
-
 func serveBi(ctx context.Context, conn transport.Conn, routes map[protocol.Selector]route) error {
 	for {
 		stream, err := conn.AcceptBiStream(ctx)
 		if err != nil {
 			return err
 		}
-		reader := bufio.NewReader(stream)
-		selector, err := readSelector(ctx, stream, reader)
+		selector, err := readSelector(ctx, stream)
 		route, ok := routes[selector]
 		if err != nil || !ok || route.streams == nil {
 			_ = stream.Reset()
@@ -159,7 +146,7 @@ func serveBi(ctx context.Context, conn transport.Conn, routes map[protocol.Selec
 			}
 			continue
 		}
-		event := StreamEvent{Peer: route.peer, Selector: selector, Stream: bufferedStream{Stream: stream, reader: reader}}
+		event := StreamEvent{Peer: route.peer, Selector: selector, Stream: stream}
 		select {
 		case route.streams <- event:
 		case <-ctx.Done():
@@ -175,8 +162,7 @@ func serveUni(ctx context.Context, conn transport.Conn, routes map[protocol.Sele
 		if err != nil {
 			return err
 		}
-		reader := bufio.NewReader(stream)
-		selector, err := readSelector(ctx, stream, reader)
+		selector, err := readSelector(ctx, stream)
 		route, ok := routes[selector]
 		if err != nil || !ok || route.streams == nil {
 			stream.CancelRead(0)
@@ -185,7 +171,7 @@ func serveUni(ctx context.Context, conn transport.Conn, routes map[protocol.Sele
 			}
 			continue
 		}
-		event := StreamEvent{Peer: route.peer, Selector: selector, Stream: bufferedReceiveStream{ReceiveStream: stream, reader: reader}}
+		event := StreamEvent{Peer: route.peer, Selector: selector, Stream: stream}
 		select {
 		case route.streams <- event:
 		case <-ctx.Done():
@@ -195,27 +181,12 @@ func serveUni(ctx context.Context, conn transport.Conn, routes map[protocol.Sele
 	}
 }
 
-func readSelector(ctx context.Context, stream transport.ReceiveStream, reader *bufio.Reader) (protocol.Selector, error) {
+// readSelector reads a stream's selector frame under selectorTimeout.
+func readSelector(ctx context.Context, stream transport.ReceiveStream) (protocol.Selector, error) {
 	ctx, cancel := context.WithTimeout(ctx, selectorTimeout)
 	defer cancel()
-	stop := onCancel(ctx, func() { stream.CancelRead(0) })
-	selector, err := protocol.ReadSelector(reader)
+	stop := ctxutil.OnCancel(ctx, func() { stream.CancelRead(0) })
+	selector, err := protocol.ReadSelector(stream)
 	stop()
 	return selector, errors.Join(err, ctx.Err())
 }
-
-// These wrappers retain selector read-ahead for the handler while forwarding
-// cancellation, writes, and deadlines to the original stream.
-type bufferedStream struct {
-	transport.Stream
-	reader *bufio.Reader
-}
-
-func (s bufferedStream) Read(p []byte) (int, error) { return s.reader.Read(p) }
-
-type bufferedReceiveStream struct {
-	transport.ReceiveStream
-	reader *bufio.Reader
-}
-
-func (s bufferedReceiveStream) Read(p []byte) (int, error) { return s.reader.Read(p) }

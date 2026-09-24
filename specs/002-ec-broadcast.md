@@ -1,5 +1,7 @@
 # Erasure-coded broadcast framework
 
+Status: draft, implemented in `broadcast/`.
+
 ## 0. Introduction
 
 As Ethereum increases gas limits and shortens slot times,
@@ -115,15 +117,21 @@ making sure the network as a whole stays cooperative.
 ## 3. Protocol overview
 
 The protocol separates three concerns across three stream types.
-The wire format is Protobuf.
+Broadcast messages use Protobuf, with unsigned-varint lengths on the wire.
+Each BCAST, SESS, and CHUNK protobuf frame has a uvarint length prefix followed by its serialized
+protobuf payload.
+The maximum protobuf payload per frame is 1 MiB.
+For CHUNK streams, the raw chunk data follows the framed `Chunk.Header`.
 
 **BCAST stream.**
 The per-connection control stream.
 It carries handshake, subscribe, and unsubscribe messages.
-It is opened when the connection is established and remains open for the lifetime of the connection.
+It opens after Stack negotiates the broadcast selectors and remains open
+while the broadcast binding is active.
 It is implemented as two unidirectional streams, one in each direction,
 each carrying length-prefixed protobuf frames.
-This is the only long-lived stream type in the framework.
+It is the per-connection control stream;
+a `SESS` stream can also remain open for the lifetime of a session.
 
 **SESS stream.**
 A per-session unidirectional stream.
@@ -133,8 +141,9 @@ Session-open is followed by zero or more routing updates over the lifetime of th
 Each peer opens one `SESS` stream toward the other for a given session.
 Under normal operation, a pair of peers collaborating to reconstruct a Message will initiate a pair
 of `SESS` streams for the given Session, one in each direction.
-The opener resets the stream to signal reconstruction was locally achieved,
-which implies that the receiver can request any missing chunks.
+When its strategy reports enough chunks to decode,
+the opener resets its outbound `SESS` write side to tell the other peer
+that no more chunks are needed.
 
 **CHUNK stream.**
 An ephemeral unidirectional stream to dispatch a single chunk.
@@ -149,12 +158,22 @@ It results in better parallelization and flow control, and more compact signalin
 We can also lean into QUIC features to optimize further via stream prioritization
 and congestion control fine-tuning.
 
-To identify the stream type, every stream opens with a registered protocol
-codepoint encoded as a Protobuf unsigned varint. An unsigned-varint frame
-length comes before the codepoint. The shared QUIC dispatcher consumes that
-frame length and leaves the codepoint unread for ethp2p.
+Every ethp2p stream, unidirectional or bidirectional, begins with a selector frame:
+a uvarint payload length followed by the selector codepoint as a uvarint.
+Stack reads the selector before routing an incoming stream.
+Streams opened through `Peer.OpenUniStream`
+or `Peer.OpenStream` have their selector written by Stack
+before the stream is returned to the subsystem.
 
-The ethp2p stack registers these stable broadcast codepoints during startup:
+Each endpoint's first outgoing unidirectional stream is the selector advertisement stream.
+Its first frame contains the reserved advertisement selector `0`,
+followed by one selector frame for each advertised codepoint, and ends with FIN.
+The shared QUIC dispatcher peeks at the length prefix
+and first payload byte of incoming bidirectional stream frames without consuming bytes.
+A leading `/` routes the stream to libp2p; other nonempty first frames route to ethp2p.
+Incoming unidirectional streams route directly to ethp2p.
+
+The broadcast package declares these stable codepoints for Stack registration:
 
 | Codepoint | Protocol |
 | --------: | -------- |
@@ -162,9 +181,9 @@ The ethp2p stack registers these stable broadcast codepoints during startup:
 | `0x02`    | `SESS`   |
 | `0x03`    | `CHUNK`  |
 
-Codepoint `0` is invalid. Codepoint `0x2f` is reserved because its encoded byte
-is `/`, which the shared QUIC dispatcher routes to libp2p. Streams with
-unregistered codepoints are cancelled.
+Codepoint `0` is reserved for Stack's selector advertisement stream.
+Codepoint `0x2f` is reserved for libp2p routing because its encoded byte is `/`.
+Streams with unregistered codepoints are cancelled.
 
 ## 4. BCAST: control protocol
 
@@ -173,55 +192,61 @@ unregistered codepoints are cancelled.
 // Carries handshake, subscribe, and unsubscribe messages.
 message Bcast {
   oneof message {
-    Handshake   peer_handshake = 1;
-    Subscribe   topic_subscribe = 2;
-    Unsubscribe topic_unsubscribe = 3;
+    Handshake peer_handshake = 1;
+    Subscribe channel_subscribe = 2;
+    Unsubscribe channel_unsubscribe = 3;
   }
 
   // Handshake is the first message exchanged on a BCAST stream.
   message Handshake {
-    uint32    version = 1;
-    repeated  string topics = 2;
-    string    peer_id = 3;  // see TODO below
+    uint32 version = 1;
+    repeated string channels = 2;
   }
 
-  // Subscribe requests the remote peer to include us in a topic.
+  // Subscribe requests the remote peer to include us in a channel.
   message Subscribe {
-    string  topic = 1;
+    string channel = 1;
   }
 
-  // Unsubscribe requests removal from a topic.
+  // Unsubscribe requests removal from a channel.
   message Unsubscribe {
-    string  topic = 1;
+    string channel = 1;
   }
 }
 ```
 
 ### 4.1. Handshake
 
-When a peer connection is established, both sides MUST perform a symmetric handshake.
-The dialing peer opens an outbound `BCAST` stream and writes its handshake.
-The accepting peer MUST accept the inbound stream
-and open its own outbound `BCAST` stream to complete the handshake in both directions.
-In the case of simultaneous open,
-both sides concurrently open outbound streams and accept inbound streams.
+When Stack delivers a peer with the broadcast selectors, both sides perform a symmetric handshake.
+Each side concurrently opens an outbound `BCAST` stream and accepts the peer's inbound stream.
 The handshake is not complete until both sides have sent and received a `Bcast.Handshake` frame.
 
-On the outbound stream, the peer MUST write a `BCAST` protocol selector followed by a
-`Bcast.Handshake` frame containing:
+The two unidirectional streams are deliberate.
+Both peers open their streams at the same time, and nothing needs resolving:
+neither side takes an initiator or responder role, and there is no tie-break.
+Each side writes on the stream it opened and reads on the stream it accepted.
+A single bidirectional stream would force both sides to agree on which of them opens it.
+Each side opens exactly one outbound `BCAST` stream per connection,
+so a receiver cancels any second inbound `BCAST` stream.
+
+Stack writes the `BCAST` selector on the outbound stream.
+The broadcast binding then writes a `Bcast.Handshake` frame containing:
 
 - `version`, the protocol version, currently `1`
 - `channels`, the set of subscribed channel identifiers
-- `peer_id`, the peer's public key or network identity
-  (TODO: to be eliminated once ethp2p itself has a handshake)
 
-On the inbound stream, the peer MUST read the `BCAST` protocol selector
-and the `Bcast.Handshake` frame, then validate the protocol version.
-If the versions are incompatible, the peer MUST close the connection (TODO: stream in the future).
+Stack reads the inbound `BCAST` selector and routes the stream to the broadcast binding.
+The binding reads the `Bcast.Handshake` frame and negotiates its protocol version.
+With local version `1`, it accepts peer version `1` or higher and uses version `1`;
+version `0` fails the handshake.
+If the versions are incompatible, the broadcast handshake fails and its BCAST streams are cancelled;
+the application still owns the underlying connection.
 
-After a successful handshake, both sides know the remote peer's identity (TODO), protocol version,
-and initial channel set.
-Non-`BCAST` streams received before handshake completion MUST be cancelled.
+After a successful handshake, both sides know the remote identity authenticated by the transport's
+TLS handshake, the protocol version, and the initial channel set.
+Incoming `SESS` and `CHUNK` streams wait in bounded queues until the handshake completes.
+If it fails, those queued streams are cancelled;
+streams that overflow either queue are cancelled as well.
 
 ### 4.2. Channel subscription
 
@@ -234,12 +259,15 @@ it SHOULD begin including the remote peer in sessions for that channel.
 When it receives `Bcast.Unsubscribe`,
 it SHOULD exclude that peer from new sessions for the channel and remove it from existing ones.
 
-Delayed subscription causes the peer to miss sessions started during the gap.
-A peer that attaches a new channel locally SHOULD
-therefore send `Bcast.Subscribe` immediately to all connected peers.
+If a session finishes before a subscription is processed,
+the new subscriber cannot be enrolled in that session.
+A peer that attaches a new channel locally queues `Bcast.Subscribe` for each connected peer.
+The notification is dropped if that peer's control queue is full.
 
-A peer that connects or subscribes while a broadcast is already in flight should still participate,
-so the framework SHOULD retroactively enroll new subscribers into active sessions for that channel.
+A peer that connects or subscribes while a broadcast is in flight is enrolled into active sessions
+for that channel.
+The framework opens a `SESS` stream with the current routing state for the new peer;
+it includes routing state when available and does not replay earlier `CHUNK` streams.
 
 ## 5. Session protocol (SESS streams)
 
@@ -271,17 +299,17 @@ message Sess {
 ### 5.1. Session establishment
 
 When a peer wants to participate in a session with a remote peer,
-it MUST open a new unidirectional stream
-and write a `SESS` protocol selector followed by a `Sess.Open` frame containing:
+it opens a new unidirectional stream through `Peer.OpenUniStream` with selector `SESS`.
+Stack writes the selector, and the broadcast binding writes a `Sess.Open` frame containing:
 
 - `channel`, the channel identifier
 - `message_id`, the message identifier
 - `preamble`, the strategy-specific session metadata
 - `initial_update`, optional code-specific routing state in the same format as `Sess.Update.data`
 
-The receiver MUST route the frame by channel to the corresponding channel handler.
-If it is not subscribed to that channel, it MUST cancel the stream.
-If a session for `(channel, message_id)` already exists, it MUST ignore the duplicate.
+The receiver routes the frame to the active local channel handler named by `channel`.
+If no handler is attached for that channel, it cancels the stream.
+If a session for `(channel, message_id)` already exists, it ignores the duplicate open.
 
 If `initial_update` is present,
 the receiver MUST process it before handling any chunk data for that session.
@@ -301,20 +329,22 @@ because stale routing state leads to unnecessary chunk sends.
 The timing, frequency, and trigger conditions for routing updates are not strictly defined.
 The current implementation is overeager,
 and we expect to refine the trigger conditions and frequency as the protocol matures.
-The framework sends routing updates before dispatching chunks so
-that peers can update their view of inventory before new data arrives.
+When a poll produces both routing updates and chunks, the channel queues the updates first.
+The control and data loops write independently,
+so their arrival order on the wire is not guaranteed.
 
 ### 5.3. Completion signaling
 
-A reconstructed peer may still have in-flight chunk streams that need to drain cleanly,
-but a departed peer can be removed immediately.
+A peer that has enough chunks to decode may still have in-flight chunk streams
+that need to drain cleanly, but a departed peer can be removed immediately.
 The signaling mechanism reflects that distinction.
 
-When a node reconstructs the message,
-it MUST reset its inbound `SESS` streams for
-that session using application error code `0x01` (`reconstructed`).
-This tells the remote peer that further chunk sends are unnecessary.
-The remote peer SHOULD cancel pending chunk sends to that peer.
+When a node's strategy reports that it has enough chunks to decode,
+the node cancels its outbound `SESS` write side for
+that session with application error code `0x01` (`reconstructed`).
+This happens before decoding completes and tells the remote peer
+that further chunk sends are unnecessary.
+The remote peer then cancels pending chunk sends to that peer.
 
 If a peer disconnects without resetting,
 it is treated as departed and removed from the session immediately.
@@ -338,7 +368,8 @@ message Chunk {
 ### 6.1. Chunk header
 
 Each chunk is sent on its own unidirectional stream.
-The sender MUST write a `CHUNK` protocol selector followed by a `Chunk.Header` frame containing:
+The sender opens it through `Peer.OpenUniStream` with selector `CHUNK`;
+Stack writes the selector before the sender writes a `Chunk.Header` frame containing:
 
 - `channel`, the channel identifier
 - `message_id`, the message identifier
@@ -347,14 +378,15 @@ The sender MUST write a `CHUNK` protocol selector followed by a `Chunk.Header` f
 
 The framework requires `data_length`
 because it cannot parse strategy-specific chunk identifiers to determine where the payload begins.
-The receiver MUST route the frame by channel.
-If it is not subscribed to that channel, it MUST cancel the stream.
+The receiver routes the frame to the active local channel handler named by `channel`.
+If no handler is attached for that channel, it cancels the stream.
+The maximum raw chunk data length is also 1 MiB.
 
 ### 6.2. Chunk data
 
 Immediately after the `Chunk.Header`,
-the sender MUST write exactly `data_length` bytes of chunk data.
-No additional bytes follow on the stream.
+the sender writes exactly `data_length` bytes of chunk data and closes the stream.
+The receiver reads the declared number of bytes and does not validate trailing bytes.
 
 The framework delivers the chunk identifier and chunk data to the session
 for two-phase verification.
@@ -374,8 +406,9 @@ Once the strategy decides the group is satisfied, the framework cancels the rema
 This immediately frees QUIC stream capacity and connection-level flow control budget.
 
 If the session does not yet exist because the chunk arrived before `Sess.Open`,
-the framework MAY buffer the stream reference and rely on transport-level backpressure
-until the session is established.
+the channel buffers up to 32 stream references for that message
+and relies on transport-level backpressure while their payloads remain unread.
+It cancels additional streams after that per-message buffer is full.
 
 ## 7. Session lifecycle
 

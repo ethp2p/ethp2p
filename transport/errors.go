@@ -12,7 +12,10 @@ var (
 	// peer but negotiated libp2p instead of ethp2p_0.
 	ErrDialLegacyPeer = errors.New("peer dialed by ethp2p is legacy")
 
-	errClosed           = errors.New("shared transport closed")
+	// ErrClosed reports an operation on a closed SharedTransport or an Accept
+	// on a detached libp2p listener.
+	ErrClosed           = errors.New("shared transport closed")
+	errViewClosed       = errors.New("connection view closed")
 	errAlreadyListening = errors.New("already listening")
 	errEmptyFirstFrame  = errors.New("empty first frame")
 	errNoKeyExtension   = errors.New("expected certificate to contain the key extension")
@@ -32,7 +35,7 @@ const (
 )
 
 // ErrPeerMismatch reports that a dial authenticated a valid peer identity that
-// differs from the nonempty peer ID passed to [Transport.Dial].
+// differs from the nonempty peer ID passed to [Ethp2pTransport.Dial].
 type ErrPeerMismatch struct {
 	// Expected is the peer ID supplied by the dialer.
 	Expected PeerID
@@ -46,7 +49,7 @@ func (e ErrPeerMismatch) Error() string {
 }
 
 // StreamResetError reports a QUIC stream cancellation returned by
-// ReceiveStream.Read.
+// Stream.Read or ReceiveStream.Read.
 type StreamResetError struct {
 	// Code is the QUIC application error code carried by the cancellation.
 	Code uint64

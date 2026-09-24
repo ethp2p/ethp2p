@@ -42,17 +42,16 @@ func nodeIdentity(nodeNum int) (*transport.PrivKey, transport.PeerID, error) {
 func newNodeEndpoint(nodeNum int, packetConn net.PacketConn) (
 	eth *transport.Ethp2pTransport,
 	shared *transport.SharedTransport,
-	key *transport.PrivKey,
 	peerID transport.PeerID,
 	err error,
 ) {
-	key, peerID, err = nodeIdentity(nodeNum)
+	key, peerID, err := nodeIdentity(nodeNum)
 	if err != nil {
-		return nil, nil, nil, "", err
+		return nil, nil, "", err
 	}
 	shared, err = transport.NewShared(key, packetConn, transport.Shadow())
 	if err != nil {
-		return nil, nil, nil, "", fmt.Errorf("create shared transport: %w", err)
+		return nil, nil, "", fmt.Errorf("create shared transport: %w", err)
 	}
-	return shared.Ethp2p(), shared, key, peerID, nil
+	return shared.Ethp2p(), shared, peerID, nil
 }

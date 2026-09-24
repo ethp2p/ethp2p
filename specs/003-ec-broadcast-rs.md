@@ -1,5 +1,7 @@
 # Reed-Solomon broadcast strategy
 
+Status: draft, implemented in `broadcast/rs/`.
+
 This document specifies the Reed-Solomon (RS) erasure coding strategy
 for the ethp2p broadcast framework defined in the [framework spec](broadcast-spec-v3.md).
 

@@ -1,5 +1,7 @@
 # Integration: erasure-coded broadcast for execution payloads
 
+Status: draft.
+
 This document motivates and specifies the integration of the
 [erasure-coded broadcast framework](002-ec-broadcast.md)
 into Ethereum's execution payload propagation path.

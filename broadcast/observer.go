@@ -1,6 +1,10 @@
 package broadcast
 
-import "time"
+import (
+	"time"
+
+	"github.com/ethp2p/ethp2p/transport"
+)
 
 // SessionRole distinguishes origin sessions (the publisher) from relay
 // sessions (nodes forwarding chunks they received from others).
@@ -20,10 +24,10 @@ type Observer interface {
 	OnChannelDropped(channelID ChannelID)
 
 	// Peer lifecycle
-	OnPeerHandshook(peerID PeerID, version ProtocolVersion, channels []ChannelID)
-	OnPeerSubscribed(peerID PeerID, channelID ChannelID)
-	OnPeerUnsubscribed(peerID PeerID, channelID ChannelID)
-	OnPeerGone(peerID PeerID)
+	OnPeerHandshook(peerID transport.PeerID, version ProtocolVersion, channels []ChannelID)
+	OnPeerSubscribed(peerID transport.PeerID, channelID ChannelID)
+	OnPeerUnsubscribed(peerID transport.PeerID, channelID ChannelID)
+	OnPeerGone(peerID transport.PeerID)
 
 	// Session lifecycle
 	OnSessionStarted(channelID ChannelID, messageID MessageID, role SessionRole)
@@ -31,31 +35,31 @@ type Observer interface {
 	OnSessionDisposed(channelID ChannelID, messageID MessageID, reason string)
 
 	// Chunk events
-	OnChunkSent(peer PeerID, channelID ChannelID, messageID MessageID, bytesSent int)
-	OnChunkRcvd(peer PeerID, channelID ChannelID, messageID MessageID, verdict Verdict)
+	OnChunkSent(peer transport.PeerID, channelID ChannelID, messageID MessageID, bytesSent int)
+	OnChunkRcvd(peer transport.PeerID, channelID ChannelID, messageID MessageID, verdict Verdict)
 	OnChunkError(err ChunkProcessError)
 
 	// Routing and strategy progress events
-	OnRoutingUpdate(peer PeerID, channelID ChannelID, messageID MessageID)
-	OnPreambleOpened(peer PeerID, channelID ChannelID, messageID MessageID)
+	OnRoutingUpdate(peer transport.PeerID, channelID ChannelID, messageID MessageID)
+	OnPreambleOpened(peer transport.PeerID, channelID ChannelID, messageID MessageID)
 	OnStrategyProgress(channelID ChannelID, messageID MessageID, chunksHave, chunksNeed int)
 }
 
 // NoOpObserver is a no-op implementation of Observer.
 type NoOpObserver struct{}
 
-func (NoOpObserver) OnChannelAttached(ChannelID, error)                   {}
-func (NoOpObserver) OnChannelDropped(ChannelID)                           {}
-func (NoOpObserver) OnPeerHandshook(PeerID, ProtocolVersion, []ChannelID) {}
-func (NoOpObserver) OnPeerSubscribed(PeerID, ChannelID)                   {}
-func (NoOpObserver) OnPeerUnsubscribed(PeerID, ChannelID)                 {}
-func (NoOpObserver) OnPeerGone(PeerID)                                    {}
-func (NoOpObserver) OnSessionStarted(ChannelID, MessageID, SessionRole)   {}
-func (NoOpObserver) OnSessionDecoded(ChannelID, MessageID, time.Duration) {}
-func (NoOpObserver) OnSessionDisposed(ChannelID, MessageID, string)       {}
-func (NoOpObserver) OnChunkSent(PeerID, ChannelID, MessageID, int)        {}
-func (NoOpObserver) OnChunkRcvd(PeerID, ChannelID, MessageID, Verdict)    {}
-func (NoOpObserver) OnChunkError(ChunkProcessError)                       {}
-func (NoOpObserver) OnRoutingUpdate(PeerID, ChannelID, MessageID)         {}
-func (NoOpObserver) OnPreambleOpened(PeerID, ChannelID, MessageID)        {}
-func (NoOpObserver) OnStrategyProgress(ChannelID, MessageID, int, int)    {}
+func (NoOpObserver) OnChannelAttached(ChannelID, error)                             {}
+func (NoOpObserver) OnChannelDropped(ChannelID)                                     {}
+func (NoOpObserver) OnPeerHandshook(transport.PeerID, ProtocolVersion, []ChannelID) {}
+func (NoOpObserver) OnPeerSubscribed(transport.PeerID, ChannelID)                   {}
+func (NoOpObserver) OnPeerUnsubscribed(transport.PeerID, ChannelID)                 {}
+func (NoOpObserver) OnPeerGone(transport.PeerID)                                    {}
+func (NoOpObserver) OnSessionStarted(ChannelID, MessageID, SessionRole)             {}
+func (NoOpObserver) OnSessionDecoded(ChannelID, MessageID, time.Duration)           {}
+func (NoOpObserver) OnSessionDisposed(ChannelID, MessageID, string)                 {}
+func (NoOpObserver) OnChunkSent(transport.PeerID, ChannelID, MessageID, int)        {}
+func (NoOpObserver) OnChunkRcvd(transport.PeerID, ChannelID, MessageID, Verdict)    {}
+func (NoOpObserver) OnChunkError(ChunkProcessError)                                 {}
+func (NoOpObserver) OnRoutingUpdate(transport.PeerID, ChannelID, MessageID)         {}
+func (NoOpObserver) OnPreambleOpened(transport.PeerID, ChannelID, MessageID)        {}
+func (NoOpObserver) OnStrategyProgress(ChannelID, MessageID, int, int)              {}

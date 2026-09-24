@@ -1,5 +1,7 @@
 # ethp2p
 
+Status: draft.
+
 ethp2p is a next-generation p2p networking stack purpose-built for Ethereum.
 Its design principles are vertical integration, mechanical sympathy, zero idle resources,
 privacy by default, and the conviction that in a time-critical protocol,
@@ -119,7 +121,7 @@ On the horizon: datagram optimizations, TLS handshake improvements
 (including better 0-RTT resumption), and GRO for reduced per-packet overhead.
 
 <!-- MISSING from design doc:
-- Stream model: varint protocol ID per stream, no multistream-select, protocol ID registry (blocks=0x01, attestations=0x02...), stream manager with priority scheduling and stale preemption
+- Stream model: length-delimited varint selector per stream, no multistream-select, protocol ID registry (blocks=0x01, attestations=0x02...), stream manager with priority scheduling and stale preemption
 - Departure from libp2p protocol negotiation: one round trip per stream eliminated, compounds at thousands of streams per slot
 - TCP fallback details: Noise XX handshakes, fallback detection, periodic QUIC retry
 - Vertical integration argument: "we do not abstract over transports in the libp2p sense... the transport layer knows about deadlines, priorities, and slot phases because the transport layer is QUIC"

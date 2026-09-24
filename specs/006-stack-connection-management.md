@@ -1,6 +1,6 @@
 # Stack connection management and shared QUIC lifetimes
 
-Status: design proposal, not implemented.
+Status: partially implemented; see [Implementation status](#implementation-status).
 
 This document describes the proposed evolution of `ethp2p.Stack` from a per-connection stream router
 into the owner of ethp2p connection management.
@@ -11,6 +11,42 @@ The source baseline is commit `a0815c57`, compared with `main` at `b027eb51`.
 Runtime observations below come from the review of that commit on 2026-09-08.
 Proposed types and methods are sketches.
 They are not existing APIs, and omitted error handling must not be copied into an implementation.
+
+## Implementation status
+
+Implemented:
+
+- Per-side interest registration releases unclaimed views.
+  An unconsumed view no longer keeps a physical connection open.
+- A full delivery queue releases only that side's view.
+- `Ethp2pTransport.Dial` keeps the returned ethp2p view open when the libp2p queue is full.
+- Closing the libp2p listener detaches libp2p without stopping the endpoint.
+- Libp2p-initiated dials are libp2p-only.
+- Selector reads are bounded and cancellable.
+  Their cancellation callback is joined before stream handoff.
+- Every ethp2p stream starts with a length-delimited selector frame.
+  Each frame has a uvarint length and codepoint;
+  the first outgoing unidirectional stream carries the advertisement header with reserved selector
+  `0`.
+- The shared dispatcher peeks at bidirectional frames without consuming bytes.
+  Stack reads selectors for both stream directions.
+- `Peer.OpenUniStream` and `Peer.OpenStream` write selectors for subsystems.
+  The raw connection is not exposed through `Peer`.
+- Remote identity comes from the handshake's verify callback.
+- The direction constants were removed entirely, making the migration below moot.
+- Closing a view fails its pending and later accept, open, and datagram calls.
+  New streams routed to that view are reset.
+- Incoming SESS and CHUNK streams wait in bounded queues for the BCAST handshake.
+  A failed handshake and queue overflow cancel the affected streams.
+
+Not yet implemented:
+
+- Resetting streams already handed out when a view closes.
+- Outbound SESS stream admission that preserves CHUNK progress under stream-credit pressure.
+- Stack-owned connection management: `NewStack`, `Start`, `Connect`,
+  `Disconnect`, a connection table, and connection IDs.
+- Dial coordination.
+- The remaining open decisions.
 
 ## Recommendation
 
@@ -35,25 +71,26 @@ The implementation spans four responsibilities:
 
 | Component | Current responsibility | Missing contract |
 | --- | --- | --- |
-| `SharedTransport` | Owns the QUIC endpoint and publishes libp2p and ethp2p views | Complete view termination and coherent resource ownership |
-| `sharedConn` | Classifies inbound streams and tracks two close bits | Cancellation of operations belonging to a closed view |
-| `Stack.ServeConn` | Binds protocols and runs bidirectional and unidirectional routing loops | Connection identity, admission, dial coordination, and inspection |
-| `broadcast.Engine` | Tracks broadcast peers and channel subscriptions | Protection against cleanup from an older binding for the same peer |
+| `SharedTransport` | Owns the QUIC endpoint and publishes libp2p and ethp2p views | Tracking streams already handed to a view so they can be stopped before physical connection close |
+| `sharedConn` | Owns per-view cancellation, classifies bidirectional streams, and queues inbound streams | Completion tracking for streams already handed out |
+| `Stack.ServeConn` | Negotiates selectors, binds protocols, and routes incoming streams; its `Peer` API writes selectors for subsystem opens | Connection identity, admission, dial coordination, and inspection |
+| `broadcast.Engine` | Tracks peers and channel subscriptions, and ignores cleanup from a replaced binding | Connection admission and lifetime remain with the application |
+| `broadcast.PeerConn` | Performs BCAST handshake and queues early SESS and CHUNK streams until it completes | Outbound SESS stream admission under stream-credit pressure |
 
 The application currently accepts or dials a connection and launches `Stack.ServeConn` itself.
 The simulation also retains raw connections for bandwidth accounting in `BroadcastNode.conns`.
 
-`Stack` has a wait group for active `ServeConn` calls, but no table that can identify those calls.
+The baseline `Stack` had a wait group for active `ServeConn` calls.
+The current subsystem router has no connection table.
 It cannot list connections, select a connection for a peer, coalesce duplicate dials,
 or disconnect a specific peer.
 
 The relevant implementation files are:
 
 - [Stack construction and routing](../stack.go).
-- [Shared endpoint lifecycle](../transport/transport.go).
-- [Physical connection and stream dispatch](../transport/conn_shared.go).
-- [Ethp2p connection view](../transport/conn_ethp2p.go).
-- [Libp2p connection view](../transport/conn_libp2p.go).
+- [Shared endpoint lifecycle and physical stream dispatch](../transport/shared.go).
+- [Ethp2p connection view](../transport/ethp2p.go).
+- [Libp2p connection view](../transport/libp2p.go).
 - [Protocol registration and binding](../protocol/protocol.go).
 - [Broadcast connection lifecycle](../broadcast/peer.go).
 - [Broadcast control and stream creation](../broadcast/peer_ctrl.go).
@@ -77,9 +114,11 @@ This experiment identifies the immediate constraint.
 It does not establish 256 as a sufficient limit for every workload.
 
 The review also reproduced a hang after resetting BCAST while an idle SESS reader remained open.
-The corresponding wait dependency already existed on `main`,
-so it was excluded from the commit-specific findings.
-The new lifecycle design still needs to eliminate that dependency.
+The current `PeerConn` cancels inbound readers through its peer context and joins those readers
+before the binding finishes.
+Outbound SESS stream admission remains unresolved
+because opening a stream can block the broadcast control loop
+while QUIC stream credit is unavailable.
 
 Existing untagged tests passed with fresh race-enabled runs,
 including transport interoperability and simulation tests.
@@ -88,8 +127,7 @@ The integration-tagged broadcast tests failed at compilation.
 Those passing results used the local patched libp2p checkout.
 A clean export of the commit could not build
 because `go.mod` replaces libp2p with the ignored `ref/go-libp2p` directory.
-The [coexistence document](../LIBP2P_COEXISTENCE.md) already acknowledges
-that dependency limitation.
+That dependency limitation remains in the current checkout.
 
 The temporary reproduction tests were diagnostic artifacts outside the checkout.
 They are not part of this proposal's committed verification suite.
@@ -107,7 +145,7 @@ If those streams occupy every available slot,
 CHUNK cannot open a stream to make the progress that would allow a session to finish.
 
 The smallest workload fix is to raise the transport limit.
-The smallest complete fix also needs admission control for long-lived session streams.
+The smallest complete fix also needs admission control for outbound long-lived session streams.
 
 The proposed policy is to bound concurrently open outbound SESS streams per connection across all
 channels.
@@ -118,8 +156,8 @@ The broadcast control loop must remain able to process session completion and st
 while new sessions wait for capacity:
 
 ```go
-// CURRENT: handleSessionOpen can block the control loop.
-s, err := p.conn.OpenUniStream(p.ctx)
+// CURRENT: opening a SESS stream can block the control loop.
+s, err := p.streams.OpenUniStream(p.ctx, SESS)
 
 // PROPOSED: conceptual control-loop behavior.
 switch event := event.(type) {
@@ -154,9 +192,11 @@ or a different session lifetime that removes the dependency on CHUNK progress.
 
 ### A closed view must stop its operations
 
-Today `sharedConn.closeSide` changes a bit and closes physical QUIC only
-when both views have closed.
-Open, accept, and stream operations do not otherwise observe those bits.
+Partially implemented: closed views stop calls; handed-out streams remain live.
+
+Originally, `sharedConn.closeSide` only changed a bit and closed physical QUIC
+when both views had closed.
+Open and accept operations did not observe those bits.
 
 Retain the physical-close rule, but add a real lifetime to each view:
 
@@ -213,29 +253,27 @@ That behavior should be reused where its contract is sufficient,
 rather than duplicated without analysis.
 The transport must still handle queued streams, pending accepts, and operations racing with closure.
 
-### Read the complete selector under a deadline
+### Read the complete selector with bounded cancellation
 
-Transport classification needs only enough bytes to distinguish a libp2p frame from an ethp2p
-selector.
+This fix is implemented by `readSelector` for both `Stack` routing paths.
+
+The shared dispatcher peeks at the bidirectional frame length
+and first payload byte to distinguish libp2p from ethp2p without consuming either byte.
 It clears its deadline after that classification.
-`Stack` then reads the complete selector synchronously.
+`Stack` then reads the complete selector synchronously for both stream directions.
 
-The smallest fix is a bounded, cancellable selector read in both routing paths.
-Clear the read deadline before the handler takes ownership of the stream.
+The implemented fix is a bounded, cancellable selector read in both routing paths.
+Join the cancellation callback before the handler takes ownership of the stream.
 Reset only the offending stream on failure.
 
 ```go
-// CURRENT
-codepoint, err := protocol.ReadSelector(stream)
-
-// PROPOSED: schematic lifetime of the selector read.
-codepoint, err := readSelector(ctx, stream, selectorTimeout)
+// Both serveBi and serveUni use the same complete selector reader.
+selector, err := readSelector(ctx, stream)
 if err != nil {
-	stream.CancelRead(0)
 	return
 }
-// readSelector has finished cancellation cleanup and cleared its deadline.
-dispatch(codepoint, stream)
+// readSelector has finished its cancellation callback.
+dispatch(selector, stream)
 ```
 
 The helper must account for a cancellation callback that has already started.
@@ -243,32 +281,29 @@ Calling the stop function returned by `context.AfterFunc` does not itself wait
 for a running callback.
 Ownership must not pass to a handler while selector cleanup can still reset its stream.
 
-A deadline bounds the delay of the current serial routing loop.
+The timeout bounds the delay of the current serial routing loop.
 It does not make that loop independent of every slow selector or blocking handler.
 Bounded concurrent selector reads are a possible later improvement.
-That change must preserve broadcast's BCAST-before-session assumptions
+That change must preserve broadcast's bounded pre-handshake queues
 and avoid unbounded goroutine creation.
 
 ### Dispose of the undelivered libp2p view
 
-The outbound overflow fix is localized to
+This fix is implemented by `SharedTransport.offerLibp2p`.
+
+The outbound overflow fix is called from
 [Ethp2pTransport.Dial](../transport/ethp2p.go):
 
 ```go
-// CURRENT
+// BASELINE: the returned view was closed on libp2p queue overflow.
 select {
 case t.libQ <- sc.libp2p():
 default:
 	_ = ethp2p.Close()
 }
 
-// PROPOSED
-libp2p := sc.libp2p()
-select {
-case t.libQ <- libp2p:
-default:
-	_ = libp2p.CloseWithError(appFailure, errClosed.Error())
-}
+// CURRENT: offerLibp2p releases the libp2p view if its queue is full.
+t.shared.offerLibp2p(sc.libp2p())
 ```
 
 The returned ethp2p view remains usable.
@@ -276,13 +311,8 @@ The view that nobody received releases its interest in the physical connection.
 
 ### Complete the direction-constant migration
 
-The two remaining callers in [the integration helpers](../broadcast/tests/helpers_test.go) need
-`transport.ConnDirOut` and `transport.ConnDirIn` in place of `transport.Outbound` and
-`transport.Inbound`.
-
-This is a caller migration.
-Restoring aliases would preserve an obsolete internal API without solving a compatibility
-requirement.
+This migration is moot: direction constants were removed entirely.
+The integration helpers no longer use them.
 
 ## Ownership from first principles
 
@@ -307,23 +337,22 @@ Broadcast owns channel subscriptions and message sessions.
 It can report that its connection binding has failed,
 but it should not be the only component that knows an authenticated connection exists.
 
-For this iteration, retain the application's existing endpoint handoff:
-`Stack.Close` closes the shared endpoint, and the application then closes libp2p.
+The current shutdown order closes the libp2p host, then `SharedTransport`,
+then the supplied packet connection.
+The proposed `Stack.Close` would own the shared endpoint after a successful construction.
 Per-peer `Disconnect` closes ethp2p views only.
 A node-wide ban or physical disconnection is a different operation and needs explicit policy.
 
-The endpoint shutdown contract must also state who closes the supplied `net.PacketConn`.
-Closing an externally supplied `quic.Transport` is not proof that its socket has been closed.
-The current coexistence prose contains conflicting descriptions of socket ownership.
-Resolving that contract is part of implementation, not an incidental comment edit.
+The proposed endpoint shutdown contract must also state who closes the supplied `net.PacketConn`.
+Currently the application closes it after `SharedTransport`.
+Resolving that ownership for the proposed `Stack` is part of implementation.
 
 ## Stack construction and public methods
 
-The current stack accepts a peer ID and signing capability separately from the transport
-that actually authenticates connections:
+At the reviewed baseline, `Stack` held identity apart from its transport:
 
 ```go
-// CURRENT: simplified from stack.go.
+// BASELINE: simplified from stack.go at a0815c57.
 type Stack struct {
 	PeerID          transport.PeerID
 	Key             PrivKey
@@ -336,7 +365,10 @@ func (s *Stack) Init() error
 func (s *Stack) ServeConn(context.Context, transport.Conn) error
 ```
 
-`Key` currently participates in stack validation, while transport performs authentication.
+The current `Stack` has since become a subsystem router with `RegisterSubsystem`, `NotifyPeers`,
+`NotifyStreams`, `SetPolicy`, and `ServeConn`.
+The proposed connection ownership model still applies.
+At the baseline, `Key` participated in stack validation while transport performed authentication.
 The proposed constructor derives identity from its endpoint:
 
 ```go
@@ -424,7 +456,6 @@ type ConnID uint64
 type ConnInfo struct {
 	ID        ConnID
 	Peer      transport.PeerID
-	Direction transport.ConnDir
 	Active    bool
 	Since     time.Time
 }
@@ -590,11 +621,9 @@ A duplicate must not escape accounting because it is not the primary.
 
 ## The libp2p boundary limits what Stack can promise
 
-`Libp2pTransport.Dial` layers the ethp2p verification onto the libp2p caller's TLS configuration
-instead of replacing it, so an outbound libp2p dial now also publishes the ethp2p view when the peer
-negotiates `ethp2p_0`.
-The reverse direction is not symmetric:
-an inbound connection that negotiated only `libp2p` stays libp2p-only,
+`Libp2pTransport.Dial` uses the libp2p caller's TLS configuration unchanged,
+negotiates only `libp2p`, and never produces an ethp2p view.
+An inbound connection that negotiated only `libp2p` also stays libp2p-only,
 because classification happens once, at handshake time.
 
 The first version of `Stack.Connect` should initiate ethp2p-aware dials
@@ -609,14 +638,11 @@ peer table.
 Both dial entry points need common reuse and selection rules.
 An existing connection that negotiated only `libp2p` cannot silently change its negotiated protocol.
 
-Because libp2p-initiated dials now offer `ethp2p_0`,
-the adapter must preserve the caller's certificate verification, expected peer identity,
-and identity callback behavior.
-The libp2p transport expects its TLS callback to provide the authenticated remote key
-before its dial returns.
-`Libp2pTransport.Dial` therefore clones the caller's configuration
-and chains the ethp2p verification after the caller's own callback,
-rather than replacing the configuration wholesale.
+Libp2p-initiated dials are libp2p-only.
+One shared physical connection needs ethp2p-first dialing or a shared dial owner.
+A shared dial owner must preserve libp2p's certificate verification.
+It must also preserve the expected peer identity and identity callback behavior.
+The libp2p TLS callback must provide the remote key before `Dial` returns.
 
 I would keep this broader coordination as a separate implementation unit.
 That choice limits the first manager to a contract it can fulfill without replacing libp2p's peering
@@ -662,8 +688,7 @@ retaining two public lifecycle models.
 Selecting that adapter is part of the constructor implementation unit.
 
 The documentation migration includes the
-[transport package documentation](../transport/doc.go),
-[coexistence design](../LIBP2P_COEXISTENCE.md),
+[shared transport contract](../transport/doc.go),
 [broadcast framing specification](002-ec-broadcast.md), and simulation examples.
 The final descriptions must agree about endpoint startup, selector ownership, view closure,
 identity, and socket ownership.
@@ -673,9 +698,9 @@ identity, and socket ownership.
 | Unit | Result | Evidence required before the next unit |
 | --- | --- | --- |
 | Reproducible baseline | Resolvable patched dependency and compiling integration callers | A clean checkout builds and the integration test package compiles |
-| Local correctness fixes | Correct overflow disposal and bounded selector reads | Queue overflow preserves the returned view; incomplete selectors recover and respect cancellation |
+| Local correctness fixes (implemented) | Correct overflow disposal, bounded selector reads, unified selector frames, and selector-writing `Peer` methods | Queue overflow preserves the returned view; pre-handshake SESS and CHUNK streams wait or cancel correctly; incomplete selectors recover and respect cancellation |
 | View lifetimes | Closing a view aborts its work and releases stream tracking | Opposite view remains usable; blocked opens, accepts, reads, and writes terminate; completed-stream bookkeeping stays bounded |
-| Broadcast stream admission | Long-lived streams cannot prevent chunk progress | Concurrent and sustained broadcasts complete under small budgets, delayed reads, and cancellation |
+| Outbound broadcast stream admission | Long-lived SESS streams cannot prevent CHUNK progress | Concurrent and sustained broadcasts complete under small budgets, delayed reads, and cancellation |
 | Managed connection runtime | Stack identifies, owns, and removes each connection | Admission rollback, context cancellation, and stale cleanup leave no orphaned records or readers |
 | Construction and acceptance | Stack owns normal inbound connection delivery | Start and close races terminate; channel setup precedes acceptance; fatal accept errors are observable |
 | Dial coordination and inspection | Connect, snapshots, and disconnect share the admission path | Concurrent dials coalesce; disconnect defeats late publication; opposite-direction duplicates converge |

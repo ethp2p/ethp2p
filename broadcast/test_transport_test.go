@@ -6,18 +6,15 @@ import (
 	"io"
 	"time"
 
+	"github.com/ethp2p/ethp2p/protocol"
 	"github.com/ethp2p/ethp2p/transport"
 )
 
-// testTransport implements transport.Conn for in-process testing.
+// testTransport provides in-process unidirectional streams for peer tests.
 type testTransport struct {
 	streamSend chan []byte
 	streamRecv chan []byte
-	dataSend   chan []byte
-	dataRecv   chan []byte
 	ctx        context.Context
-	// remote is the peer identity reported for this connection.
-	remote transport.PeerID
 }
 
 func newTestTransportPair(ctx context.Context) (*testTransport, *testTransport) {
@@ -25,24 +22,15 @@ func newTestTransportPair(ctx context.Context) (*testTransport, *testTransport) 
 	// share one channel per direction and the receive side is not drained.
 	stream1to2 := make(chan []byte, 256)
 	stream2to1 := make(chan []byte, 256)
-	data1to2 := make(chan []byte, 256)
-	data2to1 := make(chan []byte, 256)
-
 	t1 := &testTransport{
 		streamSend: stream1to2,
 		streamRecv: stream2to1,
-		dataSend:   data1to2,
-		dataRecv:   data2to1,
 		ctx:        ctx,
-		remote:     "test-right",
 	}
 	t2 := &testTransport{
 		streamSend: stream2to1,
 		streamRecv: stream1to2,
-		dataSend:   data2to1,
-		dataRecv:   data1to2,
 		ctx:        ctx,
-		remote:     "test-left",
 	}
 	return t1, t2
 }
@@ -51,58 +39,25 @@ func newHighCapTransport(ctx context.Context) *testTransport {
 	return &testTransport{
 		streamSend: make(chan []byte, 4096),
 		streamRecv: make(chan []byte, 4096),
-		dataSend:   make(chan []byte, 4096),
-		dataRecv:   make(chan []byte, 4096),
 		ctx:        ctx,
-		remote:     "test-remote",
 	}
 }
 
-func (t *testTransport) SupportsStreams() bool             { return true }
-func (t *testTransport) SupportsDatagrams() bool           { return true }
-func (t *testTransport) Close() error                      { return nil }
-func (t *testTransport) ConnectionStats() (uint64, uint64) { return 0, 0 }
-func (t *testTransport) RemotePeerID() transport.PeerID    { return t.remote }
-
-func (t *testTransport) OpenStream(ctx context.Context) (transport.Stream, error) {
-	return &testStream{send: t.streamSend, recv: t.streamRecv, ctx: t.ctx}, nil
-}
-
-func (t *testTransport) AcceptBiStream(context.Context) (transport.Stream, error) {
-	return &testStream{send: t.streamSend, recv: t.streamRecv, ctx: t.ctx}, nil
-}
-
-func (t *testTransport) OpenUniStream(ctx context.Context) (transport.SendStream, error) {
-	return &testStream{send: t.streamSend, recv: t.streamRecv, ctx: t.ctx}, nil
+func (t *testTransport) OpenUniStream(ctx context.Context, selector protocol.Selector) (transport.SendStream, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	stream := &testStream{send: t.streamSend, recv: t.streamRecv, ctx: t.ctx}
+	if err := protocol.WriteSelector(stream, selector); err != nil {
+		stream.CancelWrite(0)
+		return nil, err
+	}
+	return stream, nil
 }
 
 func (t *testTransport) AcceptUniStream(context.Context) (transport.ReceiveStream, error) {
 	return &testStream{send: t.streamSend, recv: t.streamRecv, ctx: t.ctx}, nil
 }
-
-func (t *testTransport) SendDatagram(ctx context.Context, data []byte) error {
-	select {
-	case t.dataSend <- data:
-		return nil
-	case <-ctx.Done():
-		return ctx.Err()
-	case <-t.ctx.Done():
-		return t.ctx.Err()
-	}
-}
-
-func (t *testTransport) RecvDatagram(ctx context.Context) ([]byte, error) {
-	select {
-	case data := <-t.dataRecv:
-		return data, nil
-	case <-ctx.Done():
-		return nil, ctx.Err()
-	case <-t.ctx.Done():
-		return nil, t.ctx.Err()
-	}
-}
-
-var _ transport.Conn = (*testTransport)(nil)
 
 // testStream implements transport.Stream for in-process testing.
 type testStream struct {
@@ -173,12 +128,12 @@ func newTestBcastStreams(ctx context.Context) (transport.SendStream, transport.R
 // registerTestPeer constructs a PeerConn and injects it into the Engine via
 // onPeerHandshake, which is the real event loop pathway. The returned binding
 // lets callers identify the same peer in a subsequent cleanup event.
-func registerTestPeer(e *Engine, id PeerID, conn transport.Conn, version ProtocolVersion, channels []ChannelID) *PeerConn {
+func registerTestPeer(e *Engine, id transport.PeerID, streams uniStreamOpener, version ProtocolVersion, channels []ChannelID) *PeerConn {
 	bcastOut, bcastIn := newTestBcastStreams(e.ctx)
 	p := &PeerConn{
 		id:            id,
 		version:       version,
-		conn:          conn,
+		streams:       streams,
 		ctrlOut:       bcastOut,
 		ctrlIn:        bcastIn,
 		ctrlQ:         make(chan peerCtrlEvent, ctrlQCap),

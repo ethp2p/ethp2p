@@ -1,10 +1,11 @@
 package broadcast
 
 import (
+	"context"
 	"time"
 
 	bcastpb "github.com/ethp2p/ethp2p/broadcast/pb"
-	"github.com/ethp2p/ethp2p/protocol"
+	"github.com/ethp2p/ethp2p/internal/ctxutil"
 	"github.com/ethp2p/ethp2p/transport"
 )
 
@@ -36,7 +37,7 @@ func (p *PeerConn) runCtrlReader() {
 	if !p.awaitHandshake(p.ctrlIn) {
 		return
 	}
-	stop := onCancel(p.ctx, func() { p.ctrlIn.CancelRead(0) })
+	stop := ctxutil.OnCancel(p.ctx, func() { p.ctrlIn.CancelRead(0) })
 	defer stop()
 	defer p.ctrlIn.CancelRead(0)
 	var msg bcastpb.Bcast
@@ -165,18 +166,13 @@ func (p *PeerConn) handleCtrl(evt peerCtrlEvent, sessions map[sessionKey]*peerSe
 func (p *PeerConn) handleSessionOpen(e peerOpenSession, sessions map[sessionKey]*peerSessionState, slotCh chan<- slotUpdate) {
 	key := sessionKey{e.channelID, e.messageID}
 
-	s, err := p.conn.OpenUniStream(p.ctx)
+	s, err := p.streams.OpenUniStream(p.ctx, SESS)
 	if err != nil {
 		p.cancel()
 		return
 	}
-	stop := onCancel(p.ctx, func() { s.CancelWrite(0) })
+	stop := ctxutil.OnCancel(p.ctx, func() { s.CancelWrite(0) })
 	defer stop()
-	if err := protocol.WriteSelector(s, SESS); err != nil {
-		s.CancelWrite(0)
-		p.cancel()
-		return
-	}
 	frame := &bcastpb.Sess{Frame: &bcastpb.Sess_SessionOpen{SessionOpen: &bcastpb.Sess_Open{
 		Channel:       string(e.channelID),
 		MessageId:     string(e.messageID),
@@ -207,7 +203,7 @@ func (p *PeerConn) handleSessionOpen(e peerOpenSession, sessions map[sessionKey]
 // writeCtrl writes a control frame to the outbound BCAST stream. On
 // failure, cancels the peer context so all goroutines shut down.
 func (p *PeerConn) writeCtrl(msg *bcastpb.Bcast) error {
-	stop := onCancel(p.ctx, func() { p.ctrlOut.CancelWrite(0) })
+	stop := ctxutil.OnCancel(p.ctx, func() { p.ctrlOut.CancelWrite(0) })
 	defer stop()
 	if err := WriteFrame(p.ctrlOut, msg); err != nil {
 		p.cancel()
@@ -223,7 +219,7 @@ func (p *PeerConn) handleSendRoutingUpdate(e peerSendRouting, sessions map[sessi
 		return
 	}
 	stream := ss.sessOut
-	stop := onCancel(p.ctx, func() { stream.CancelWrite(0) })
+	stop := ctxutil.OnCancel(p.ctx, func() { stream.CancelWrite(0) })
 	defer stop()
 	frame := &bcastpb.Sess{Frame: &bcastpb.Sess_RoutingUpdate{RoutingUpdate: &bcastpb.Sess_Update{
 		Data: e.update,
@@ -281,19 +277,18 @@ func (p *PeerConn) doSendChunk(e peerSendChunk) (int, error) {
 		return 0, ErrChunkCancelled
 	}
 
-	s, err := p.conn.OpenUniStream(p.ctx)
+	deadline := time.Now().Add(chunkWriteTimeout)
+	ctx, cancel := context.WithDeadline(p.ctx, deadline)
+	defer cancel()
+	s, err := p.streams.OpenUniStream(ctx, CHUNK)
 	if err != nil {
 		return 0, ErrChunkWriteFail
 	}
 
-	s.SetWriteDeadline(time.Now().Add(chunkWriteTimeout))
-	stop := onCancel(p.ctx, func() { s.CancelWrite(0) })
+	s.SetWriteDeadline(deadline)
+	stop := ctxutil.OnCancel(ctx, func() { s.CancelWrite(0) })
 	defer stop()
 
-	if err := protocol.WriteSelector(s, CHUNK); err != nil {
-		s.CancelWrite(0)
-		return 0, ErrChunkWriteFail
-	}
 	frame := &bcastpb.Chunk_Header{
 		Channel:    string(e.channelID),
 		MessageId:  string(e.messageID),

@@ -13,8 +13,8 @@ import (
 // testProfile returns Interop with the incoming unidirectional stream limit set
 // explicitly. These tests drive the sender past the point where QUIC credit is
 // exhausted, which needs a limit the test controls: the delivery buffer between
-// acceptance and hand-over holds 16 streams, so the limit must exceed that for
-// the senders to fill it and block.
+// acceptance and hand-over holds maxStreamsPendingDelivery (8) streams, so
+// the limit must exceed that for the senders to fill it and block.
 func testProfile(incomingUni int64) Profile {
 	profile := Interop()
 	profile.maxIncomingUniStreams = incomingUni
@@ -37,9 +37,13 @@ type sharedPair struct {
 // closeServer releases both server views, which closes the physical connection
 // and notifies the peer.
 func (p sharedPair) closeServer(reason string) error {
+	// Release the libp2p view first. Closing the ethp2p view while libp2p
+	// still holds the connection resets its queued streams, which returns
+	// stream credit to the client; as the last release it closes the
+	// connection before that reset.
 	return errors.Join(
-		p.server.Close(),
 		p.serverLib.CloseWithError(0, reason),
+		p.server.Close(),
 	)
 }
 
@@ -60,7 +64,7 @@ func newSharedPair(t *testing.T, incomingUni int64) sharedPair {
 		accepted <- acceptResult{conn: conn, err: err}
 	}()
 
-	client, err := clientEth.Dial(ctx, serverPC.LocalAddr(), serverEth.PeerID())
+	client, err := clientEth.Dial(ctx, serverPC.LocalAddr(), serverEth.shared.PeerID())
 	if err != nil {
 		t.Fatal(err)
 	}

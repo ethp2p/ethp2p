@@ -43,7 +43,8 @@ type ReceiveStream interface {
 
 // Stream is a bidirectional QUIC stream routed to ethp2p.
 type Stream interface {
-	// Read implements io.Reader.
+	// Read implements io.Reader. A QUIC stream cancellation returns a
+	// *StreamResetError.
 	Read([]byte) (int, error)
 	// Write implements io.Writer.
 	Write([]byte) (int, error)
@@ -72,6 +73,12 @@ type Stream interface {
 // the transport API.
 type stream struct{ *quic.Stream }
 
+// Read translates QUIC stream cancellations into [StreamResetError].
+func (s stream) Read(p []byte) (int, error) {
+	n, err := s.Stream.Read(p)
+	return n, readError(err)
+}
+
 func (s stream) CancelRead(code uint64) { s.Stream.CancelRead(quic.StreamErrorCode(code)) }
 
 func (s stream) CancelWrite(code uint64) { s.Stream.CancelWrite(quic.StreamErrorCode(code)) }
@@ -94,13 +101,14 @@ type receiveStream struct{ *quic.ReceiveStream }
 // do not depend on quic-go error types.
 func (s receiveStream) Read(p []byte) (int, error) {
 	n, err := s.ReceiveStream.Read(p)
-	if err != nil {
-		var streamErr *quic.StreamError
-		if errors.As(err, &streamErr) {
-			return n, &StreamResetError{Code: uint64(streamErr.ErrorCode)}
-		}
+	return n, readError(err)
+}
+
+func readError(err error) error {
+	if streamErr, ok := errors.AsType[*quic.StreamError](err); ok {
+		return &StreamResetError{Code: uint64(streamErr.ErrorCode)}
 	}
-	return n, err
+	return err
 }
 
 func (s receiveStream) CancelRead(code uint64) {

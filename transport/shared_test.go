@@ -2,12 +2,59 @@ package transport
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"io"
 	"sync"
 	"testing"
 	"time"
 )
+
+// TestBidiReadReportsStreamReset exercises cancellation after classification,
+// when the remote ethp2p view has already received the stream.
+func TestBidiReadReportsStreamReset(t *testing.T) {
+	ctx := testContext(t)
+	_, _, clientEth, _ := newEndpoint(t)
+	_, _, serverEth, serverPC := newEndpoint(t)
+	accepted := make(chan struct {
+		conn Conn
+		err  error
+	}, 1)
+	go func() {
+		conn, err := serverEth.Accept(ctx)
+		accepted <- struct {
+			conn Conn
+			err  error
+		}{conn, err}
+	}()
+
+	clientConn, err := clientEth.Dial(ctx, serverPC.LocalAddr(), serverEth.shared.PeerID())
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := <-accepted
+	if result.err != nil {
+		t.Fatal(result.err)
+	}
+	serverConn := result.conn
+	out, err := clientConn.OpenStream(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := out.Write(frame([]byte{1})); err != nil {
+		t.Fatal(err)
+	}
+	in, err := serverConn.AcceptBiStream(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	out.CancelWrite(0x42)
+	_, err = io.Copy(io.Discard, in)
+	reset, ok := errors.AsType[*StreamResetError](err)
+	if !ok || reset.Code != 0x42 {
+		t.Fatalf("read after cancellation = %v, want StreamResetError code 0x42", err)
+	}
+}
 
 func TestEthp2pNegotiationRoutesBothProtocols(t *testing.T) {
 	ctx := testContext(t)
@@ -16,7 +63,7 @@ func TestEthp2pNegotiationRoutesBothProtocols(t *testing.T) {
 	clientListener := listen(t, clientLib, clientEth)
 	serverListener := listen(t, serverLib, serverEth)
 
-	clientEthConn, err := clientEth.Dial(ctx, serverPC.LocalAddr(), serverEth.PeerID())
+	clientEthConn, err := clientEth.Dial(ctx, serverPC.LocalAddr(), serverEth.shared.PeerID())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -116,7 +163,7 @@ func TestSimultaneousStreamsOnBothViews(t *testing.T) {
 	clientListener := listen(t, clientLib, clientEth)
 	serverListener := listen(t, serverLib, serverEth)
 
-	clientEthConn, err := clientEth.Dial(ctx, serverPC.LocalAddr(), serverEth.PeerID())
+	clientEthConn, err := clientEth.Dial(ctx, serverPC.LocalAddr(), serverEth.shared.PeerID())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -134,7 +181,8 @@ func TestSimultaneousStreamsOnBothViews(t *testing.T) {
 	}
 
 	// Four concurrent streams per view keeps bidi delivery bursts within
-	// their queue capacity (deliveryQueueLen), which resets excess.
+	// their stream delivery queue capacity (maxStreamsPendingDelivery, 8),
+	// which resets excess.
 	const streams = 4
 	payloadLen := 64 << 10
 	deadline := time.Now().Add(4 * time.Second)

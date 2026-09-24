@@ -4,6 +4,8 @@ import (
 	"context"
 	"io"
 	"time"
+
+	"github.com/ethp2p/ethp2p/transport"
 )
 
 // DedupCancel is a handle the session passes into TakeChunk so the
@@ -44,8 +46,6 @@ type ChunkIdent interface {
 }
 
 type (
-	// TODO formally define PeerID in ethp2p
-	PeerID string
 	// TODO MessageID could be a structured / nested token, so the app can dispose all sessions related to, e.g. slot N
 	MessageID string
 	// TODO ChannelID will be abbreviated after handshake.
@@ -88,7 +88,7 @@ const (
 // implementations read via getter methods; unexported fields prevent
 // external writes.
 type PeerSessionStats struct {
-	peerID   PeerID
+	peerID   transport.PeerID
 	sent     int
 	recv     int
 	inflight int
@@ -96,21 +96,21 @@ type PeerSessionStats struct {
 }
 
 // NewPeerSessionStats creates stats for the given peer.
-func NewPeerSessionStats(peer PeerID) *PeerSessionStats {
+func NewPeerSessionStats(peer transport.PeerID) *PeerSessionStats {
 	return &PeerSessionStats{peerID: peer}
 }
 
-func (s *PeerSessionStats) PeerID() PeerID         { return s.peerID }
-func (s *PeerSessionStats) Sent() int              { return s.sent }
-func (s *PeerSessionStats) Recv() int              { return s.recv }
-func (s *PeerSessionStats) Inflight() int          { return s.inflight }
-func (s *PeerSessionStats) Latency() time.Duration { return s.latency }
+func (s *PeerSessionStats) PeerID() transport.PeerID { return s.peerID }
+func (s *PeerSessionStats) Sent() int                { return s.sent }
+func (s *PeerSessionStats) Recv() int                { return s.recv }
+func (s *PeerSessionStats) Inflight() int            { return s.inflight }
+func (s *PeerSessionStats) Latency() time.Duration   { return s.latency }
 
 // VerifyResult carries the outcome of an async chunk verification
 // submitted via VerifyChunk. Posted to the Verified() channel and
 // processed on the channel goroutine.
 type VerifyResult[CI ChunkIdent] struct {
-	Peer    PeerID
+	Peer    transport.PeerID
 	ChunkID CI
 	Data    []byte
 	Verdict Verdict
@@ -217,7 +217,7 @@ type Strategy[CI ChunkIdent, R Wire] interface {
 	//
 	// stats is owned by the session. Mutations happen only between
 	// strategy calls; it is safe to retain the pointer.
-	AttachPeer(peer PeerID, stats *PeerSessionStats)
+	AttachPeer(peer transport.PeerID, stats *PeerSessionStats)
 
 	// DetachPeer removes a peer. completed=true means the peer
 	// signaled successful reconstruction (SESS stream reset with
@@ -225,7 +225,7 @@ type Strategy[CI ChunkIdent, R Wire] interface {
 	// session cancels all in-flight sends for this peer before
 	// calling DetachPeer, so any subsequent ChunkSent callbacks for
 	// this peer will arrive with ok=false.
-	DetachPeer(peer PeerID, completed bool)
+	DetachPeer(peer transport.PeerID, completed bool)
 
 	// VerifyChunk verifies an inbound chunk before acceptance. Returns
 	// VerdictAccepted or VerdictInvalid for synchronous verification
@@ -237,7 +237,7 @@ type Strategy[CI ChunkIdent, R Wire] interface {
 	// it reads only immutable state set at construction (preamble
 	// hashes, commitment parameters). Results are posted to
 	// Verified() and processed on the channel goroutine.
-	VerifyChunk(peer PeerID, chunkID CI, data []byte) Verdict
+	VerifyChunk(peer transport.PeerID, chunkID CI, data []byte) Verdict
 
 	// Verified returns a channel that delivers results of async
 	// verifications submitted via VerifyChunk (VerdictPending).
@@ -266,7 +266,7 @@ type Strategy[CI ChunkIdent, R Wire] interface {
 	// background goroutine. After returning true, the strategy must
 	// reject further chunks so the state remains frozen for the
 	// concurrent Decode call.
-	TakeChunk(peer PeerID, chunkID CI, data []byte, dedup *DedupCancel) (Verdict, bool, error)
+	TakeChunk(peer transport.PeerID, chunkID CI, data []byte, dedup *DedupCancel) (Verdict, bool, error)
 
 	// RoutingUpdate delivers a peer's routing state (e.g. a bitmap
 	// of which chunks they have). The strategy updates its internal
@@ -274,7 +274,7 @@ type Strategy[CI ChunkIdent, R Wire] interface {
 	// sending chunks the peer already has. Returns handles of
 	// in-flight sends to this peer that are now redundant (the peer
 	// acquired the data through another path).
-	RoutingUpdate(peer PeerID, update R) (cancel []ChunkHandle, err error)
+	RoutingUpdate(peer transport.PeerID, update R) (cancel []ChunkHandle, err error)
 
 	// PollChunks returns pending chunk dispatches. Each dispatch
 	// targets a specific peer and carries a ChunkID whose Marshal()
@@ -298,7 +298,7 @@ type Strategy[CI ChunkIdent, R Wire] interface {
 	// from ChunkID.Handle(). err=nil means the chunk was written to
 	// the wire; non-nil carries the failure reason (ErrChunkSlotFull,
 	// ErrChunkWriteFail, ErrChunkCancelled, etc.).
-	ChunkSent(peer PeerID, handle ChunkHandle, err error)
+	ChunkSent(peer transport.PeerID, handle ChunkHandle, err error)
 
 	// Progress returns decode progress: chunks received and chunks needed.
 	Progress() (have, need int)
@@ -333,7 +333,7 @@ type Scheme[CI ChunkIdent, R Wire, P Wire] struct {
 // ChunkDispatch directs a chunk to a specific peer. The session
 // extracts the correlation handle via ChunkID.Handle().
 type ChunkDispatch[CI ChunkIdent] struct {
-	Peer    PeerID
+	Peer    transport.PeerID
 	ChunkID CI
 	Data    []byte
 }

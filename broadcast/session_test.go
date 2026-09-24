@@ -5,6 +5,8 @@ import (
 	"context"
 	"testing"
 	"testing/synctest"
+
+	"github.com/ethp2p/ethp2p/transport"
 )
 
 // testChunk is the canonical chunk type for all core tests.
@@ -44,28 +46,28 @@ func (p *testPreamble) Unmarshal(data []byte) error { *p = testPreamble(data); r
 // --- mockStrategy implements Strategy[*testChunk, *testRouting] ---
 
 type mockTakeCall struct {
-	peer    PeerID
+	peer    transport.PeerID
 	chunk   *testChunk
 	verdict Verdict
 }
 
 type mockDetachCall struct {
-	peer      PeerID
+	peer      transport.PeerID
 	completed bool
 }
 
 type mockRoutingCall struct {
-	peer   PeerID
+	peer   transport.PeerID
 	update *testRouting
 }
 
 type mockSentCall struct {
-	peer PeerID
+	peer transport.PeerID
 	ok   bool
 }
 
 type mockAttachCall struct {
-	peer PeerID
+	peer transport.PeerID
 }
 
 type mockStrategy struct {
@@ -99,7 +101,7 @@ func newMockStrategy() *mockStrategy {
 }
 
 func (ms *mockStrategy) HaveChunk(_ *testChunk) bool { return ms.haveChunk }
-func (ms *mockStrategy) VerifyChunk(_ PeerID, _ *testChunk, _ []byte) Verdict {
+func (ms *mockStrategy) VerifyChunk(_ transport.PeerID, _ *testChunk, _ []byte) Verdict {
 	return ms.verifyVerdict
 }
 func (ms *mockStrategy) Verified() <-chan VerifyResult[*testChunk] {
@@ -111,15 +113,15 @@ func (ms *mockStrategy) DedupKey(chunkID *testChunk) []byte {
 	}
 	return nil
 }
-func (ms *mockStrategy) AttachPeer(peer PeerID, stats *PeerSessionStats) {
+func (ms *mockStrategy) AttachPeer(peer transport.PeerID, stats *PeerSessionStats) {
 	ms.attachCalls = append(ms.attachCalls, mockAttachCall{peer: peer})
 }
 
-func (ms *mockStrategy) DetachPeer(peer PeerID, completed bool) {
+func (ms *mockStrategy) DetachPeer(peer transport.PeerID, completed bool) {
 	ms.detachCalls = append(ms.detachCalls, mockDetachCall{peer: peer, completed: completed})
 }
 
-func (ms *mockStrategy) TakeChunk(peer PeerID, chunk *testChunk, data []byte, dedup *DedupCancel) (Verdict, bool, error) {
+func (ms *mockStrategy) TakeChunk(peer transport.PeerID, chunk *testChunk, data []byte, dedup *DedupCancel) (Verdict, bool, error) {
 	ms.takeCalls = append(ms.takeCalls, mockTakeCall{
 		peer:    peer,
 		chunk:   &testChunk{ID: chunk.ID, Data: append([]byte(nil), data...)},
@@ -135,7 +137,7 @@ func (ms *mockStrategy) Decode() ([]byte, error) {
 	return ms.decodeResult, ms.decodeErr
 }
 
-func (ms *mockStrategy) RoutingUpdate(peer PeerID, update *testRouting) ([]ChunkHandle, error) {
+func (ms *mockStrategy) RoutingUpdate(peer transport.PeerID, update *testRouting) ([]ChunkHandle, error) {
 	ms.routingCalls = append(ms.routingCalls, mockRoutingCall{peer: peer, update: update})
 	return nil, nil
 }
@@ -154,7 +156,7 @@ func (ms *mockStrategy) PollRouting(force bool) (*testRouting, bool) {
 	return nil, false
 }
 
-func (ms *mockStrategy) ChunkSent(peer PeerID, _ ChunkHandle, err error) {
+func (ms *mockStrategy) ChunkSent(peer transport.PeerID, _ ChunkHandle, err error) {
 	ms.sentCalls = append(ms.sentCalls, mockSentCall{peer: peer, ok: err == nil})
 }
 
@@ -173,13 +175,13 @@ var _ Strategy[*testChunk, *testRouting] = (*mockStrategy)(nil)
 
 // --- Helper ---
 
-func testPeer(peerID PeerID) *PeerConn {
+func testPeer(peerID transport.PeerID) *PeerConn {
 	ctx, cancel := context.WithCancel(context.Background())
 	_ = cancel
 	bcastOut, _ := newTestBcastStreams(ctx)
 	return &PeerConn{
 		id:            peerID,
-		conn:          newHighCapTransport(context.Background()),
+		streams:       newHighCapTransport(context.Background()),
 		ctrlOut:       bcastOut,
 		ctrlQ:         make(chan peerCtrlEvent, ctrlQCap),
 		wakeCh:        make(chan struct{}, 1),
@@ -226,7 +228,7 @@ func TestSession_EventOrdering(t *testing.T) {
 			t.Fatalf("expected 3 TakeChunk calls, got %d", len(strat.takeCalls))
 		}
 
-		wantPeers := []PeerID{"p1", "p2", "p3"}
+		wantPeers := []transport.PeerID{"p1", "p2", "p3"}
 		for i, call := range strat.takeCalls {
 			if call.peer != wantPeers[i] {
 				t.Errorf("call %d: peer=%q, want %q", i, call.peer, wantPeers[i])

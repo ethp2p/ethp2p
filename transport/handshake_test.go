@@ -23,7 +23,7 @@ func TestVerifyRecordsRemoteKeyInSlot(t *testing.T) {
 	}
 
 	slot := &remoteIdentitySlot{}
-	config := ours.dialConfig(slot, theirs.peerID)
+	config := ours.connConfig(slot, theirs.peerID)
 
 	raw := theirs.config.Certificates[0].Certificate[0]
 	if err := config.VerifyPeerCertificate([][]byte{raw}, nil); err != nil {
@@ -54,7 +54,7 @@ func TestVerifyLeavesSlotEmptyOnMismatch(t *testing.T) {
 
 	slot := &remoteIdentitySlot{}
 	// Pin a peer identity that does not match the certificate presented.
-	config := ours.dialConfig(slot, unexpected.peerID)
+	config := ours.connConfig(slot, unexpected.peerID)
 
 	raw := theirs.config.Certificates[0].Certificate[0]
 	err = config.VerifyPeerCertificate([][]byte{raw}, nil)
@@ -79,7 +79,7 @@ func TestVerifyWithoutSlotStillAuthenticates(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	config := ours.verify(nil, "")
+	config := ours.connConfig(nil, "")
 	raw := theirs.config.Certificates[0].Certificate[0]
 	if err := config.VerifyPeerCertificate([][]byte{raw}, nil); err != nil {
 		t.Fatalf("verify with a nil slot rejected a valid certificate: %v", err)

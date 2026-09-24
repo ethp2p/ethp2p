@@ -43,7 +43,7 @@ type Engine struct {
 	// carry the binding that stopped and must compare it with this map before
 	// removing anything, otherwise an old connection can tear down its
 	// replacement.
-	peers map[PeerID]*PeerConn
+	peers map[transport.PeerID]*PeerConn
 
 	// bindings lets a stream event create the same PeerConn that a peer event
 	// would create. The root stack deliberately does not promise processing
@@ -56,7 +56,7 @@ type Engine struct {
 	// peerSubs tracks which channels each remote peer is subscribed to.
 	// Entries are inserted upon handshake, and subsequently updated
 	// as the peer subscribes and unsubscribes.
-	peerSubs map[PeerID]map[ChannelID]struct{}
+	peerSubs map[transport.PeerID]map[ChannelID]struct{}
 
 	eventCh chan engineEvent
 
@@ -81,9 +81,9 @@ func NewEngine(config EngineConfig) *Engine {
 	e := &Engine{
 		config:   config,
 		channels: make(map[ChannelID]*channelHandle),
-		peers:    make(map[PeerID]*PeerConn),
+		peers:    make(map[transport.PeerID]*PeerConn),
 		bindings: make(map[*ethp2p.Peer]*PeerConn),
-		peerSubs: make(map[PeerID]map[ChannelID]struct{}),
+		peerSubs: make(map[transport.PeerID]map[ChannelID]struct{}),
 		eventCh:  make(chan engineEvent, 128),
 		ctx:      ctx,
 		cancel:   cancel,
@@ -258,7 +258,7 @@ func (e *Engine) bindPeer(peer *ethp2p.Peer) *PeerConn {
 		return p
 	}
 
-	p := newPeerConn(e, peer.Context, peer.Conn)
+	p := newPeerConn(e, peer.Context, peer.ID, peer)
 	p.peer = peer
 	e.bindings[peer] = p
 	e.wg.Go(func() {
@@ -280,17 +280,17 @@ func (e *Engine) handleStreamEvent(event ethp2p.StreamEvent) {
 	if _, ok := event.Stream.(transport.Stream); ok {
 		// Broadcast's wire protocols use unidirectional streams. A bidi
 		// event is a routing mismatch; reset both halves before dropping it.
-		e.disposeStream(event.Stream)
+		event.Reject()
 		return
 	}
 	if !isBroadcastSelector(event.Selector) {
-		e.disposeStream(event.Stream)
+		event.Reject()
 		return
 	}
 
 	p := e.bindPeer(event.Peer)
 	if p == nil {
-		e.disposeStream(event.Stream)
+		event.Reject()
 		return
 	}
 	p.enqueueStream(event.Selector, event.Stream)
@@ -381,16 +381,6 @@ func (e *Engine) removeBinding(p *PeerConn) {
 	}
 }
 
-func (e *Engine) disposeStream(stream transport.ReceiveStream) {
-	if stream != nil {
-		if bidi, ok := stream.(transport.Stream); ok {
-			_ = bidi.Reset()
-			return
-		}
-		stream.CancelRead(0)
-	}
-}
-
 func (e *Engine) enrolPeerToChannel(p *PeerConn, channelID ChannelID) {
 	t, ok := e.channels[channelID]
 	if !ok || t.inbox == nil {
@@ -424,7 +414,7 @@ func (e *Engine) shutdown() {
 		case ev := <-e.eventCh:
 			switch ev.kind {
 			case evStreamEvent:
-				e.disposeStream(ev.stream.Stream)
+				ev.stream.Reject()
 			case evPeerHandshake:
 				if ev.peer != nil {
 					ev.peer.Close()

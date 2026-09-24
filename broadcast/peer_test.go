@@ -13,35 +13,26 @@ import (
 	"github.com/ethp2p/ethp2p/transport"
 )
 
-type uniHandshakeTransport struct {
-	*testTransport
-}
-
-func (t *uniHandshakeTransport) AcceptBiStream(ctx context.Context) (transport.Stream, error) {
-	<-ctx.Done()
-	return nil, ctx.Err()
-}
-
 func TestHandshakeUsesAuthenticatedPeerIDs(t *testing.T) {
 	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 	defer cancel()
 
 	leftRaw, rightRaw := newTestTransportPair(ctx)
-	leftRaw.remote = "authenticated-right"
-	rightRaw.remote = "authenticated-left"
 	left := newPeerConn(
 		&Engine{ctx: ctx, config: EngineConfig{Observer: NoOpObserver{}}},
 		ctx,
-		&uniHandshakeTransport{testTransport: leftRaw},
+		"authenticated-right",
+		leftRaw,
 	)
 	right := newPeerConn(
 		&Engine{ctx: ctx, config: EngineConfig{Observer: NoOpObserver{}}},
 		ctx,
-		&uniHandshakeTransport{testTransport: rightRaw},
+		"authenticated-left",
+		rightRaw,
 	)
 
 	type result struct {
-		peer PeerID
+		peer transport.PeerID
 		err  error
 	}
 	leftResult := make(chan result, 1)
@@ -97,21 +88,6 @@ type bufferedReceiveStream struct {
 
 func (s bufferedReceiveStream) Read(p []byte) (int, error) { return s.reader.Read(p) }
 
-func TestHandshakeRequiresAuthenticatedPeerIDs(t *testing.T) {
-	ctx, cancel := context.WithTimeout(t.Context(), time.Second)
-	defer cancel()
-	raw, _ := newTestTransportPair(ctx)
-	raw.remote = ""
-	peer := newPeerConn(
-		&Engine{ctx: ctx, config: EngineConfig{Observer: NoOpObserver{}}},
-		ctx,
-		&uniHandshakeTransport{testTransport: raw},
-	)
-	if _, _, err := peer.handshake(ctx, nil); err == nil {
-		t.Fatal("handshake accepted empty authenticated identity")
-	}
-}
-
 func TestInboundStreamsWaitForHandshake(t *testing.T) {
 	tests := []struct {
 		name   string
@@ -125,7 +101,7 @@ func TestInboundStreamsWaitForHandshake(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			engine := NewEngine(EngineConfig{})
 			t.Cleanup(func() { _ = engine.Close() })
-			peer := newPeerConn(engine, t.Context(), nil)
+			peer := newPeerConn(engine, t.Context(), "", nil)
 			peer.bcastAccepted.Store(true)
 			peer.handlersMu.Lock()
 			peer.ready = true
@@ -159,7 +135,7 @@ func TestBindContextUnblocksChunkBackpressure(t *testing.T) {
 	engine := NewEngine(EngineConfig{MaxInboundChunkStreams: 1})
 	t.Cleanup(func() { _ = engine.Close() })
 	bindCtx, cancelBind := context.WithCancel(t.Context())
-	peer := newPeerConn(engine, bindCtx, nil)
+	peer := newPeerConn(engine, bindCtx, "", nil)
 	peer.bcastAccepted.Store(true)
 	peer.handlersMu.Lock()
 	peer.ready = true

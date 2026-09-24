@@ -6,9 +6,6 @@ on:
   # no branch filter: stacked PRs target non-main bases (e.g. quictls-handshake)
   pull_request:
 
-env:
-  GO_VERSION: "1.25"
-
 jobs:
   markdown-lint:
     runs-on: ubuntu-latest
@@ -28,7 +25,7 @@ jobs:
 
       - uses: actions/setup-go@v5
         with:
-          go-version: ${{ env.GO_VERSION }}
+          go-version-file: go.mod
 
       - name: Run go vet
         run: go vet ./...
@@ -46,10 +43,13 @@ jobs:
 
       - uses: actions/setup-go@v5
         with:
-          go-version: ${{ env.GO_VERSION }}
+          go-version-file: go.mod
 
       - name: Run unit tests
-        run: go test -race -v ./broadcast/...
+        run: go test -race . ./protocol/... ./transport/... ./broadcast/...
+
+      - name: Run integration tests
+        run: go test -race -tags=integration ./broadcast/tests/...
 
   simnet-rs:
     runs-on: ubuntu-latest
@@ -58,7 +58,7 @@ jobs:
 
       - uses: actions/setup-go@v5
         with:
-          go-version: ${{ env.GO_VERSION }}
+          go-version-file: go.mod
 
       - name: Run RS simnet tests
         run: go test -race -v -run 'TestNetwork/RS|TestNodeReconnection' ./sim/...
@@ -70,7 +70,7 @@ jobs:
 
       - uses: actions/setup-go@v5
         with:
-          go-version: ${{ env.GO_VERSION }}
+          go-version-file: go.mod
 
       - name: Run Gossipsub simnet tests
         run: go test -race -v -run 'TestNetwork/Gossipsub' ./sim/...
@@ -83,7 +83,7 @@ jobs:
 
       - uses: actions/setup-go@v5
         with:
-          go-version: ${{ env.GO_VERSION }}
+          go-version-file: go.mod
 
       - name: Run large network RS tests
         run: go test -race -v -run 'TestLargeNetwork_RS|TestScalability' ./sim/...

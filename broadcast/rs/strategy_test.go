@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/ethp2p/ethp2p/broadcast"
+	"github.com/ethp2p/ethp2p/transport"
 )
 
 func ssTestConfig() *Config {
@@ -23,11 +24,11 @@ func ssTestPayload(_ *testing.T, n int) []byte {
 	return payload
 }
 
-func ssTestStats(peer broadcast.PeerID) *broadcast.PeerSessionStats {
+func ssTestStats(peer transport.PeerID) *broadcast.PeerSessionStats {
 	return broadcast.NewPeerSessionStats(peer)
 }
 
-func takeChunk(s *strategy, peer broadcast.PeerID, idx int, data []byte) (broadcast.Verdict, bool, error) {
+func takeChunk(s *strategy, peer transport.PeerID, idx int, data []byte) (broadcast.Verdict, bool, error) {
 	chunkID := &ChunkIdent{
 		Index: idx,
 	}

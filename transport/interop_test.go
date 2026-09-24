@@ -13,551 +13,216 @@ import (
 	"testing"
 	"time"
 
-	transport "github.com/ethp2p/ethp2p/transport"
+	wire "github.com/ethp2p/ethp2p/protocol"
+	"github.com/ethp2p/ethp2p/transport"
 	"github.com/libp2p/go-libp2p"
 	"github.com/libp2p/go-libp2p/core/crypto"
 	"github.com/libp2p/go-libp2p/core/host"
 	"github.com/libp2p/go-libp2p/core/network"
 	"github.com/libp2p/go-libp2p/core/peer"
-	"github.com/libp2p/go-libp2p/core/protocol"
+	protocol "github.com/libp2p/go-libp2p/core/protocol"
 	libp2ptls "github.com/libp2p/go-libp2p/p2p/security/tls"
 	libp2pquic "github.com/libp2p/go-libp2p/p2p/transport/quic"
 	"github.com/libp2p/go-libp2p/p2p/transport/quicreuse"
 	ma "github.com/multiformats/go-multiaddr"
 	manet "github.com/multiformats/go-multiaddr/net"
-	varint "github.com/multiformats/go-varint"
 	"github.com/quic-go/quic-go"
 )
 
-func TestInteropRealLibp2pExchange(t *testing.T) {
-	for _, family := range []ipFamily{ipv4, ipv6} {
-		t.Run(string(family), func(t *testing.T) {
-			if family == ipv6 {
-				probe, err := net.ListenUDP("udp6", &net.UDPAddr{IP: net.IPv6loopback})
-				if err != nil {
-					t.Skipf("IPv6 loopback unavailable: %v", err)
-				}
-				_ = probe.Close()
-			}
-			for _, direction := range []dialDirection{sharedDialsStock, stockDialsShared} {
-				t.Run(string(direction), func(t *testing.T) {
-					shared := newSharedHostFamily(t, family, withListener)
-					stock := newQUICHostFamily(t, family)
-					longProtocol := interopProtocol("/" + strings.Repeat("selector", 20))
-					serveEcho(shared.host, echoProtocol)
-					serveEcho(stock, echoProtocol)
-					serveEcho(shared.host, longProtocol)
-					serveEcho(stock, longProtocol)
+const echoProtocol = "/ethp2p/interop/echo/1.0.0"
 
-					switch direction {
-					case sharedDialsStock:
-						connectHosts(t, shared.host, stock)
-					case stockDialsShared:
-						connectHosts(t, stock, shared.host)
-					}
-
-					exchange(t, shared.host, stock, echoProtocol, interopPayload("shared to stock"))
-					exchange(t, stock, shared.host, echoProtocol, interopPayload("stock to shared"))
-					exchange(t, shared.host, stock, longProtocol, interopPayload("multibyte selector"))
-					assertNoEthp2p(t, shared.eth)
-				})
-			}
-		})
-	}
-}
-
-func TestInteropWrongPeerID(t *testing.T) {
-	for _, direction := range []dialDirection{sharedDialsStock, stockDialsShared} {
-		t.Run(string(direction), func(t *testing.T) {
-			shared := newSharedHost(t)
-			stock := newQUICHost(t)
-			wrongID := newPeerID(t)
-			ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
-			defer cancel()
-
-			var err error
-			switch direction {
-			case sharedDialsStock:
-				err = connectHostsContext(ctx, shared.host, wrongID, []ma.Multiaddr{loopbackQUICAddr(t, stock)})
-			case stockDialsShared:
-				err = connectHostsContext(ctx, stock, wrongID, []ma.Multiaddr{loopbackQUICAddr(t, shared.host)})
-			}
-			if err == nil {
-				t.Fatal("connection with the wrong peer ID succeeded")
-			}
-			if got := len(shared.host.Network().Conns()); got != 0 {
-				t.Fatalf("shared host retained %d connections after rejection", got)
-			}
-		})
-	}
-}
-
-func TestInteropParallelLibp2pStreams(t *testing.T) {
-	shared := newSharedHost(t)
-	stock := newQUICHost(t)
-	serveEcho(stock, echoProtocol)
-	connectHosts(t, shared.host, stock)
-
-	const streams = 16
-	errs := make(chan error, streams)
-	for i := range streams {
-		go func() {
-			ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
-			defer cancel()
-			errs <- exchangeContext(ctx, shared.host, stock.ID(), echoProtocol, interopPayload(fmt.Sprintf("stream %d", i)))
-		}()
-	}
-	for range streams {
-		if err := <-errs; err != nil {
-			t.Fatal(err)
-		}
-	}
-}
-
-func TestInteropLibp2pDialStaysLibp2p(t *testing.T) {
-	left := newSharedHostMode(t, withoutListener)
-	right := newSharedHost(t)
-	serveEcho(right.host, echoProtocol)
-	connectHosts(t, left.host, right.host)
-
-	// A libp2p-initiated connection serves the libp2p stack only: neither
-	// side's ethp2p queue receives a view.
-	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
-	defer cancel()
-	if err := exchangeContext(ctx, left.host, right.host.ID(), echoProtocol, interopPayload("libp2p on shared QUIC")); err != nil {
-		t.Fatal(err)
-	}
-	assertNoEthp2p(t, left.eth)
-	assertNoEthp2p(t, right.eth)
-}
-
-func TestInteropConnectionWindowGrows(t *testing.T) {
-	client := newSharedHostMode(t, withoutListener)
-	server := newSharedHost(t)
-	serveEcho(server.host, echoProtocol)
-	connectHosts(t, client.host, server.host)
-
-	const payloadSize = 4 << 20
-	exchange(t, client.host, server.host, echoProtocol, make(interopPayload, payloadSize))
-}
-
-func TestInteropMixedTrafficOnEthp2pDial(t *testing.T) {
-	left := newSharedHost(t)
-	right := newSharedHost(t)
-	serveEcho(right.host, echoProtocol)
-	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
-	defer cancel()
-
-	pair := connectEth(t, left.eth, right.eth, right.udp.LocalAddr())
-	waitConnected(t, left.host, right.host)
-
-	// Drive both views of the shared connection at the same time.
-	var wg sync.WaitGroup
-	wg.Go(func() {
-		if err := exchangeContext(ctx, left.host, right.host.ID(), echoProtocol, interopPayload("libp2p after ethp2p dial")); err != nil {
-			t.Error(err)
-		}
-	})
-	wg.Go(func() {
-		if err := exchangeEth(ctx, pair.dialed, pair.accepted, ethPayload("ethp2p initiated")); err != nil {
-			t.Error(err)
-		}
-	})
-	wg.Wait()
-}
-
-func TestInteropEthp2pWithoutLibp2pListener(t *testing.T) {
-	left := newSharedHostMode(t, withoutListener)
-	right := newSharedHostMode(t, withoutListener)
-	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
-	defer cancel()
-
-	pair := connectEth(t, left.eth, right.eth, right.udp.LocalAddr())
-	if err := exchangeEth(ctx, pair.dialed, pair.accepted, ethPayload("no libp2p listener")); err != nil {
-		t.Fatal(err)
-	}
-}
-
-func TestInteropMalformedSelectorsRecover(t *testing.T) {
-	tests := []struct {
-		name string
-		wire selectorWire
-	}{
-		{name: "empty frame", wire: selectorWire{0}},
-		{name: "unterminated length", wire: selectorWire{0x80}},
-		{name: "missing selector", wire: selectorWire{1}},
-		{name: "overlong length", wire: selectorWire{0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80}},
-	}
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			client := newSharedHostMode(t, withoutListener)
-			server := newSharedHostMode(t, withoutListener)
-			pair := connectEth(t, client.eth, server.eth, server.udp.LocalAddr())
-
-			ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
-			defer cancel()
-			stream, err := pair.dialed.OpenStream(ctx)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if _, err := stream.Write(test.wire); err != nil {
-				t.Fatal(err)
-			}
-			if err := stream.Close(); err != nil {
-				t.Fatal(err)
-			}
-			if err := exchangeEth(ctx, pair.dialed, pair.accepted, ethPayload("recovered")); err != nil {
-				t.Fatal(err)
-			}
-		})
-	}
-}
-
-func TestInteropStalledSelectorRecovers(t *testing.T) {
-	client := newSharedHostMode(t, withoutListener)
-	server := newSharedHostMode(t, withoutListener)
-	pair := connectEth(t, client.eth, server.eth, server.udp.LocalAddr())
-	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
-	defer cancel()
-
-	stream, err := pair.dialed.OpenStream(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := stream.Write([]byte{0x80}); err != nil {
-		t.Fatal(err)
-	}
-	if err := stream.SetReadDeadline(time.Now().Add(7 * time.Second)); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := stream.Read(make([]byte, 1)); err == nil {
-		t.Fatal("stalled selector was not reset")
-	}
-	if err := exchangeEth(ctx, pair.dialed, pair.accepted, ethPayload("after timeout")); err != nil {
-		t.Fatal(err)
-	}
-}
-
-func TestInteropPeerClosureWhileClassifying(t *testing.T) {
-	client := newSharedHostMode(t, withoutListener)
-	server := newSharedHostMode(t, withoutListener)
-	first := connectEth(t, client.eth, server.eth, server.udp.LocalAddr())
-	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
-	defer cancel()
-
-	stream, err := first.dialed.OpenStream(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := stream.Write([]byte{0x80}); err != nil {
-		t.Fatal(err)
-	}
-	if err := first.dialed.Close(); err != nil {
-		t.Fatal(err)
-	}
-	second := connectEth(t, client.eth, server.eth, server.udp.LocalAddr())
-	if err := exchangeEth(ctx, second.dialed, second.accepted, ethPayload("new connection")); err != nil {
-		t.Fatal(err)
-	}
-}
-
-func TestInteropNoCommonALPN(t *testing.T) {
-	t.Run("shared host dials", func(t *testing.T) {
-		serverUDP := listenInteropUDP(t, ipv4)
-		key, _, err := crypto.GenerateKeyPair(crypto.Secp256k1, -1)
-		if err != nil {
-			t.Fatal(err)
-		}
-		id, err := peer.IDFromPrivateKey(key)
-		if err != nil {
-			t.Fatal(err)
-		}
-		identity, err := libp2ptls.NewIdentity(key)
-		if err != nil {
-			t.Fatal(err)
-		}
-		serverTLS, _ := identity.ConfigForPeer("")
-		serverTLS.NextProtos = []string{"h3"}
-		transport := &quic.Transport{Conn: serverUDP}
-		t.Cleanup(func() { _ = transport.Close() })
-		listener, err := transport.Listen(serverTLS, &quic.Config{})
-		if err != nil {
-			t.Fatal(err)
-		}
-		t.Cleanup(func() { _ = listener.Close() })
-
-		shared := newSharedHost(t)
-		addr := ma.StringCast(fmt.Sprintf("/ip4/127.0.0.1/udp/%d/quic-v1", serverUDP.LocalAddr().(*net.UDPAddr).Port))
-		ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
-		defer cancel()
-		err = connectHostsContext(ctx, shared.host, id, []ma.Multiaddr{addr})
-		if err == nil {
-			t.Fatal("dial without a common ALPN succeeded")
-		}
-	})
-
-	t.Run("raw peer dials shared host", func(t *testing.T) {
-		shared := newSharedHost(t)
-		clientTLS := &tls.Config{MinVersion: tls.VersionTLS13, InsecureSkipVerify: true, NextProtos: []string{"h3"}}
-		ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
-		defer cancel()
-		_, err := quic.DialAddr(ctx, hostUDPAddr(t, shared.host).String(), clientTLS, &quic.Config{})
-		if err == nil {
-			t.Fatal("inbound dial without a common ALPN succeeded")
-		}
-	})
-}
-
-func TestInteropDialTimeout(t *testing.T) {
-	shared := newSharedHost(t)
-	id := newPeerID(t)
-	blackhole := listenInteropUDP(t, ipv4)
-	addr := ma.StringCast(fmt.Sprintf("/ip4/127.0.0.1/udp/%d/quic-v1", blackhole.LocalAddr().(*net.UDPAddr).Port))
-
-	ctx, cancel := context.WithTimeout(t.Context(), 100*time.Millisecond)
-	defer cancel()
-	err := connectHostsContext(ctx, shared.host, id, []ma.Multiaddr{addr})
-	if !errors.Is(err, context.DeadlineExceeded) {
-		t.Fatalf("timed-out dial error = %v, want context deadline", err)
-	}
-}
-
-func TestInteropLibp2pWithUnconsumedEthp2p(t *testing.T) {
-	server := newSharedHost(t)
-	serveEcho(server.host, echoProtocol)
-	const clients = 20
-	for i := range clients {
-		client := newSharedHost(t)
-		connectHosts(t, client.host, server.host)
-		exchange(t, client.host, server.host, echoProtocol, interopPayload(fmt.Sprintf("client %d", i)))
-	}
-}
-
-func TestInteropParallelDials(t *testing.T) {
-	server := newSharedHost(t)
-	serveEcho(server.host, echoProtocol)
-	const clients = 8
-	stocks := make([]host.Host, clients)
-	for i := range stocks {
-		stocks[i] = newQUICHost(t)
-	}
-	errs := make(chan error, clients)
-	for i, stock := range stocks {
-		go func() {
-			ctx, cancel := context.WithTimeout(t.Context(), 15*time.Second)
-			defer cancel()
-			if err := connectHostsContext(ctx, stock, server.host.ID(), []ma.Multiaddr{loopbackQUICAddr(t, server.host)}); err != nil {
-				errs <- fmt.Errorf("client %d connect: %w", i, err)
-				return
-			}
-			errs <- exchangeContext(ctx, stock, server.host.ID(), echoProtocol, interopPayload(fmt.Sprintf("parallel client %d", i)))
-		}()
-	}
-	for range clients {
-		if err := <-errs; err != nil {
-			t.Fatal(err)
-		}
-	}
-	for _, stock := range stocks {
-		if len(server.host.Network().ConnsToPeer(stock.ID())) == 0 {
-			t.Fatalf("server did not retain a connection from %s", stock.ID())
-		}
-	}
-}
-
-type interopProtocol string
-
-const echoProtocol interopProtocol = "/ethp2p/interop/echo/1.0.0"
-
-type interopPayload []byte
-
-type ethPayload []byte
-
-type selectorWire []byte
-
-type dialDirection string
-
-const (
-	sharedDialsStock dialDirection = "shared dials stock"
-	stockDialsShared dialDirection = "stock dials shared"
-)
-
-type listenMode bool
-
-const (
-	withoutListener listenMode = false
-	withListener    listenMode = true
-)
-
-type ipFamily string
-
-const (
-	ipv4 ipFamily = "udp4"
-	ipv6 ipFamily = "udp6"
-)
-
-type sharedHost struct {
-	host     host.Host
-	shared   *transport.SharedTransport
-	lib      quicreuse.QUICTransport
-	eth      *transport.Ethp2pTransport
-	udp      *net.UDPConn
-	manager  *quicreuse.ConnManager
-	identity crypto.PrivKey
-	family   ipFamily
+type node struct {
+	host.Host
+	shared *transport.SharedTransport
 }
 
 type ethPair struct {
-	dialed   transport.Conn
-	accepted transport.Conn
+	dialed, accepted transport.Conn
 }
 
-func newSharedHost(t *testing.T) *sharedHost {
-	return newSharedHostFamily(t, ipv4, withListener)
+// The harness owns its nodes. Shared sockets bind the wildcard address for
+// libp2p reuse; test dials target loopback.
+type harness struct{ t *testing.T }
+
+func newHarness(t *testing.T) *harness { return &harness{t: t} }
+
+func (h *harness) context() (context.Context, context.CancelFunc) {
+	return context.WithTimeout(h.t.Context(), 10*time.Second)
 }
 
-func newSharedHostMode(t *testing.T, mode listenMode) *sharedHost {
-	return newSharedHostFamily(t, ipv4, mode)
-}
-
-func newSharedHostFamily(t *testing.T, family ipFamily, mode listenMode) *sharedHost {
-	t.Helper()
-	key := testKey(t)
-	udp := listenInteropUDP(t, family)
-	shared, err := transport.NewShared(key, udp, transport.Interop())
+func (h *harness) listenUDP(ip net.IP) *net.UDPConn {
+	h.t.Helper()
+	udp, err := net.ListenUDP("udp4", &net.UDPAddr{IP: ip})
 	if err != nil {
-		t.Fatal(err)
+		h.t.Fatal(err)
 	}
-	identity, err := crypto.UnmarshalSecp256k1PrivateKey(key.Bytes())
-	if err != nil {
-		t.Fatal(err)
-	}
-	peer := &sharedHost{shared: shared, lib: shared.Libp2p(), eth: shared.Ethp2p(), udp: udp, identity: identity, family: family}
-	peer.startLibp2p(t, mode)
-	// Teardown mirrors the application contract: shared transport first
-	// (ends listening and kills the endpoint), then libp2p.
-	t.Cleanup(func() {
-		_ = peer.shared.Close()
-		_ = peer.host.Close()
-		_ = peer.manager.Close()
-	})
-	return peer
-}
-
-func (p *sharedHost) startLibp2p(t *testing.T, mode listenMode) {
-	t.Helper()
-	manager, err := quicreuse.NewConnManager(quic.StatelessResetKey{}, quic.TokenGeneratorKey{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := manager.LendTransport(string(p.family), p.lib, p.udp); err != nil {
-		t.Fatal(err)
-	}
-	port := p.udp.LocalAddr().(*net.UDPAddr).Port
-	listenAddr := fmt.Sprintf("/ip4/0.0.0.0/udp/%d/quic-v1", port)
-	if p.family == ipv6 {
-		listenAddr = fmt.Sprintf("/ip6/::/udp/%d/quic-v1", port)
-	}
-	options := []libp2p.Option{
-		libp2p.Identity(p.identity),
-		libp2p.NoTransports,
-		libp2p.Transport(libp2pquic.NewTransport),
-		libp2p.QUICReuse(func() *quicreuse.ConnManager { return manager }),
-	}
-	if mode == withListener {
-		options = append(options, libp2p.ListenAddrStrings(listenAddr))
-	} else {
-		options = append(options, libp2p.NoListenAddrs)
-	}
-	h, err := libp2p.New(options...)
-	if err != nil {
-		t.Fatal(err)
-	}
-	p.host = h
-	p.manager = manager
-}
-
-func newQUICHost(t *testing.T) host.Host {
-	return newQUICHostFamily(t, ipv4)
-}
-
-func newQUICHostFamily(t *testing.T, family ipFamily) host.Host {
-	t.Helper()
-	key, _, err := crypto.GenerateKeyPair(crypto.Secp256k1, -1)
-	if err != nil {
-		t.Fatal(err)
-	}
-	listenAddr := "/ip4/127.0.0.1/udp/0/quic-v1"
-	if family == ipv6 {
-		listenAddr = "/ip6/::1/udp/0/quic-v1"
-	}
-	h, err := libp2p.New(
-		libp2p.Identity(key),
-		libp2p.NoTransports,
-		libp2p.Transport(libp2pquic.NewTransport),
-		libp2p.ListenAddrStrings(listenAddr),
-	)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = h.Close() })
-	return h
-}
-
-func listenInteropUDP(t *testing.T, family ipFamily) *net.UDPConn {
-	t.Helper()
-	addr := &net.UDPAddr{IP: net.IPv4zero}
-	if family == ipv6 {
-		addr = &net.UDPAddr{IP: net.IPv6zero}
-	}
-	udp, err := net.ListenUDP(string(family), addr)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = udp.Close() })
+	h.t.Cleanup(func() { _ = udp.Close() })
 	return udp
 }
 
-func connectHosts(t *testing.T, dialer, listener host.Host) {
-	t.Helper()
-	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+func (h *harness) quicAddr(addr net.Addr) ma.Multiaddr {
+	h.t.Helper()
+	base, err := manet.FromNetAddr(addr)
+	if err != nil {
+		h.t.Fatal(err)
+	}
+	return base.Encapsulate(ma.StringCast("/quic-v1"))
+}
+
+func (h *harness) ethp2pNode(options ...libp2p.Option) *node {
+	h.t.Helper()
+	key, err := transport.GenPrivKey()
+	if err != nil {
+		h.t.Fatal(err)
+	}
+	udp := h.listenUDP(net.IPv4zero)
+	shared, err := transport.NewShared(key, udp, transport.Interop())
+	if err != nil {
+		h.t.Fatal(err)
+	}
+	h.t.Cleanup(func() { _ = shared.Close() })
+	identity, err := crypto.UnmarshalSecp256k1PrivateKey(key.Bytes())
+	if err != nil {
+		h.t.Fatal(err)
+	}
+	manager, err := quicreuse.NewConnManager(quic.StatelessResetKey{}, quic.TokenGeneratorKey{})
+	if err != nil {
+		h.t.Fatal(err)
+	}
+	h.t.Cleanup(func() { _ = manager.Close() })
+	if _, err := manager.LendTransport("udp4", shared.Libp2p(), udp); err != nil {
+		h.t.Fatal(err)
+	}
+	// Register ethp2p interest as a production node would, so assertNoEthp2p is meaningful.
+	shared.Ethp2p()
+	opts := []libp2p.Option{
+		libp2p.Identity(identity),
+		libp2p.NoTransports,
+		libp2p.Transport(libp2pquic.NewTransport),
+		libp2p.QUICReuse(func() *quicreuse.ConnManager { return manager }),
+		libp2p.ListenAddrs(h.quicAddr(udp.LocalAddr())),
+	}
+	lib, err := libp2p.New(append(opts, options...)...)
+	if err != nil {
+		h.t.Fatal(err)
+	}
+	h.t.Cleanup(func() { _ = lib.Close() })
+	return &node{Host: lib, shared: shared}
+}
+
+func (h *harness) libp2pNode(options ...libp2p.Option) *node {
+	h.t.Helper()
+	key, _, err := crypto.GenerateKeyPair(crypto.Secp256k1, -1)
+	if err != nil {
+		h.t.Fatal(err)
+	}
+	opts := []libp2p.Option{
+		libp2p.Identity(key),
+		libp2p.NoTransports,
+		libp2p.Transport(libp2pquic.NewTransport),
+		libp2p.ListenAddrs(h.quicAddr(&net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})),
+	}
+	lib, err := libp2p.New(append(opts, options...)...)
+	if err != nil {
+		h.t.Fatal(err)
+	}
+	h.t.Cleanup(func() { _ = lib.Close() })
+	return &node{Host: lib}
+}
+
+func (h *harness) loopbackQUICAddr(n *node) ma.Multiaddr {
+	h.t.Helper()
+	for _, addr := range n.Addrs() {
+		if _, err := addr.ValueForProtocol(ma.P_QUIC_V1); err != nil {
+			continue
+		}
+		ip, err := manet.ToIP(addr)
+		if err == nil && ip.Equal(net.IPv4(127, 0, 0, 1)) {
+			return addr
+		}
+	}
+	h.t.Fatalf("host %s has no loopback QUIC address", n.ID())
+	return nil
+}
+
+func (h *harness) tryConnectLibp2p(ctx context.Context, from, to *node) error {
+	return from.Connect(ctx, peer.AddrInfo{ID: to.ID(), Addrs: []ma.Multiaddr{h.loopbackQUICAddr(to)}})
+}
+
+func (h *harness) connectLibp2p(from, to *node) {
+	h.t.Helper()
+	ctx, cancel := h.context()
 	defer cancel()
-	if err := connectHostsContext(ctx, dialer, listener.ID(), []ma.Multiaddr{loopbackQUICAddr(t, listener)}); err != nil {
-		t.Fatal(err)
+	if err := h.tryConnectLibp2p(ctx, from, to); err != nil {
+		h.t.Fatal(err)
 	}
 }
 
-func connectHostsContext(ctx context.Context, dialer host.Host, id peer.ID, addrs []ma.Multiaddr) error {
-	return dialer.Connect(ctx, peer.AddrInfo{ID: id, Addrs: addrs})
+func (h *harness) ethp2pAddr(n *node) *net.UDPAddr {
+	addr := *n.shared.Addr().(*net.UDPAddr)
+	addr.IP = net.IPv4(127, 0, 0, 1)
+	return &addr
 }
 
-func serveEcho(h host.Host, name interopProtocol) {
-	h.SetStreamHandler(protocol.ID(name), func(stream network.Stream) {
-		defer stream.Close()
-		payload, err := io.ReadAll(stream)
-		if err != nil {
-			_ = stream.Reset()
-			return
+// Accept runs alongside Dial so nodes without a libp2p listener start their
+// ethp2p listener before the dial completes. The accept worker is always joined.
+func (h *harness) connectEthp2p(from, to *node) ethPair {
+	h.t.Helper()
+	ctx, cancel := h.context()
+	defer cancel()
+	ctx, stop := context.WithCancel(ctx)
+	defer stop()
+	type accepted struct {
+		conn transport.Conn
+		err  error
+	}
+	result := make(chan accepted, 1)
+	go func() {
+		conn, err := to.shared.Ethp2p().Accept(ctx)
+		result <- accepted{conn, err}
+	}()
+	dialed, dialErr := from.shared.Ethp2p().Dial(ctx, h.ethp2pAddr(to), to.shared.PeerID())
+	if dialErr != nil {
+		stop()
+	}
+	got := <-result
+	if err := errors.Join(dialErr, got.err); err != nil {
+		if dialed != nil {
+			_ = dialed.Close()
 		}
-		if _, err := stream.Write(payload); err != nil {
-			_ = stream.Reset()
-			return
+		if got.conn != nil {
+			_ = got.conn.Close()
 		}
-		_ = stream.CloseWrite()
+		h.t.Fatal(err)
+	}
+	h.t.Cleanup(func() {
+		_ = dialed.Close()
+		_ = got.conn.Close()
 	})
+	return ethPair{dialed: dialed, accepted: got.conn}
 }
 
-func exchange(t *testing.T, dialer, listener host.Host, name interopProtocol, payload interopPayload) {
-	t.Helper()
-	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
-	defer cancel()
-	if err := exchangeContext(ctx, dialer, listener.ID(), name, payload); err != nil {
-		t.Fatal(err)
+func (h *harness) serveEcho(n *node, protocols ...string) {
+	h.t.Helper()
+	for _, name := range protocols {
+		n.SetStreamHandler(protocol.ID(name), func(stream network.Stream) {
+			defer stream.Close()
+			payload, err := io.ReadAll(stream)
+			if err != nil {
+				_ = stream.Reset()
+				return
+			}
+			if _, err := stream.Write(payload); err != nil {
+				_ = stream.Reset()
+				return
+			}
+			_ = stream.CloseWrite()
+		})
 	}
 }
 
-func exchangeContext(ctx context.Context, dialer host.Host, listener peer.ID, name interopProtocol, payload interopPayload) error {
-	stream, err := dialer.NewStream(ctx, listener, protocol.ID(name))
+func (h *harness) exchange(ctx context.Context, from, to *node, name string, payload []byte) error {
+	stream, err := from.NewStream(ctx, to.ID(), protocol.ID(name))
 	if err != nil {
 		return err
 	}
@@ -578,127 +243,402 @@ func exchangeContext(ctx context.Context, dialer host.Host, listener peer.ID, na
 	return nil
 }
 
-func connectEth(t *testing.T, dialer *transport.Ethp2pTransport, listener *transport.Ethp2pTransport, addr net.Addr) ethPair {
-	t.Helper()
-	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+func (h *harness) echo(from, to *node, name string, payload []byte) {
+	h.t.Helper()
+	ctx, cancel := h.context()
 	defer cancel()
-	type acceptResult struct {
-		conn transport.Conn
-		err  error
+	if err := h.exchange(ctx, from, to, name, payload); err != nil {
+		h.t.Fatal(err)
 	}
-	accepted := make(chan acceptResult, 1)
-	go func() {
-		conn, err := listener.Accept(ctx)
-		accepted <- acceptResult{conn: conn, err: err}
-	}()
-	dialed, err := dialer.Dial(ctx, addr, listener.PeerID())
-	if err != nil {
-		t.Fatal(err)
-	}
-	result := <-accepted
-	if result.err != nil {
-		t.Fatal(result.err)
-	}
-	return ethPair{dialed: dialed, accepted: result.conn}
 }
 
-func exchangeEth(ctx context.Context, sender, receiver transport.Conn, payload ethPayload) error {
-	wire := append(frame([]byte{1}), payload...)
-	out, err := sender.OpenStream(ctx)
+func (h *harness) exchangeEth(ctx context.Context, pair ethPair, payload []byte) error {
+	out, err := pair.dialed.OpenStream(ctx)
 	if err != nil {
 		return err
 	}
 	defer out.Close()
-	if _, err := out.Write(wire); err != nil {
+	if err := wire.WriteSelector(out, 1); err != nil {
 		return err
 	}
-	in, err := receiver.AcceptBiStream(ctx)
+	if _, err := out.Write(payload); err != nil {
+		return err
+	}
+	in, err := pair.accepted.AcceptBiStream(ctx)
 	if err != nil {
 		return err
 	}
-	got := make([]byte, len(wire))
+	want := append([]byte{1, 1}, payload...)
+	got := make([]byte, len(want))
 	if _, err := io.ReadFull(in, got); err != nil {
 		return err
 	}
-	if !bytes.Equal(got, wire) {
-		return fmt.Errorf("ethp2p payload = %q, want %q", got, wire)
+	if !bytes.Equal(got, want) {
+		return fmt.Errorf("ethp2p payload = %q, want %q", got, want)
 	}
 	return nil
 }
 
-func waitConnected(t *testing.T, left, right host.Host) {
-	t.Helper()
-	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+func (h *harness) echoEth(pair ethPair, payload []byte) {
+	h.t.Helper()
+	ctx, cancel := h.context()
+	defer cancel()
+	if err := h.exchangeEth(ctx, pair, payload); err != nil {
+		h.t.Fatal(err)
+	}
+}
+
+func (h *harness) waitConnected(a, b *node) {
+	h.t.Helper()
+	ctx, cancel := h.context()
 	defer cancel()
 	ticker := time.NewTicker(10 * time.Millisecond)
 	defer ticker.Stop()
 	for {
-		if left.Network().Connectedness(right.ID()) == network.Connected && right.Network().Connectedness(left.ID()) == network.Connected {
+		if a.Network().Connectedness(b.ID()) == network.Connected && b.Network().Connectedness(a.ID()) == network.Connected {
 			return
 		}
 		select {
 		case <-ctx.Done():
-			t.Fatalf("hosts %s and %s did not connect: %v", left.ID(), right.ID(), ctx.Err())
+			h.t.Fatalf("hosts %s and %s did not connect: %v", a.ID(), b.ID(), ctx.Err())
 		case <-ticker.C:
 		}
 	}
 }
 
-func loopbackQUICAddr(t *testing.T, h host.Host) ma.Multiaddr {
-	t.Helper()
-	var fallback ma.Multiaddr
-	for _, addr := range h.Addrs() {
-		if _, err := addr.ValueForProtocol(ma.P_QUIC_V1); err != nil {
-			continue
-		}
-		if fallback == nil {
-			fallback = addr
-		}
-		ip, err := manet.ToIP(addr)
-		if err == nil && net.IP(ip).IsLoopback() {
-			return addr
-		}
+func (h *harness) newPeerID() peer.ID {
+	h.t.Helper()
+	key, _, err := crypto.GenerateKeyPair(crypto.Secp256k1, -1)
+	if err != nil {
+		h.t.Fatal(err)
 	}
-	if fallback != nil {
-		return fallback
+	id, err := peer.IDFromPrivateKey(key)
+	if err != nil {
+		h.t.Fatal(err)
 	}
-	t.Fatal("host has no QUIC address")
-	return nil
+	return id
 }
 
-func hostUDPAddr(t *testing.T, h host.Host) *net.UDPAddr {
-	t.Helper()
-	udp, _, err := quicreuse.FromQuicMultiaddr(loopbackQUICAddr(t, h))
+func (h *harness) rawQUICServer(alpn ...string) (peer.ID, ma.Multiaddr) {
+	h.t.Helper()
+	udp := h.listenUDP(net.IPv4(127, 0, 0, 1))
+	key, _, err := crypto.GenerateKeyPair(crypto.Secp256k1, -1)
+	if err != nil {
+		h.t.Fatal(err)
+	}
+	id, err := peer.IDFromPrivateKey(key)
+	if err != nil {
+		h.t.Fatal(err)
+	}
+	identity, err := libp2ptls.NewIdentity(key)
+	if err != nil {
+		h.t.Fatal(err)
+	}
+	serverTLS, _ := identity.ConfigForPeer("")
+	serverTLS.NextProtos = alpn
+	server := &quic.Transport{Conn: udp}
+	h.t.Cleanup(func() { _ = server.Close() })
+	listener, err := server.Listen(serverTLS, &quic.Config{})
+	if err != nil {
+		h.t.Fatal(err)
+	}
+	h.t.Cleanup(func() { _ = listener.Close() })
+	return id, h.quicAddr(udp.LocalAddr())
+}
+
+func (h *harness) assertNoEthp2p(n *node) {
+	h.t.Helper()
+	if got := transport.PendingEthp2p(n.shared); got != 0 {
+		h.t.Fatalf("unexpected %d queued ethp2p connections", got)
+	}
+}
+
+func TestInteropRealLibp2pExchange(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		libp2pDials bool
+	}{{name: "ethp2p host dials"}, {name: "libp2p host dials", libp2pDials: true}} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newHarness(t)
+			eth, lib := h.ethp2pNode(), h.libp2pNode()
+			longProtocol := "/" + strings.Repeat("selector", 20)
+			h.serveEcho(eth, echoProtocol, longProtocol)
+			h.serveEcho(lib, echoProtocol, longProtocol)
+			from, to := eth, lib
+			if tc.libp2pDials {
+				from, to = lib, eth
+			}
+			h.connectLibp2p(from, to)
+			h.echo(eth, lib, echoProtocol, []byte("shared to stock"))
+			h.echo(lib, eth, echoProtocol, []byte("stock to shared"))
+			h.echo(eth, lib, longProtocol, []byte("multibyte selector"))
+			h.assertNoEthp2p(eth)
+		})
+	}
+}
+
+func TestInteropWrongPeerID(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		libp2pDials bool
+	}{{name: "ethp2p host dials"}, {name: "libp2p host dials", libp2pDials: true}} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newHarness(t)
+			eth, lib := h.ethp2pNode(), h.libp2pNode()
+			from, to := eth, lib
+			if tc.libp2pDials {
+				from, to = lib, eth
+			}
+			ctx, cancel := h.context()
+			defer cancel()
+			err := from.Connect(ctx, peer.AddrInfo{ID: h.newPeerID(), Addrs: []ma.Multiaddr{h.loopbackQUICAddr(to)}})
+			if err == nil {
+				t.Fatal("connection with the wrong peer ID succeeded")
+			}
+			if got := len(eth.Network().Conns()); got != 0 {
+				t.Fatalf("shared host retained %d connections after rejection", got)
+			}
+		})
+	}
+}
+
+func TestInteropParallelLibp2pStreams(t *testing.T) {
+	h := newHarness(t)
+	client, server := h.ethp2pNode(), h.libp2pNode()
+	h.serveEcho(server, echoProtocol)
+	h.connectLibp2p(client, server)
+	const streams = 16
+	errs := make(chan error, streams)
+	for i := range streams {
+		go func() {
+			ctx, cancel := h.context()
+			defer cancel()
+			errs <- h.exchange(ctx, client, server, echoProtocol, []byte(fmt.Sprintf("stream %d", i)))
+		}()
+	}
+	for range streams {
+		if err := <-errs; err != nil {
+			t.Error(err)
+		}
+	}
+}
+
+func TestInteropLibp2pDialStaysLibp2p(t *testing.T) {
+	h := newHarness(t)
+	left, right := h.ethp2pNode(libp2p.NoListenAddrs), h.ethp2pNode()
+	h.serveEcho(right, echoProtocol)
+	h.connectLibp2p(left, right)
+	h.echo(left, right, echoProtocol, []byte("libp2p on shared QUIC"))
+	h.assertNoEthp2p(left)
+	h.assertNoEthp2p(right)
+}
+
+func TestInteropConnectionWindowGrows(t *testing.T) {
+	h := newHarness(t)
+	client, server := h.ethp2pNode(libp2p.NoListenAddrs), h.ethp2pNode()
+	h.serveEcho(server, echoProtocol)
+	h.connectLibp2p(client, server)
+	h.echo(client, server, echoProtocol, make([]byte, 4<<20))
+}
+
+func TestInteropMixedTrafficOnEthp2pDial(t *testing.T) {
+	h := newHarness(t)
+	left, right := h.ethp2pNode(), h.ethp2pNode()
+	h.serveEcho(right, echoProtocol)
+	pair := h.connectEthp2p(left, right)
+	h.waitConnected(left, right)
+	ctx, cancel := h.context()
+	defer cancel()
+	var wg sync.WaitGroup
+	wg.Go(func() {
+		if err := h.exchange(ctx, left, right, echoProtocol, []byte("libp2p after ethp2p dial")); err != nil {
+			t.Error(err)
+		}
+	})
+	wg.Go(func() {
+		if err := h.exchangeEth(ctx, pair, []byte("ethp2p initiated")); err != nil {
+			t.Error(err)
+		}
+	})
+	wg.Wait()
+}
+
+func TestInteropEthp2pWithoutLibp2pListener(t *testing.T) {
+	h := newHarness(t)
+	left, right := h.ethp2pNode(libp2p.NoListenAddrs), h.ethp2pNode(libp2p.NoListenAddrs)
+	h.echoEth(h.connectEthp2p(left, right), []byte("no libp2p listener"))
+}
+
+func TestInteropMalformedSelectorsRecover(t *testing.T) {
+	tests := []struct {
+		name string
+		wire []byte
+	}{
+		{name: "empty frame", wire: []byte{0}},
+		{name: "unterminated length", wire: []byte{0x80}},
+		{name: "missing selector", wire: []byte{1}},
+		{name: "overlong length", wire: []byte{0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			h := newHarness(t)
+			client, server := h.ethp2pNode(libp2p.NoListenAddrs), h.ethp2pNode(libp2p.NoListenAddrs)
+			pair := h.connectEthp2p(client, server)
+			ctx, cancel := h.context()
+			defer cancel()
+			stream, err := pair.dialed.OpenStream(ctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := stream.Write(test.wire); err != nil {
+				t.Fatal(err)
+			}
+			if err := stream.Close(); err != nil {
+				t.Fatal(err)
+			}
+			h.echoEth(pair, []byte("recovered"))
+		})
+	}
+}
+
+func TestInteropStalledSelectorRecovers(t *testing.T) {
+	h := newHarness(t)
+	client, server := h.ethp2pNode(libp2p.NoListenAddrs), h.ethp2pNode(libp2p.NoListenAddrs)
+	pair := h.connectEthp2p(client, server)
+	ctx, cancel := h.context()
+	defer cancel()
+	stream, err := pair.dialed.OpenStream(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
-	return udp
+	if _, err := stream.Write([]byte{0x80}); err != nil {
+		t.Fatal(err)
+	}
+	if err := stream.SetReadDeadline(time.Now().Add(7 * time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := stream.Read(make([]byte, 1)); err == nil {
+		t.Fatal("stalled selector was not reset")
+	}
+	h.echoEth(pair, []byte("after timeout"))
 }
 
-func testKey(t *testing.T) *transport.PrivKey {
-	t.Helper()
-	key, err := transport.GenPrivKey()
+func TestInteropPeerClosureWhileClassifying(t *testing.T) {
+	h := newHarness(t)
+	client, server := h.ethp2pNode(libp2p.NoListenAddrs), h.ethp2pNode(libp2p.NoListenAddrs)
+	first := h.connectEthp2p(client, server)
+	ctx, cancel := h.context()
+	defer cancel()
+	stream, err := first.dialed.OpenStream(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
-	return key
+	if _, err := stream.Write([]byte{0x80}); err != nil {
+		t.Fatal(err)
+	}
+	if err := first.dialed.Close(); err != nil {
+		t.Fatal(err)
+	}
+	h.echoEth(h.connectEthp2p(client, server), []byte("new connection"))
 }
 
-func newPeerID(t *testing.T) peer.ID {
-	t.Helper()
-	return peer.ID(testKey(t).Public().PeerID())
+func TestInteropNoCommonALPN(t *testing.T) {
+	t.Run("ethp2p host dials", func(t *testing.T) {
+		h := newHarness(t)
+		id, addr := h.rawQUICServer("h3")
+		client := h.ethp2pNode()
+		ctx, cancel := h.context()
+		defer cancel()
+		if err := client.Connect(ctx, peer.AddrInfo{ID: id, Addrs: []ma.Multiaddr{addr}}); err == nil {
+			t.Fatal("dial without a common ALPN succeeded")
+		}
+	})
+	t.Run("raw peer dials ethp2p host", func(t *testing.T) {
+		h := newHarness(t)
+		server := h.ethp2pNode()
+		clientTLS := &tls.Config{MinVersion: tls.VersionTLS13, InsecureSkipVerify: true, NextProtos: []string{"h3"}}
+		ctx, cancel := h.context()
+		defer cancel()
+		addr, _, err := quicreuse.FromQuicMultiaddr(h.loopbackQUICAddr(server))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := quic.DialAddr(ctx, addr.String(), clientTLS, &quic.Config{}); err == nil {
+			t.Fatal("inbound dial without a common ALPN succeeded")
+		}
+	})
 }
 
-func frame(payload []byte) []byte {
-	return append(varint.ToUvarint(uint64(len(payload))), payload...)
-}
-
-func assertNoEthp2p(t *testing.T, eth *transport.Ethp2pTransport) {
-	t.Helper()
+func TestInteropDialTimeout(t *testing.T) {
+	h := newHarness(t)
+	client := h.ethp2pNode()
+	id := h.newPeerID()
+	addr := h.quicAddr(h.listenUDP(net.IPv4(127, 0, 0, 1)).LocalAddr())
 	ctx, cancel := context.WithTimeout(t.Context(), 100*time.Millisecond)
 	defer cancel()
-	if conn, err := eth.Accept(ctx); err == nil {
-		_ = conn.Close()
-		t.Fatal("unexpected ethp2p connection")
+	err := client.Connect(ctx, peer.AddrInfo{ID: id, Addrs: []ma.Multiaddr{addr}})
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("timed-out dial error = %v, want context deadline", err)
+	}
+}
+
+func TestInteropUnconsumedEthp2pKeepsLibp2p(t *testing.T) {
+	h := newHarness(t)
+	server := h.ethp2pNode()
+	h.serveEcho(server, echoProtocol)
+	const clients = 20
+	var dialed []transport.Conn
+	t.Cleanup(func() {
+		for _, conn := range dialed {
+			_ = conn.Close()
+		}
+	})
+	for i := range clients {
+		client := h.ethp2pNode()
+		ctx, cancel := h.context()
+		conn, err := client.shared.Ethp2p().Dial(ctx, h.ethp2pAddr(server), server.shared.PeerID())
+		cancel()
+		if err != nil {
+			t.Fatalf("client %d ethp2p dial: %v", i, err)
+		}
+		dialed = append(dialed, conn)
+		h.waitConnected(client, server)
+		h.echo(client, server, echoProtocol, []byte(fmt.Sprintf("client %d", i)))
+	}
+	if got := transport.PendingEthp2p(server.shared); got != 16 {
+		t.Fatalf("pending ethp2p connections = %d, want 16", got)
+	}
+}
+
+func TestInteropParallelDials(t *testing.T) {
+	h := newHarness(t)
+	server := h.ethp2pNode()
+	h.serveEcho(server, echoProtocol)
+	const clients = 8
+	dialers := make([]*node, clients)
+	for i := range dialers {
+		dialers[i] = h.libp2pNode()
+	}
+	errs := make(chan error, clients)
+	for i, client := range dialers {
+		go func() {
+			ctx, cancel := context.WithTimeout(t.Context(), 15*time.Second)
+			defer cancel()
+			if err := h.tryConnectLibp2p(ctx, client, server); err != nil {
+				errs <- fmt.Errorf("client %d connect: %w", i, err)
+				return
+			}
+			errs <- h.exchange(ctx, client, server, echoProtocol, []byte(fmt.Sprintf("parallel client %d", i)))
+		}()
+	}
+	for range clients {
+		if err := <-errs; err != nil {
+			t.Error(err)
+		}
+	}
+	for _, client := range dialers {
+		if len(server.Network().ConnsToPeer(client.ID())) == 0 {
+			t.Fatalf("server did not retain a connection from %s", client.ID())
+		}
 	}
 }

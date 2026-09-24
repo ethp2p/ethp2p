@@ -8,6 +8,9 @@ import (
 	"slices"
 )
 
+// AdvertisementSelector identifies the selector advertisement stream.
+const AdvertisementSelector Selector = 0
+
 // MaxSelectors bounds the number of selectors in one connection advertisement.
 const MaxSelectors = 1024
 
@@ -15,32 +18,82 @@ var (
 	ErrReservedSelector = errors.New("reserved protocol selector")
 	ErrInvalidSelectors = errors.New("invalid protocol selector list")
 	ErrTooManySelectors = errors.New("too many protocol selectors")
+	// ErrInvalidFrame indicates that a frame length prefix is not a valid uvarint.
+	ErrInvalidFrame = errors.New("invalid frame length prefix")
+	// ErrFrameTooLarge indicates that the frame payload exceeds the caller's limit.
+	ErrFrameTooLarge = errors.New("frame exceeds maximum length")
 )
 
 // Selector identifies an ethp2p stream protocol on the wire.
 type Selector uint64
 
-// WriteSelector writes one unsigned-varint selector. The selected protocol
-// applies to the rest of the stream; this function does not add a length
-// prefix or close w.
+// AppendFrame appends one frame containing payload to dst.
+func AppendFrame(dst, payload []byte) []byte {
+	dst = binary.AppendUvarint(dst, uint64(len(payload)))
+	return append(dst, payload...)
+}
+
+// ReadFrame reads one frame without consuming bytes after it. maxLen bounds the
+// payload allocation. An EOF before any length-prefix byte is returned as io.EOF;
+// a truncated prefix or payload returns io.ErrUnexpectedEOF.
+func ReadFrame(r io.Reader, maxLen int) ([]byte, error) {
+	var prefix [binary.MaxVarintLen64]byte
+	for i := range prefix {
+		if _, err := io.ReadFull(r, prefix[i:i+1]); err != nil {
+			if i == 0 && errors.Is(err, io.EOF) && !errors.Is(err, io.ErrUnexpectedEOF) {
+				return nil, io.EOF
+			}
+			if i > 0 && errors.Is(err, io.EOF) {
+				err = io.ErrUnexpectedEOF
+			}
+			return nil, fmt.Errorf("read frame length: %w", err)
+		}
+		if prefix[i]&0x80 != 0 {
+			continue
+		}
+
+		length, n := binary.Uvarint(prefix[:i+1])
+		if n <= 0 {
+			return nil, ErrInvalidFrame
+		}
+		if maxLen < 0 || length > uint64(maxLen) {
+			return nil, ErrFrameTooLarge
+		}
+		payload := make([]byte, int(length))
+		if _, err := io.ReadFull(r, payload); err != nil {
+			if errors.Is(err, io.EOF) && !errors.Is(err, io.ErrUnexpectedEOF) {
+				err = io.ErrUnexpectedEOF
+			}
+			return nil, fmt.Errorf("read frame payload: %w", err)
+		}
+		return payload, nil
+	}
+	return nil, ErrInvalidFrame
+}
+
+// WriteSelector writes one selector frame in a single write. The selected
+// protocol applies to the rest of the stream; this function does not close w.
 func WriteSelector(w io.Writer, selector Selector) error {
-	if err := validateSelector(selector); err != nil {
+	if err := ValidateSelector(selector); err != nil {
 		return err
 	}
-
 	encoded := binary.AppendUvarint(nil, uint64(selector))
-	n, err := w.Write(encoded)
-	if err == nil && n != len(encoded) {
+	frame := AppendFrame(nil, encoded)
+	n, err := w.Write(frame)
+	if err == nil && n != len(frame) {
 		return io.ErrShortWrite
 	}
 	return err
 }
 
-// ReadSelector reads one unsigned-varint selector. Selector policy is resolved
-// by the caller, so this codec operation deliberately accepts reserved values.
-func ReadSelector(r io.ByteReader) (Selector, error) {
-	value, err := binary.ReadUvarint(r)
-	return Selector(value), err
+// ReadSelector reads one selector frame. Selector policy belongs to the caller,
+// so this codec operation deliberately accepts reserved values.
+func ReadSelector(r io.Reader) (Selector, error) {
+	selector, err := readSelectorFrame(r)
+	if err != nil {
+		return 0, invalidSelectors(err)
+	}
+	return selector, nil
 }
 
 // Canonical returns selectors in ascending order without duplicates. The
@@ -70,20 +123,18 @@ func Intersect(a, b []Selector) []Selector {
 	return intersection
 }
 
-// WriteSelectors writes a strictly ascending, duplicate-free selector list as
-// consecutive unsigned varints. It validates the complete list before writing
-// anything, and never closes w.
+// WriteSelectors writes an advertisement stream in one write: the reserved
+// advertisement selector frame followed by the strictly ascending selector
+// frames. It validates the complete list before writing anything and never
+// closes w.
 func WriteSelectors(w io.Writer, selectors []Selector) error {
 	if err := validateSelectors(selectors); err != nil {
 		return err
 	}
-	if len(selectors) == 0 {
-		return nil
-	}
 
-	encoded := make([]byte, 0, len(selectors)*binary.MaxVarintLen64)
+	encoded := AppendFrame(nil, binary.AppendUvarint(nil, uint64(AdvertisementSelector)))
 	for _, selector := range selectors {
-		encoded = binary.AppendUvarint(encoded, uint64(selector))
+		encoded = AppendFrame(encoded, binary.AppendUvarint(nil, uint64(selector)))
 	}
 	n, err := w.Write(encoded)
 	if err == nil && n != len(encoded) {
@@ -92,28 +143,32 @@ func WriteSelectors(w io.Writer, selectors []Selector) error {
 	return err
 }
 
-// ReadSelectors reads consecutive unsigned-varint selectors until a clean EOF
-// marks the end of the advertisement. Advertisements must be strictly
-// ascending, duplicate-free, within MaxSelectors, and must not contain values
-// reserved by the stream protocol.
-func ReadSelectors(r io.ByteReader) ([]Selector, error) {
+// ReadSelectors reads an advertisement stream. The first frame must contain
+// AdvertisementSelector; subsequent selector frames end at a clean EOF (FIN).
+// Entries must be strictly ascending, within MaxSelectors, and valid for stream
+// use. EOF inside a frame is an error.
+func ReadSelectors(r io.Reader) ([]Selector, error) {
+	header, err := readSelectorFrame(r)
+	if err != nil {
+		return nil, invalidSelectors(err)
+	}
+	if header != AdvertisementSelector {
+		return nil, fmt.Errorf("%w: advertisement starts with selector %d, want %d", ErrInvalidSelectors, header, AdvertisementSelector)
+	}
+
 	selectors := make([]Selector, 0)
 	for {
-		value, err := binary.ReadUvarint(r)
-		// Only an exact EOF denotes a clean end; ReadUvarint may propagate
-		// a wrapped EOF after consuming part of an unterminated varint.
+		selector, err := readSelectorFrame(r)
 		if err == io.EOF {
 			return selectors, nil
 		}
 		if err != nil {
-			return nil, err
+			return nil, invalidSelectors(err)
 		}
 		if len(selectors) >= MaxSelectors {
 			return nil, fmt.Errorf("%w: maximum is %d", ErrTooManySelectors, MaxSelectors)
 		}
-
-		selector := Selector(value)
-		if err := validateSelector(selector); err != nil {
+		if err := ValidateSelector(selector); err != nil {
 			return nil, err
 		}
 		if len(selectors) > 0 && selector <= selectors[len(selectors)-1] {
@@ -123,10 +178,12 @@ func ReadSelectors(r io.ByteReader) ([]Selector, error) {
 	}
 }
 
-func validateSelector(selector Selector) error {
+// ValidateSelector rejects the reserved advertisement selector and '/' as
+// stream selectors. '/' is the first byte of libp2p multistream-select frames.
+func ValidateSelector(selector Selector) error {
 	switch selector {
-	case 0:
-		return fmt.Errorf("%w: 0", ErrReservedSelector)
+	case AdvertisementSelector:
+		return fmt.Errorf("%w: advertisement selector %d", ErrReservedSelector, AdvertisementSelector)
 	case Selector('/'):
 		return fmt.Errorf("%w: %d conflicts with libp2p", ErrReservedSelector, selector)
 	default:
@@ -139,7 +196,7 @@ func validateSelectors(selectors []Selector) error {
 		return fmt.Errorf("%w: maximum is %d", ErrTooManySelectors, MaxSelectors)
 	}
 	for i, selector := range selectors {
-		if err := validateSelector(selector); err != nil {
+		if err := ValidateSelector(selector); err != nil {
 			return err
 		}
 		if i > 0 && selector <= selectors[i-1] {
@@ -147,4 +204,30 @@ func validateSelectors(selectors []Selector) error {
 		}
 	}
 	return nil
+}
+
+func readSelectorFrame(r io.Reader) (Selector, error) {
+	payload, err := ReadFrame(r, binary.MaxVarintLen64)
+	if err != nil {
+		return 0, err
+	}
+	if len(payload) == 0 {
+		return 0, fmt.Errorf("%w: empty selector frame", ErrInvalidSelectors)
+	}
+	value, n := binary.Uvarint(payload)
+	if n <= 0 || n != len(payload) {
+		return 0, fmt.Errorf("%w: selector encoding length %d, frame length %d", ErrInvalidSelectors, n, len(payload))
+	}
+	var canonical [binary.MaxVarintLen64]byte
+	if encodedLen := binary.PutUvarint(canonical[:], value); encodedLen != len(payload) {
+		return 0, fmt.Errorf("%w: selector encoding is not minimal", ErrInvalidSelectors)
+	}
+	return Selector(value), nil
+}
+
+func invalidSelectors(err error) error {
+	if errors.Is(err, ErrInvalidSelectors) {
+		return err
+	}
+	return fmt.Errorf("%w: %w", ErrInvalidSelectors, err)
 }

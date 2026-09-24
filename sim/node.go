@@ -6,7 +6,6 @@ import (
 	"log/slog"
 	"net"
 	"slices"
-	"strings"
 	"sync"
 
 	"github.com/ethp2p/ethp2p"
@@ -148,7 +147,7 @@ func (n *BroadcastNode) processIncomingConnections(ctx context.Context) {
 	for {
 		conn, err := n.eth.Accept(ctx)
 		if err != nil {
-			if !(errors.Is(err, ctx.Err()) || strings.Contains(err.Error(), "transport closed")) {
+			if !(errors.Is(err, ctx.Err()) || errors.Is(err, transport.ErrClosed)) {
 				n.logger.Error("failed to accept connection", "err", err)
 			}
 			return
@@ -233,13 +232,12 @@ func newBroadcastNode(
 	nodeNum int,
 	logger *slog.Logger,
 ) (*BroadcastNode, error) {
-	eth, shared, key, peerID, err := newNodeEndpoint(nodeNum, conn)
+	eth, shared, peerID, err := newNodeEndpoint(nodeNum, conn)
 	if err != nil {
 		stopFn()
 		_ = engine.Close()
 		return nil, err
 	}
-	_ = key
 	appCtx, cancel := context.WithCancel(context.Background())
 
 	n := &BroadcastNode{
@@ -271,14 +269,7 @@ func drainStreamEvents(streams <-chan ethp2p.StreamEvent) {
 	for {
 		select {
 		case event := <-streams:
-			if event.Stream == nil {
-				continue
-			}
-			if stream, ok := event.Stream.(transport.Stream); ok {
-				_ = stream.Reset()
-				continue
-			}
-			event.Stream.CancelRead(0)
+			event.Reject()
 		default:
 			return
 		}

@@ -11,6 +11,7 @@ import (
 
 	ethp2p "github.com/ethp2p/ethp2p"
 	bcastpb "github.com/ethp2p/ethp2p/broadcast/pb"
+	"github.com/ethp2p/ethp2p/internal/ctxutil"
 	"github.com/ethp2p/ethp2p/protocol"
 	"github.com/ethp2p/ethp2p/transport"
 )
@@ -21,6 +22,10 @@ const (
 	streamQueueCap   = 64
 )
 
+type uniStreamOpener interface {
+	OpenUniStream(context.Context, protocol.Selector) (transport.SendStream, error)
+}
+
 // PeerConn holds the broadcast state for one connected remote peer.
 // The application owns the borrowed connection; PeerConn only owns streams
 // handed to this broadcast binding and never closes the connection itself.
@@ -29,9 +34,9 @@ type PeerConn struct {
 	// peer is the stable root connection identity. It is separate from id
 	// because reconnects can reuse an authenticated peer ID.
 	peer    *ethp2p.Peer
-	id      PeerID
+	id      transport.PeerID
 	version ProtocolVersion
-	conn    transport.Conn
+	streams uniStreamOpener
 
 	bcastAccepted atomic.Bool
 	bcastIn       chan transport.ReceiveStream
@@ -82,7 +87,7 @@ type PeerConn struct {
 }
 
 // newPeerConn creates a PeerConn ready for handshake.
-func newPeerConn(engine *Engine, bindCtx context.Context, conn transport.Conn) *PeerConn {
+func newPeerConn(engine *Engine, bindCtx context.Context, id transport.PeerID, streams uniStreamOpener) *PeerConn {
 	ctx, cancelContext := context.WithCancel(bindCtx)
 	stopEngineCancel := context.AfterFunc(engine.ctx, cancelContext)
 	cancel := func() {
@@ -90,7 +95,7 @@ func newPeerConn(engine *Engine, bindCtx context.Context, conn transport.Conn) *
 		cancelContext()
 	}
 	p := &PeerConn{
-		conn:          conn,
+		streams:       streams,
 		ctrlQ:         make(chan peerCtrlEvent, ctrlQCap),
 		wakeCh:        make(chan struct{}, 1),
 		chunkSem:      make(chan struct{}, engine.config.maxInboundChunkStreams()),
@@ -103,26 +108,8 @@ func newPeerConn(engine *Engine, bindCtx context.Context, conn transport.Conn) *
 		ctx:           ctx,
 		cancel:        cancel,
 	}
-	if conn != nil {
-		p.id = PeerID(conn.RemotePeerID())
-	}
+	p.id = id
 	return p
-}
-
-// onCancel joins an in-flight cancellation before returning stream ownership.
-// In particular, a CHUNK header reader must not leave a callback that can reset
-// the stream after handing its payload to a session.
-func onCancel(ctx context.Context, cancel func()) func() {
-	done := make(chan struct{})
-	stop := context.AfterFunc(ctx, func() {
-		defer close(done)
-		cancel()
-	})
-	return func() {
-		if !stop() {
-			<-done
-		}
-	}
 }
 
 // channelInboxFor returns the channel event channel for the given channel, or nil.
@@ -308,10 +295,14 @@ func (p *PeerConn) disposeQueuedStreams() {
 // their outbound BCAST stream (write BCAST preamble + Handshake) and
 // accept the peer's inbound BCAST stream (read BCAST preamble + Handshake).
 // Data-stream queues wait independently for this handshake to complete.
+//
+// Using two unidirectional streams, one per direction, is deliberate: it
+// makes simultaneous open the normal case rather than a race to resolve.
+// Neither side needs a role (initiator or responder), so there is no
+// tie-breaking and no crossed-open state; each side writes on the stream it
+// opened and reads on the one it accepted. A single bidirectional stream
+// would require both sides to agree on who opens it.
 func (p *PeerConn) handshake(ctx context.Context, ourChannels []ChannelID) (ProtocolVersion, []ChannelID, error) {
-	if p.conn.RemotePeerID() == "" {
-		return 0, nil, fmt.Errorf("authenticated peer ID is empty")
-	}
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	channelStrings := make([]string, len(ourChannels))
@@ -344,15 +335,12 @@ func (p *PeerConn) handshake(ctx context.Context, ourChannels []ChannelID) (Prot
 			}
 			writeCh <- result
 		}()
-		result.stream, result.err = p.conn.OpenUniStream(ctx)
+		result.stream, result.err = p.streams.OpenUniStream(ctx, BCAST)
 		if result.err != nil {
 			return
 		}
-		stop := onCancel(ctx, func() { result.stream.CancelWrite(0) })
-		result.err = protocol.WriteSelector(result.stream, BCAST)
-		if result.err == nil {
-			result.err = WriteFrame(result.stream, hsMsg)
-		}
+		stop := ctxutil.OnCancel(ctx, func() { result.stream.CancelWrite(0) })
+		result.err = WriteFrame(result.stream, hsMsg)
 		stop()
 		if result.err == nil {
 			result.err = ctx.Err()
@@ -364,7 +352,7 @@ func (p *PeerConn) handshake(ctx context.Context, ourChannels []ChannelID) (Prot
 	var readErr error
 	select {
 	case incoming = <-p.bcastIn:
-		stop := onCancel(ctx, func() { incoming.CancelRead(0) })
+		stop := ctxutil.OnCancel(ctx, func() { incoming.CancelRead(0) })
 		readErr = ReadFrame(incoming, &response)
 		stop()
 		if readErr == nil {
@@ -431,7 +419,7 @@ func (p *PeerConn) finishHandshake(ok bool) {
 }
 
 // ID returns the peer's ID. Safe to call after handshake completes.
-func (p *PeerConn) ID() PeerID {
+func (p *PeerConn) ID() transport.PeerID {
 	return p.id
 }
 

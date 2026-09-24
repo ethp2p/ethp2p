@@ -1,5 +1,9 @@
 # Random Linear Network Coding broadcast strategy
 
+Status: draft.
+The implementation is kept outside this repository;
+see [broadcast/rlnc](../broadcast/rlnc/README.md).
+
 > RLNC is specified and implemented here for comparative benchmarking only.
 > It is patent-encumbered and not a candidate for deployment
 > (see [README](../README.md#stance-on-intellectual-property)).

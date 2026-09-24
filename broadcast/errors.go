@@ -1,6 +1,10 @@
 package broadcast
 
-import "errors"
+import (
+	"errors"
+
+	"github.com/ethp2p/ethp2p/transport"
+)
 
 var (
 	ErrEngineClosed    = errors.New("engine closed")
@@ -26,7 +30,7 @@ var (
 )
 
 type ChunkProcessError struct {
-	Peer      PeerID
+	Peer      transport.PeerID
 	ChannelID ChannelID
 	MessageID MessageID
 	Err       error

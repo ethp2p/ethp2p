@@ -5,7 +5,6 @@ package tests
 import (
 	"bytes"
 	"context"
-	"net"
 	"sync"
 	"testing"
 	"time"
@@ -13,6 +12,7 @@ import (
 	ethp2p "github.com/ethp2p/ethp2p"
 	"github.com/ethp2p/ethp2p/broadcast"
 	"github.com/ethp2p/ethp2p/transport"
+	"github.com/ethp2p/ethp2p/transport/transporttest"
 )
 
 // TestSharedTransportBroadcastRoundTrip exercises the broadcast stack over
@@ -28,39 +28,18 @@ func TestSharedTransportBroadcastRoundTrip(t *testing.T) {
 			defer cancel()
 
 			type sharedNode struct {
-				shared  *transport.SharedTransport
-				packet  *net.UDPConn
-				eth     *transport.Ethp2pTransport
-				stack   *ethp2p.Stack
-				engine  *broadcast.Engine
-				obs     *testObserver
-				peers   chan *ethp2p.Peer
-				streams chan ethp2p.StreamEvent
-				conn    transport.Conn
-				wg      sync.WaitGroup
+				endpoint *transporttest.Endpoint
+				stack    *ethp2p.Stack
+				engine   *broadcast.Engine
+				obs      *testObserver
+				peers    chan *ethp2p.Peer
+				streams  chan ethp2p.StreamEvent
+				conn     transport.Conn
+				wg       sync.WaitGroup
 			}
 
 			newNode := func(receivePeers bool) *sharedNode {
-				key, err := transport.GenPrivKey()
-				if err != nil {
-					t.Fatal(err)
-				}
-				packet, err := net.ListenUDP("udp4", &net.UDPAddr{
-					IP:   net.IPv4(127, 0, 0, 1),
-					Port: 0,
-				})
-				if err != nil {
-					t.Fatal(err)
-				}
-				shared, err := transport.NewShared(key, packet, transport.Interop())
-				if err != nil {
-					_ = packet.Close()
-					t.Fatal(err)
-				}
-				t.Cleanup(func() {
-					_ = shared.Close()
-					_ = packet.Close()
-				})
+				endpoint := transporttest.NewEndpoint(t)
 
 				stack := new(ethp2p.Stack)
 				subsystem, err := stack.RegisterSubsystem(
@@ -84,14 +63,12 @@ func TestSharedTransportBroadcastRoundTrip(t *testing.T) {
 				obs := newTestObserver()
 				engine := broadcast.NewEngine(broadcast.EngineConfig{Observer: obs})
 				node := &sharedNode{
-					shared:  shared,
-					packet:  packet,
-					eth:     shared.Ethp2p(),
-					stack:   stack,
-					engine:  engine,
-					obs:     obs,
-					peers:   peers,
-					streams: streams,
+					endpoint: endpoint,
+					stack:    stack,
+					engine:   engine,
+					obs:      obs,
+					peers:    peers,
+					streams:  streams,
 				}
 				peerInput := peers
 				if !receivePeers {
@@ -116,8 +93,8 @@ func TestSharedTransportBroadcastRoundTrip(t *testing.T) {
 					if node.conn != nil {
 						_ = node.conn.Close()
 					}
-					_ = node.shared.Close()
-					_ = node.packet.Close()
+					_ = node.endpoint.Shared.Close()
+					_ = node.endpoint.Packet.Close()
 				}
 
 				for _, node := range []*sharedNode{a, b} {
@@ -133,36 +110,15 @@ func TestSharedTransportBroadcastRoundTrip(t *testing.T) {
 			})
 			t.Cleanup(shutdownOnce)
 
-			dialResult := make(chan struct {
-				conn transport.Conn
-				err  error
-			}, 1)
-			go func() {
-				conn, err := a.eth.Dial(ctx, b.eth.Addr(), b.eth.PeerID())
-				dialResult <- struct {
-					conn transport.Conn
-					err  error
-				}{conn: conn, err: err}
-			}()
-
-			bConn, err := b.eth.Accept(ctx)
-			if err != nil {
-				t.Fatal(err)
-			}
-			dialed := <-dialResult
-			if dialed.err != nil {
-				t.Fatal(dialed.err)
-			}
-			a.conn = dialed.conn
-			b.conn = bConn
+			a.conn, b.conn = transporttest.Connect(t, a.endpoint, b.endpoint)
 
 			// The local identity belongs to the endpoint, so only the remote
 			// identity is asserted on the connection.
-			if got := a.conn.RemotePeerID(); got != transport.PeerID(b.eth.PeerID()) {
-				t.Fatalf("dialed remote peer ID = %x, want %x", got, b.eth.PeerID())
+			if got := a.conn.RemotePeerID(); got != b.endpoint.Shared.PeerID() {
+				t.Fatalf("dialed remote peer ID = %x, want %x", got, b.endpoint.Shared.PeerID())
 			}
-			if got := b.conn.RemotePeerID(); got != transport.PeerID(a.eth.PeerID()) {
-				t.Fatalf("accepted remote peer ID = %x, want %x", got, a.eth.PeerID())
+			if got := b.conn.RemotePeerID(); got != a.endpoint.Shared.PeerID() {
+				t.Fatalf("accepted remote peer ID = %x, want %x", got, a.endpoint.Shared.PeerID())
 			}
 
 			for _, node := range []*sharedNode{a, b} {

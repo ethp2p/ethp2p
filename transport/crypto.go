@@ -32,6 +32,16 @@ type PubKey struct {
 	pub *secp256k1.PublicKey
 }
 
+// NewPubKey wraps a copy of a secp256k1 public key for use with the transport
+// identity APIs. It returns nil when pub is nil.
+func NewPubKey(pub *secp256k1.PublicKey) *PubKey {
+	if pub == nil {
+		return nil
+	}
+	cp := *pub
+	return &PubKey{pub: &cp}
+}
+
 // Bytes returns the 33-byte compressed SEC1 encoding of k.
 func (k *PubKey) Bytes() []byte {
 	return k.pub.SerializeCompressed()

@@ -6,6 +6,8 @@ import (
 	"log/slog"
 	"sync"
 	"time"
+
+	"github.com/ethp2p/ethp2p/transport"
 )
 
 const (
@@ -33,7 +35,7 @@ type Channel[CI ChunkIdent, R Wire, P Wire] struct {
 	// Owned exclusively by run(), lock-free
 	// members are peers we are connected to that subscribe to this channel
 	// the channel simply tracks interest, and feeds it to the router to decide how to use
-	members map[PeerID]*PeerConn
+	members map[transport.PeerID]*PeerConn
 	// sessions are active sessions on this channel
 	sessions map[MessageID]*session[CI, R]
 	// parked buffers inbound chunk streams that arrived before their
@@ -65,7 +67,7 @@ func AttachChannel[CI ChunkIdent, R Wire, P Wire](e *Engine, id ChannelID, schem
 		engine:   e,
 		id:       id,
 		scheme:   scheme,
-		members:  make(map[PeerID]*PeerConn),
+		members:  make(map[transport.PeerID]*PeerConn),
 		sessions: make(map[MessageID]*session[CI, R]),
 		parked:   make(map[MessageID][]channelChunkStream),
 		inbox:    make(chan channelEvent, channelInboxCap),
@@ -121,7 +123,7 @@ func (tr *Channel[CI, R, P]) newSession(
 		newCI:           tr.scheme.NewCI,
 		newR:            tr.scheme.NewR,
 		createdAt:       time.Now(),
-		peers:           make(map[PeerID]*sessionPeer),
+		peers:           make(map[transport.PeerID]*sessionPeer),
 		channelInbox:    tr.inbox,
 		observer:        tr.engine.config.Observer,
 		outboundCancels: make(map[outboundKey]context.CancelFunc),
@@ -345,7 +347,7 @@ func (tr *Channel[CI, R, P]) handlePublish(e channelPublish) {
 // routing must be applied before pending chunks so that the strategy
 // knows the opener's inventory before deciding what to emit.
 // Called from within run(), so no locking needed.
-func (tr *Channel[CI, R, P]) createRelaySession(messageID MessageID, preambleBytes []byte, initialPeer PeerID, initialRouting []byte) (*session[CI, R], error) {
+func (tr *Channel[CI, R, P]) createRelaySession(messageID MessageID, preambleBytes []byte, initialPeer transport.PeerID, initialRouting []byte) (*session[CI, R], error) {
 	if existing, ok := tr.sessions[messageID]; ok {
 		return existing, nil
 	}

@@ -26,7 +26,7 @@ const (
 // closed, or both input channels are closed. Stopping Serve stops notification
 // consumption; existing bindings end with Peer.Context or Engine.Close. The
 // application must stop producers and dispose of events left in its channels.
-// Notifications must carry the non-nil Context and Conn supplied by Stack.
+// Notifications must carry the non-nil Context and authenticated ID supplied by Stack.
 func (e *Engine) Serve(ctx context.Context, peers <-chan *ethp2p.Peer, streams <-chan ethp2p.StreamEvent) error {
 	if ctx == nil {
 		return errors.New("nil serve context")
@@ -68,14 +68,14 @@ func (e *Engine) Serve(ctx context.Context, peers <-chan *ethp2p.Peer, streams <
 		case <-e.ctx.Done():
 		}
 		// Delivery failed, so Serve still owns the stream, if any.
-		e.disposeStream(event.stream.Stream)
+		event.stream.Reject()
 		return ctx.Err()
 	}
 	return nil
 }
 
 func supportsBroadcast(peer *ethp2p.Peer) bool {
-	if peer == nil || peer.Conn == nil || peer.Context == nil || peer.Context.Err() != nil {
+	if peer == nil || peer.ID == "" || peer.Context == nil || peer.Context.Err() != nil {
 		return false
 	}
 	return supportsBroadcastSelectors(peer.Selectors)

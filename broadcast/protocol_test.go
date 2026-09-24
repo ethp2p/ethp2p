@@ -1,8 +1,10 @@
 package broadcast
 
 import (
+	"context"
 	"testing"
 
+	ethp2p "github.com/ethp2p/ethp2p"
 	"github.com/ethp2p/ethp2p/protocol"
 )
 
@@ -28,5 +30,19 @@ func TestBroadcastSelectorsRequireCompleteSet(t *testing.T) {
 		if supportsBroadcastSelectors(selectors) {
 			t.Errorf("incomplete selector set accepted: %v", selectors)
 		}
+	}
+}
+
+func TestSupportsBroadcastRequiresAuthenticatedPeerID(t *testing.T) {
+	peer := &ethp2p.Peer{
+		Context:   context.Background(),
+		Selectors: []protocol.Selector{BCAST, SESS, CHUNK},
+	}
+	if supportsBroadcast(peer) {
+		t.Fatal("accepted peer with empty authenticated ID")
+	}
+	peer.ID = "authenticated-peer"
+	if !supportsBroadcast(peer) {
+		t.Fatal("rejected peer with complete selectors and authenticated ID")
 	}
 }

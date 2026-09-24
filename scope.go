@@ -4,30 +4,151 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
+	"slices"
+	"sync"
 
+	"github.com/ethp2p/ethp2p/internal/ctxutil"
 	"github.com/ethp2p/ethp2p/protocol"
 	"github.com/ethp2p/ethp2p/transport"
 )
 
-// Peer describes one connection's match with a subsystem. Treat its fields as
-// read-only. Context ends when ServeConn returns; Conn is borrowed from the
-// application. Selectors lists the subsystem's shared selectors in canonical order.
-// The pointer identifies this connection's notification, including before the
-// application has processed the peer channel. A reconnect gets a different Peer.
+// ErrSelectorNotShared is returned when a peer tries to open a selector that
+// was not negotiated for its subsystem.
+var ErrSelectorNotShared = errors.New("protocol selector was not shared")
+
+// Peer describes one connection's match with a subsystem. Treat its exported
+// fields as read-only. ID is the authenticated remote identity. Context ends
+// when ServeConn returns. Selectors lists the subsystem's shared selectors in
+// canonical order. The pointer identifies this connection's notification,
+// including before the application has processed the peer channel. A reconnect
+// gets a different Peer.
 type Peer struct {
 	Context   context.Context
-	Conn      transport.Conn
+	ID        transport.PeerID
 	Selectors []protocol.Selector
+	conn      transport.Conn
 }
 
-// StreamEvent transfers one selected stream to a subsystem. Stream retains all
-// protocol data after the selector. Bidirectional streams also implement
-// transport.Stream. The receiver owns stream cleanup after successful delivery,
-// even if the event is still queued when Peer.Context ends.
+// OpenUniStream opens a unidirectional stream with selector's protocol frame
+// already written. On success, the caller owns the stream and must close or
+// cancel it. Opening fails when selector was not negotiated for this peer.
+func (p *Peer) OpenUniStream(ctx context.Context, selector protocol.Selector) (transport.SendStream, error) {
+	if err := p.checkSelector(selector); err != nil {
+		return nil, err
+	}
+
+	openCtx, stopPeerContext := p.openContext(ctx)
+	stream, err := p.conn.OpenUniStream(openCtx)
+	stopPeerContext()
+	if err := p.contextError(ctx); err != nil {
+		if stream != nil {
+			stream.CancelWrite(0)
+		}
+		return nil, err
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	if err := p.writeSelector(ctx, stream, selector, func() { stream.CancelWrite(0) }); err != nil {
+		return nil, err
+	}
+	return stream, nil
+}
+
+// OpenStream opens a bidirectional stream with selector's protocol frame
+// already written. On success, the caller owns the stream and must close or
+// reset it. Opening fails when selector was not negotiated for this peer.
+func (p *Peer) OpenStream(ctx context.Context, selector protocol.Selector) (transport.Stream, error) {
+	if err := p.checkSelector(selector); err != nil {
+		return nil, err
+	}
+
+	openCtx, stopPeerContext := p.openContext(ctx)
+	stream, err := p.conn.OpenStream(openCtx)
+	stopPeerContext()
+	if err := p.contextError(ctx); err != nil {
+		if stream != nil {
+			_ = stream.Reset()
+		}
+		return nil, err
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	if err := p.writeSelector(ctx, stream, selector, func() { _ = stream.Reset() }); err != nil {
+		return nil, err
+	}
+	return stream, nil
+}
+
+func (p *Peer) checkSelector(selector protocol.Selector) error {
+	if !slices.Contains(p.Selectors, selector) {
+		return fmt.Errorf("%w: %d", ErrSelectorNotShared, selector)
+	}
+	return p.Context.Err()
+}
+
+func (p *Peer) openContext(ctx context.Context) (context.Context, func()) {
+	ctx, cancel := context.WithCancel(ctx)
+	stop := context.AfterFunc(p.Context, cancel)
+	return ctx, func() {
+		stop()
+		cancel()
+	}
+}
+
+func (p *Peer) contextError(ctx context.Context) error {
+	if err := p.Context.Err(); err != nil {
+		return err
+	}
+	return ctx.Err()
+}
+
+func (p *Peer) writeSelector(ctx context.Context, w io.Writer, selector protocol.Selector, cancelStream func()) error {
+	var cancelOnce sync.Once
+	cancel := func() { cancelOnce.Do(cancelStream) }
+	stopCtx := ctxutil.OnCancel(ctx, cancel)
+	stopPeer := ctxutil.OnCancel(p.Context, cancel)
+	err := protocol.WriteSelector(w, selector)
+	stopPeer()
+	stopCtx()
+
+	if err := p.contextError(ctx); err != nil {
+		cancel()
+		return err
+	}
+	if err != nil {
+		cancel()
+		return err
+	}
+	return nil
+}
+
+// StreamEvent transfers one selected stream to a subsystem. Every ethp2p stream
+// begins with a selector frame; Stream retains all protocol data after that
+// frame. Bidirectional streams also implement transport.Stream. The receiver
+// owns stream cleanup after successful delivery, even if the event is still
+// queued when Peer.Context ends.
 type StreamEvent struct {
 	Peer     *Peer
 	Selector protocol.Selector
 	Stream   transport.ReceiveStream
+}
+
+// Reject disposes of a delivered stream the receiver will not handle. A nil
+// Stream is a no-op; bidirectional streams have both halves reset.
+func (e StreamEvent) Reject() {
+	if e.Stream == nil {
+		return
+	}
+	if stream, ok := e.Stream.(transport.Stream); ok {
+		_ = stream.Reset()
+		return
+	}
+	e.Stream.CancelRead(0)
 }
 
 // Subsystem registers selectors, a peer policy, and notification destinations.
@@ -61,8 +182,8 @@ func (s *Stack) RegisterSubsystem(name string, selectors ...protocol.Selector) (
 		return nil, errors.New("duplicate selectors in subsystem")
 	}
 	for _, selector := range ordered {
-		if selector == 0 || selector == '/' {
-			return nil, fmt.Errorf("reserved selector %d", selector)
+		if err := protocol.ValidateSelector(selector); err != nil {
+			return nil, err
 		}
 		if _, exists := s.selectors[selector]; exists {
 			return nil, fmt.Errorf("selector %d already registered", selector)
@@ -141,7 +262,7 @@ func (s *Stack) notifyPeers(ctx context.Context, conn transport.Conn, shared []p
 	}
 	routes := make(map[protocol.Selector]route)
 	for subsystem, selectors := range matched {
-		peer := &Peer{Context: ctx, Conn: conn, Selectors: selectors}
+		peer := &Peer{Context: ctx, ID: conn.RemotePeerID(), Selectors: selectors, conn: conn}
 		if subsystem.policy != nil && !subsystem.policy(peer) {
 			continue
 		}

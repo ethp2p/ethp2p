@@ -5,7 +5,6 @@ package tests
 import (
 	"context"
 	"errors"
-	"net"
 	"slices"
 	"sync"
 	"testing"
@@ -15,6 +14,7 @@ import (
 	"github.com/ethp2p/ethp2p/broadcast"
 	"github.com/ethp2p/ethp2p/broadcast/rs"
 	"github.com/ethp2p/ethp2p/transport"
+	"github.com/ethp2p/ethp2p/transport/transporttest"
 )
 
 // --- Strategy parameterization ---
@@ -53,46 +53,15 @@ var strategies = []struct {
 	{"rs", rsSetup{}},
 }
 
-// --- Shared transport endpoint ---
-
-// newTestEndpoint builds a shared endpoint with a freshly generated identity.
-// The test nodes speak the production transport, so their peer identities are
-// authenticated rather than synthetic.
-func newTestEndpoint(t *testing.T) (*transport.Ethp2pTransport, *transport.SharedTransport, net.Addr) {
-	t.Helper()
-	key, err := transport.GenPrivKey()
-	if err != nil {
-		t.Fatal(err)
-	}
-	packet, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 0})
-	if err != nil {
-		t.Fatal(err)
-	}
-	shared, err := transport.NewShared(key, packet, transport.Interop())
-	if err != nil {
-		_ = packet.Close()
-		t.Fatal(err)
-	}
-	// The shared transport deliberately does not own the packet connection.
-	t.Cleanup(func() {
-		_ = shared.Close()
-		_ = packet.Close()
-	})
-	eth := shared.Ethp2p()
-	return eth, shared, packet.LocalAddr()
-}
-
 // --- Test node ---
 
 type testNode struct {
-	eth     *transport.Ethp2pTransport
-	shared  *transport.SharedTransport
-	addr    net.Addr
-	stack   *ethp2p.Stack
-	engine  *broadcast.Engine
-	obs     *testObserver
-	peers   chan *ethp2p.Peer
-	streams chan ethp2p.StreamEvent
+	endpoint *transporttest.Endpoint
+	stack    *ethp2p.Stack
+	engine   *broadcast.Engine
+	obs      *testObserver
+	peers    chan *ethp2p.Peer
+	streams  chan ethp2p.StreamEvent
 
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -107,7 +76,7 @@ type testNode struct {
 
 func newTestNode(t *testing.T) *testNode {
 	t.Helper()
-	eth, shared, addr := newTestEndpoint(t)
+	endpoint := transporttest.NewEndpoint(t)
 	obs := newTestObserver()
 	cfg := broadcast.EngineConfig{Observer: obs}
 	stack := new(ethp2p.Stack)
@@ -126,16 +95,14 @@ func newTestNode(t *testing.T) *testNode {
 	engine := broadcast.NewEngine(cfg)
 	ctx, cancel := context.WithCancel(t.Context())
 	n := &testNode{
-		eth:     eth,
-		shared:  shared,
-		addr:    addr,
-		stack:   stack,
-		engine:  engine,
-		obs:     obs,
-		peers:   peers,
-		streams: streams,
-		ctx:     ctx,
-		cancel:  cancel,
+		endpoint: endpoint,
+		stack:    stack,
+		engine:   engine,
+		obs:      obs,
+		peers:    peers,
+		streams:  streams,
+		ctx:      ctx,
+		cancel:   cancel,
 	}
 	n.wg.Go(func() { _ = engine.Serve(ctx, peers, streams) })
 	t.Cleanup(func() { _ = n.Close() })
@@ -154,7 +121,7 @@ func (n *testNode) Close() error {
 		for _, conn := range conns {
 			closeErr = errors.Join(closeErr, conn.Close())
 		}
-		closeErr = errors.Join(closeErr, n.shared.Close())
+		closeErr = errors.Join(closeErr, n.endpoint.Shared.Close())
 		n.wg.Wait()
 
 		drainQueuedStreams(n.streams)
@@ -184,7 +151,7 @@ type testObserver struct {
 	errors   []broadcast.ChunkProcessError
 
 	// peerSubs tracks per-channel peer sets from OnPeerSubscribed/OnPeerUnsubscribed/OnPeerGone.
-	peerSubs map[broadcast.ChannelID]map[broadcast.PeerID]struct{}
+	peerSubs map[broadcast.ChannelID]map[transport.PeerID]struct{}
 }
 
 func newTestObserver() *testObserver {
@@ -193,7 +160,7 @@ func newTestObserver() *testObserver {
 		disposed: make(map[observerKey]chan struct{}),
 		created:  make(map[observerKey]chan struct{}),
 		received: make(map[observerKey]int),
-		peerSubs: make(map[broadcast.ChannelID]map[broadcast.PeerID]struct{}),
+		peerSubs: make(map[broadcast.ChannelID]map[transport.PeerID]struct{}),
 	}
 }
 
@@ -245,16 +212,16 @@ func (o *testObserver) OnSessionDisposed(channelID broadcast.ChannelID, messageI
 	}
 }
 
-func (o *testObserver) OnPeerSubscribed(peerID broadcast.PeerID, channelID broadcast.ChannelID) {
+func (o *testObserver) OnPeerSubscribed(peerID transport.PeerID, channelID broadcast.ChannelID) {
 	o.mu.Lock()
 	defer o.mu.Unlock()
 	if o.peerSubs[channelID] == nil {
-		o.peerSubs[channelID] = make(map[broadcast.PeerID]struct{})
+		o.peerSubs[channelID] = make(map[transport.PeerID]struct{})
 	}
 	o.peerSubs[channelID][peerID] = struct{}{}
 }
 
-func (o *testObserver) OnChunkRcvd(_ broadcast.PeerID, channelID broadcast.ChannelID, messageID broadcast.MessageID, _ broadcast.Verdict) {
+func (o *testObserver) OnChunkRcvd(_ transport.PeerID, channelID broadcast.ChannelID, messageID broadcast.MessageID, _ broadcast.Verdict) {
 	o.mu.Lock()
 	defer o.mu.Unlock()
 	o.received[observerKey{channelID, messageID}]++
@@ -266,7 +233,7 @@ func (o *testObserver) OnChunkError(err broadcast.ChunkProcessError) {
 	o.errors = append(o.errors, err)
 }
 
-func (o *testObserver) OnPeerUnsubscribed(peerID broadcast.PeerID, channelID broadcast.ChannelID) {
+func (o *testObserver) OnPeerUnsubscribed(peerID transport.PeerID, channelID broadcast.ChannelID) {
 	o.mu.Lock()
 	defer o.mu.Unlock()
 	if subs := o.peerSubs[channelID]; subs != nil {
@@ -274,7 +241,7 @@ func (o *testObserver) OnPeerUnsubscribed(peerID broadcast.PeerID, channelID bro
 	}
 }
 
-func (o *testObserver) OnPeerGone(peerID broadcast.PeerID) {
+func (o *testObserver) OnPeerGone(peerID transport.PeerID) {
 	o.mu.Lock()
 	defer o.mu.Unlock()
 	for _, subs := range o.peerSubs {
@@ -362,34 +329,12 @@ func starEdges(n int) []edge {
 // established but does NOT wait for handshakes to complete.
 func connectNodes(t *testing.T, nodes []*testNode, edges []edge) {
 	t.Helper()
-	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
-	defer cancel()
-
 	for _, e := range edges {
 		from := nodes[e.from]
 		to := nodes[e.to]
-
-		type acceptResult struct {
-			conn transport.Conn
-			err  error
-		}
-		accepted := make(chan acceptResult, 1)
-		go func() {
-			conn, err := to.eth.Accept(ctx)
-			accepted <- acceptResult{conn: conn, err: err}
-		}()
-
-		dialed, dialErr := from.eth.Dial(ctx, to.addr, to.eth.PeerID())
-		if dialErr != nil {
-			t.Fatalf("dial %d->%d: %v", e.from, e.to, dialErr)
-		}
-		result := <-accepted
-		if result.err != nil {
-			t.Fatalf("accept %d->%d: %v", e.from, e.to, result.err)
-		}
-
+		dialed, accepted := transporttest.Connect(t, from.endpoint, to.endpoint)
 		from.serveConn(dialed)
-		to.serveConn(result.conn)
+		to.serveConn(accepted)
 	}
 }
 
@@ -413,14 +358,7 @@ func drainQueuedStreams(streams <-chan ethp2p.StreamEvent) {
 	for {
 		select {
 		case event := <-streams:
-			if event.Stream == nil {
-				continue
-			}
-			if stream, ok := event.Stream.(transport.Stream); ok {
-				_ = stream.Reset()
-				continue
-			}
-			event.Stream.CancelRead(0)
+			event.Reject()
 		default:
 			return
 		}

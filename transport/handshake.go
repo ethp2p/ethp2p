@@ -80,13 +80,6 @@ func newHandshaker(key *PrivKey) (*handshaker, error) {
 	}, nil
 }
 
-// dialConfig returns the TLS configuration for one dial, recording the
-// authenticated remote key into slot. A nonempty expect pins the server
-// identity, failing the handshake on mismatch.
-func (h *handshaker) dialConfig(slot *remoteIdentitySlot, expect PeerID) *tls.Config {
-	return h.verify(slot, expect)
-}
-
 // serverConfig returns the listener configuration whose top-level ALPN is
 // libp2p. GetConfigForClient replaces it with the full preference order, so the
 // listener accepts both ethp2p_0 and libp2p, and hands the per-connection
@@ -96,12 +89,12 @@ func (h *handshaker) serverConfig() *tls.Config {
 		NextProtos: []string{AlpnLibp2p},
 		GetConfigForClient: func(info *tls.ClientHelloInfo) (*tls.Config, error) {
 			slot, _ := info.Context().Value(remoteIdentityContextKey{}).(*remoteIdentitySlot)
-			return h.verify(slot, ""), nil
+			return h.connConfig(slot, ""), nil
 		},
 	}
 }
 
-// verify returns a single-connection TLS config whose verify callback
+// connConfig returns a single-connection TLS config whose verify callback
 // authenticates the presented certificate, pins it to expect when nonempty, and
 // records the identity into slot.
 //
@@ -109,7 +102,7 @@ func (h *handshaker) serverConfig() *tls.Config {
 // identity is trustworthy because this callback rejected the connection
 // otherwise, and it is authenticated here exactly once per connection. A nil
 // slot costs a second authentication when the identity is read back.
-func (h *handshaker) verify(slot *remoteIdentitySlot, expect PeerID) *tls.Config {
+func (h *handshaker) connConfig(slot *remoteIdentitySlot, expect PeerID) *tls.Config {
 	config := h.config.Clone()
 	config.VerifyPeerCertificate = func(rawCerts [][]byte, _ [][]*x509.Certificate) error {
 		chain, err := parseChain(rawCerts)

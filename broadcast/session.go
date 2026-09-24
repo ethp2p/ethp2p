@@ -15,7 +15,7 @@ const maxConcurrentReads = 64
 // outboundKey identifies an in-flight outbound chunk send to a specific peer.
 // handle is the strategy-assigned opaque token from ChunkID.Handle().
 type outboundKey struct {
-	peer   PeerID
+	peer   transport.PeerID
 	handle ChunkHandle
 }
 
@@ -66,7 +66,7 @@ type session[CI ChunkIdent, R Wire] struct {
 	// maybeDispose uses it to distinguish "no peers yet" (wait for
 	// peer attachment) from "all peers gone" (dispose).
 	everHadPeers bool
-	peers        map[PeerID]*sessionPeer
+	peers        map[transport.PeerID]*sessionPeer
 	channelInbox chan<- channelEvent
 	observer     Observer
 
@@ -165,7 +165,7 @@ func (s *session[CI, R]) notifyPeersSessionDone() {
 // stream. If the chunk is needed, it acquires a semaphore slot, resolves
 // a dedup group, and spawns a goroutine to read the data. The goroutine
 // posts a channelChunkData back to the channel inbox on completion.
-func (s *session[CI, R]) handleChunkStream(peer PeerID, chunkID []byte, dataLen uint32, stream transport.ReceiveStream) {
+func (s *session[CI, R]) handleChunkStream(peer transport.PeerID, chunkID []byte, dataLen uint32, stream transport.ReceiveStream) {
 	chunk := s.newCI()
 	if err := chunk.Unmarshal(chunkID); err != nil {
 		s.observer.OnChunkError(ChunkProcessError{
@@ -259,7 +259,7 @@ func (s *session[CI, R]) handleChunkStream(peer PeerID, chunkID []byte, dataLen 
 
 // handleChunkData processes fully-read chunk data. Called on the channel
 // goroutine via channelChunkData events.
-func (s *session[CI, R]) handleChunkData(peer PeerID, chunkID []byte, payload []byte) {
+func (s *session[CI, R]) handleChunkData(peer transport.PeerID, chunkID []byte, payload []byte) {
 	chunk := s.newCI()
 	if err := chunk.Unmarshal(chunkID); err != nil {
 		s.observer.OnChunkError(ChunkProcessError{
@@ -302,7 +302,7 @@ func (s *session[CI, R]) handleChunkData(peer PeerID, chunkID []byte, payload []
 
 // handleVerifyResult processes the outcome of an async chunk
 // verification. Called on the channel goroutine via channelVerifyResult.
-func (s *session[CI, R]) handleVerifyResult(peer PeerID, chunkID []byte, payload []byte, verdict Verdict) {
+func (s *session[CI, R]) handleVerifyResult(peer transport.PeerID, chunkID []byte, payload []byte, verdict Verdict) {
 	chunk := s.newCI()
 	if err := chunk.Unmarshal(chunkID); err != nil {
 		return
@@ -330,7 +330,7 @@ func (s *session[CI, R]) handleVerifyResult(peer PeerID, chunkID []byte, payload
 // decides when to cancel the dedup group by calling dedup.Cancel().
 // Called from handleChunkData (sync verification) and
 // handleVerifyResult (async verification).
-func (s *session[CI, R]) acceptChunk(peer PeerID, chunk CI, payload []byte) {
+func (s *session[CI, R]) acceptChunk(peer transport.PeerID, chunk CI, payload []byte) {
 	dedup := s.buildDedupCancel(chunk)
 	verdict, complete, err := s.strategy.TakeChunk(peer, chunk, payload, dedup)
 	if err != nil {
@@ -386,7 +386,7 @@ func (s *session[CI, R]) buildDedupCancel(chunk CI) *DedupCancel {
 	}}
 }
 
-func (s *session[CI, R]) handleRoutingUpdate(peer PeerID, data []byte) {
+func (s *session[CI, R]) handleRoutingUpdate(peer transport.PeerID, data []byte) {
 	update := s.newR()
 	if err := update.Unmarshal(data); err != nil {
 		s.observer.OnChunkError(ChunkProcessError{Peer: peer, ChannelID: s.channelID, MessageID: s.messageID, Err: err})
@@ -407,7 +407,7 @@ func (s *session[CI, R]) handleRoutingUpdate(peer PeerID, data []byte) {
 	s.drainPolls()
 }
 
-func (s *session[CI, R]) handleSendComplete(peer PeerID, handle ChunkHandle, err error, size int) {
+func (s *session[CI, R]) handleSendComplete(peer transport.PeerID, handle ChunkHandle, err error, size int) {
 	if sp := s.peers[peer]; sp != nil {
 		sp.stats.inflight--
 	}
@@ -460,13 +460,13 @@ func (s *session[CI, R]) handlePeerAttached(p *PeerConn) {
 	s.drainPolls()
 }
 
-func (s *session[CI, R]) handlePeerDropped(peer PeerID) {
+func (s *session[CI, R]) handlePeerDropped(peer transport.PeerID) {
 	delete(s.peers, peer)
 	s.strategy.DetachPeer(peer, false)
 	s.maybeDispose()
 }
 
-func (s *session[CI, R]) handlePeerCompleted(peer PeerID) {
+func (s *session[CI, R]) handlePeerCompleted(peer transport.PeerID) {
 	sp, ok := s.peers[peer]
 	if !ok || sp.completed {
 		return
@@ -545,7 +545,7 @@ func (s *session[CI, R]) flushRouting() {
 
 // sendChunk marshals and pushes a chunk to the target peer's slot.
 // If the slot is full, reports a failed send back to the strategy.
-func (s *session[CI, R]) sendChunk(peer PeerID, chunkID CI, data []byte) {
+func (s *session[CI, R]) sendChunk(peer transport.PeerID, chunkID CI, data []byte) {
 	handle := chunkID.Handle()
 	chunkIDBytes, err := chunkID.Marshal()
 	if err != nil {

@@ -9,6 +9,7 @@ import (
 	"slices"
 
 	"github.com/ethp2p/ethp2p/broadcast"
+	"github.com/ethp2p/ethp2p/transport"
 	"github.com/klauspost/reedsolomon"
 )
 
@@ -25,7 +26,7 @@ type strategy struct {
 	totalChunks  int
 	chunks       [][]byte // indexed by chunk; nil = not received
 	emitPlanner  *emitPlanner
-	peers        map[broadcast.PeerID]*peerState
+	peers        map[transport.PeerID]*peerState
 	routingDirty bool
 
 	// Per-relay random seed for deterministic priority ordering:
@@ -91,7 +92,7 @@ func newOriginStrategy(config *Config, payload []byte) (*strategy, error) {
 		totalChunks:  total,
 		chunks:       chunks,
 		emitPlanner:  planner,
-		peers:        make(map[broadcast.PeerID]*peerState),
+		peers:        make(map[transport.PeerID]*peerState),
 		have:         AllOnesBitmap(total),
 		routingDirty: true,
 	}, nil
@@ -115,7 +116,7 @@ func newRelayStrategy(config *Config, preamble *Preamble) (*strategy, error) {
 		totalChunks: total,
 		chunks:      make([][]byte, total),
 		emitPlanner: newEmitPlanner(),
-		peers:       make(map[broadcast.PeerID]*peerState),
+		peers:       make(map[transport.PeerID]*peerState),
 		seed:        rand.Uint64(),
 		have:        NewBitmap(total),
 	}, nil
@@ -135,7 +136,7 @@ func (s *strategy) DedupKey(chunkID *ChunkIdent) []byte {
 	return buf[:]
 }
 
-func (s *strategy) AttachPeer(peer broadcast.PeerID, stats *broadcast.PeerSessionStats) {
+func (s *strategy) AttachPeer(peer transport.PeerID, stats *broadcast.PeerSessionStats) {
 	ps := &peerState{
 		bitmap:   NewBitmap(s.totalChunks),
 		stats:    stats,
@@ -144,7 +145,7 @@ func (s *strategy) AttachPeer(peer broadcast.PeerID, stats *broadcast.PeerSessio
 	s.peers[peer] = ps
 }
 
-func (s *strategy) DetachPeer(peer broadcast.PeerID, completed bool) {
+func (s *strategy) DetachPeer(peer transport.PeerID, completed bool) {
 	ps, ok := s.peers[peer]
 	if !ok {
 		return
@@ -156,7 +157,7 @@ func (s *strategy) DetachPeer(peer broadcast.PeerID, completed bool) {
 	delete(s.peers, peer)
 }
 
-func (s *strategy) VerifyChunk(_ broadcast.PeerID, chunkID *ChunkIdent, data []byte) broadcast.Verdict {
+func (s *strategy) VerifyChunk(_ transport.PeerID, chunkID *ChunkIdent, data []byte) broadcast.Verdict {
 	if chunkID.Index < 0 || chunkID.Index >= s.totalChunks {
 		return broadcast.VerdictInvalid
 	}
@@ -167,7 +168,7 @@ func (s *strategy) Verified() <-chan broadcast.VerifyResult[*ChunkIdent] {
 	return nil
 }
 
-func (s *strategy) TakeChunk(peer broadcast.PeerID, chunkID *ChunkIdent, data []byte, dedup *broadcast.DedupCancel) (broadcast.Verdict, bool, error) {
+func (s *strategy) TakeChunk(peer transport.PeerID, chunkID *ChunkIdent, data []byte, dedup *broadcast.DedupCancel) (broadcast.Verdict, bool, error) {
 	if chunkID.Index < 0 || chunkID.Index >= s.totalChunks {
 		return broadcast.VerdictInvalid, false, nil
 	}
@@ -204,7 +205,7 @@ func (s *strategy) Decode() ([]byte, error) {
 	return s.tryDecode()
 }
 
-func (s *strategy) RoutingUpdate(peer broadcast.PeerID, update *Bitmap) ([]broadcast.ChunkHandle, error) {
+func (s *strategy) RoutingUpdate(peer transport.PeerID, update *Bitmap) ([]broadcast.ChunkHandle, error) {
 	ps, ok := s.peers[peer]
 	if !ok {
 		return nil, nil
@@ -251,7 +252,7 @@ func (s *strategy) PollRouting(force bool) (*Bitmap, bool) {
 
 // allocate selects the next chunk for the given peer and marks it
 // in-flight immediately.
-func (s *strategy) allocate(peer broadcast.PeerID, ps *peerState) (*ChunkIdent, []byte, bool) {
+func (s *strategy) allocate(peer transport.PeerID, ps *peerState) (*ChunkIdent, []byte, bool) {
 	var skipped []emitEntry
 
 	var foundIdx int
@@ -288,7 +289,7 @@ func (s *strategy) allocate(peer broadcast.PeerID, ps *peerState) (*ChunkIdent, 
 	return chunkID, foundData, true
 }
 
-func (s *strategy) ChunkSent(peer broadcast.PeerID, handle broadcast.ChunkHandle, err error) {
+func (s *strategy) ChunkSent(peer transport.PeerID, handle broadcast.ChunkHandle, err error) {
 	ps := s.peers[peer]
 	if ps == nil {
 		return

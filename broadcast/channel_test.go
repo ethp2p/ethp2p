@@ -10,6 +10,7 @@ import (
 	"time"
 
 	bcastpb "github.com/ethp2p/ethp2p/broadcast/pb"
+	"github.com/ethp2p/ethp2p/transport"
 )
 
 // fakeReceiveStream wraps a bytes.Reader to satisfy transport.ReceiveStream
@@ -24,7 +25,7 @@ func (f *fakeReceiveStream) SetReadDeadline(time.Time) error { return nil }
 // newFakeChunk builds a channelChunkStream with a fakeReceiveStream backed by
 // the given payload. Convenience helper for tests that need to send
 // inbound chunks through the channel inbox.
-func newFakeChunk(peer PeerID, msgID MessageID, payload []byte) channelChunkStream {
+func newFakeChunk(peer transport.PeerID, msgID MessageID, payload []byte) channelChunkStream {
 	return channelChunkStream{
 		peerID: peer,
 		frame: &bcastpb.Chunk_Header{
@@ -84,7 +85,7 @@ func newDecodeOnTakeStrategy() *decodeOnTakeStrategy {
 	}
 }
 
-func (ds *decodeOnTakeStrategy) TakeChunk(peer PeerID, chunk *testChunk, data []byte, dedup *DedupCancel) (Verdict, bool, error) {
+func (ds *decodeOnTakeStrategy) TakeChunk(peer transport.PeerID, chunk *testChunk, data []byte, dedup *DedupCancel) (Verdict, bool, error) {
 	if ds.decoded {
 		return VerdictRedundant, false, nil
 	}
@@ -104,65 +105,65 @@ func (ds *decodeOnTakeStrategy) TakeChunk(peer PeerID, chunk *testChunk, data []
 type pushingStrategy struct {
 	messageID MessageID
 	pending   []*testChunk
-	peers     map[PeerID]*PeerSessionStats
-	peerSent  map[PeerID]map[int]bool
-	peerReady map[PeerID]bool // true = peer can receive next chunk via Poll
+	peers     map[transport.PeerID]*PeerSessionStats
+	peerSent  map[transport.PeerID]map[int]bool
+	peerReady map[transport.PeerID]bool // true = peer can receive next chunk via Poll
 	closed    bool
-	pushHook  func(messageID MessageID, peer PeerID, chunkIdx int)
+	pushHook  func(messageID MessageID, peer transport.PeerID, chunkIdx int)
 
 	mu             sync.Mutex
-	pushCount      map[PeerID]int
-	sentTotal      map[PeerID]int
-	sentOK         map[PeerID]int
-	unexpectedSent map[PeerID]int
-	sentOrder      map[PeerID][]int
+	pushCount      map[transport.PeerID]int
+	sentTotal      map[transport.PeerID]int
+	sentOK         map[transport.PeerID]int
+	unexpectedSent map[transport.PeerID]int
+	sentOrder      map[transport.PeerID][]int
 }
 
 func newPushingStrategy(messageID MessageID) *pushingStrategy {
 	return newPushingStrategyWithPushHook(messageID, nil)
 }
 
-func newPushingStrategyWithPushHook(messageID MessageID, pushHook func(messageID MessageID, peer PeerID, chunkIdx int)) *pushingStrategy {
+func newPushingStrategyWithPushHook(messageID MessageID, pushHook func(messageID MessageID, peer transport.PeerID, chunkIdx int)) *pushingStrategy {
 	return &pushingStrategy{
 		messageID:      messageID,
-		peers:          make(map[PeerID]*PeerSessionStats),
-		peerSent:       make(map[PeerID]map[int]bool),
-		peerReady:      make(map[PeerID]bool),
+		peers:          make(map[transport.PeerID]*PeerSessionStats),
+		peerSent:       make(map[transport.PeerID]map[int]bool),
+		peerReady:      make(map[transport.PeerID]bool),
 		pushHook:       pushHook,
-		pushCount:      make(map[PeerID]int),
-		sentTotal:      make(map[PeerID]int),
-		sentOK:         make(map[PeerID]int),
-		unexpectedSent: make(map[PeerID]int),
-		sentOrder:      make(map[PeerID][]int),
+		pushCount:      make(map[transport.PeerID]int),
+		sentTotal:      make(map[transport.PeerID]int),
+		sentOK:         make(map[transport.PeerID]int),
+		unexpectedSent: make(map[transport.PeerID]int),
+		sentOrder:      make(map[transport.PeerID][]int),
 	}
 }
 
 func (ps *pushingStrategy) HaveChunk(_ *testChunk) bool { return false }
-func (ps *pushingStrategy) VerifyChunk(_ PeerID, _ *testChunk, _ []byte) Verdict {
+func (ps *pushingStrategy) VerifyChunk(_ transport.PeerID, _ *testChunk, _ []byte) Verdict {
 	return VerdictAccepted
 }
 func (ps *pushingStrategy) Verified() <-chan VerifyResult[*testChunk] { return nil }
 func (ps *pushingStrategy) DedupKey(_ *testChunk) []byte              { return nil }
-func (ps *pushingStrategy) AttachPeer(peer PeerID, stats *PeerSessionStats) {
+func (ps *pushingStrategy) AttachPeer(peer transport.PeerID, stats *PeerSessionStats) {
 	ps.peers[peer] = stats
 	ps.peerSent[peer] = make(map[int]bool)
 	ps.peerReady[peer] = true
 }
 
-func (ps *pushingStrategy) DetachPeer(peer PeerID, _ bool) {
+func (ps *pushingStrategy) DetachPeer(peer transport.PeerID, _ bool) {
 	delete(ps.peers, peer)
 	delete(ps.peerSent, peer)
 	delete(ps.peerReady, peer)
 }
 
-func (ps *pushingStrategy) TakeChunk(_ PeerID, chunkID *testChunk, data []byte, _ *DedupCancel) (Verdict, bool, error) {
+func (ps *pushingStrategy) TakeChunk(_ transport.PeerID, chunkID *testChunk, data []byte, _ *DedupCancel) (Verdict, bool, error) {
 	ps.pending = append(ps.pending, &testChunk{ID: chunkID.ID, Data: append([]byte(nil), data...)})
 	return VerdictAccepted, false, nil
 }
 
 func (ps *pushingStrategy) Decode() ([]byte, error) { return nil, nil }
 
-func (ps *pushingStrategy) RoutingUpdate(_ PeerID, _ *testRouting) ([]ChunkHandle, error) {
+func (ps *pushingStrategy) RoutingUpdate(_ transport.PeerID, _ *testRouting) ([]ChunkHandle, error) {
 	return nil, nil
 }
 
@@ -203,7 +204,7 @@ func (ps *pushingStrategy) PollRouting(force bool) (*testRouting, bool) {
 	return nil, false
 }
 
-func (ps *pushingStrategy) ChunkSent(peer PeerID, handle ChunkHandle, err error) {
+func (ps *pushingStrategy) ChunkSent(peer transport.PeerID, handle ChunkHandle, err error) {
 	chunkIdx := int(handle)
 	if chunkIdx < 0 || chunkIdx >= len(ps.pending) {
 		ps.mu.Lock()
@@ -231,11 +232,11 @@ func (ps *pushingStrategy) Close() error {
 	return nil
 }
 
-func (ps *pushingStrategy) snapshot() (pushCount, sentOK map[PeerID]int) {
+func (ps *pushingStrategy) snapshot() (pushCount, sentOK map[transport.PeerID]int) {
 	ps.mu.Lock()
 	defer ps.mu.Unlock()
-	pc := make(map[PeerID]int, len(ps.pushCount))
-	so := make(map[PeerID]int, len(ps.sentOK))
+	pc := make(map[transport.PeerID]int, len(ps.pushCount))
+	so := make(map[transport.PeerID]int, len(ps.sentOK))
 	for k, v := range ps.pushCount {
 		pc[k] = v
 	}
@@ -287,7 +288,7 @@ func (o *recordObserver) OnSessionDisposed(channelID ChannelID, messageID Messag
 	o.mu.Unlock()
 }
 
-func (o *recordObserver) OnChunkSent(_ PeerID, _ ChannelID, _ MessageID, _ int) {
+func (o *recordObserver) OnChunkSent(_ transport.PeerID, _ ChannelID, _ MessageID, _ int) {
 	o.mu.Lock()
 	o.chunksSent++
 	o.mu.Unlock()
@@ -435,7 +436,7 @@ func TestChannel_PublishOriginEndToEnd(t *testing.T) {
 
 		channel := AttachChannel[*testChunk, *testRouting, *testPreamble](engine, "test-channel", scheme)
 
-		peerIDs := []PeerID{"peerA", "peerB", "peerC"}
+		peerIDs := []transport.PeerID{"peerA", "peerB", "peerC"}
 		for _, pid := range peerIDs {
 			tr, _ := newTestTransportPair(context.Background())
 			registerTestPeer(engine, pid, tr, ProtocolVersion(1), []ChannelID{"test-channel"})
@@ -484,7 +485,7 @@ func TestChannel_RelayEndToEnd(t *testing.T) {
 
 		channel := AttachChannel[*testChunk, *testRouting, *testPreamble](engine, "test-channel", scheme)
 
-		peerIDs := []PeerID{"peerB", "peerC"}
+		peerIDs := []transport.PeerID{"peerB", "peerC"}
 		for _, pid := range peerIDs {
 			tr, _ := newTestTransportPair(context.Background())
 			registerTestPeer(engine, pid, tr, ProtocolVersion(1), []ChannelID{"test-channel"})
@@ -619,7 +620,7 @@ func TestChannel_PeerChurnMidSession(t *testing.T) {
 
 		channel := AttachChannel[*testChunk, *testRouting, *testPreamble](engine, "test-channel", scheme)
 
-		allPeers := []PeerID{"peerA", "peerB", "peerC"}
+		allPeers := []transport.PeerID{"peerA", "peerB", "peerC"}
 		for _, pid := range allPeers {
 			tr, _ := newTestTransportPair(context.Background())
 			registerTestPeer(engine, pid, tr, ProtocolVersion(1), []ChannelID{"test-channel"})

@@ -6,13 +6,15 @@ import (
 	"encoding/binary"
 	"errors"
 	"io"
-	"net"
 	"slices"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/ethp2p/ethp2p/protocol"
 	"github.com/ethp2p/ethp2p/transport"
+	"github.com/ethp2p/ethp2p/transport/transporttest"
 	"github.com/libp2p/go-libp2p/p2p/transport/quicreuse"
 	"github.com/quic-go/quic-go"
 )
@@ -24,80 +26,48 @@ const (
 	testTimeout                      = 10 * time.Second
 )
 
-type testEndpoint struct {
-	shared *transport.SharedTransport
-	eth    *transport.Ethp2pTransport
-	packet *net.UDPConn
-}
-
 type testPair struct {
-	client     *testEndpoint
-	server     *testEndpoint
+	client     *transporttest.Endpoint
+	server     *transporttest.Endpoint
 	clientConn transport.Conn
 	serverConn transport.Conn
 	clientLib  quicreuse.QUICConn
 	serverLib  quicreuse.QUICConn
 }
 
-func newTestEndpoint(t *testing.T) *testEndpoint {
-	t.Helper()
+type countingConn struct {
+	transport.Conn
+	uniOpens atomic.Int64
+	biOpens  atomic.Int64
+}
 
-	key, err := transport.GenPrivKey()
-	if err != nil {
-		t.Fatal(err)
-	}
-	packet, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
-	if err != nil {
-		t.Fatal(err)
-	}
-	shared, err := transport.NewShared(key, packet, transport.Interop())
-	if err != nil {
-		_ = packet.Close()
-		t.Fatal(err)
-	}
-	endpoint := &testEndpoint{shared: shared, eth: shared.Ethp2p(), packet: packet}
-	t.Cleanup(func() {
-		// SharedTransport deliberately does not own the packet connection.
-		_ = endpoint.shared.Close()
-		_ = endpoint.packet.Close()
-	})
-	return endpoint
+func (c *countingConn) OpenUniStream(ctx context.Context) (transport.SendStream, error) {
+	c.uniOpens.Add(1)
+	return c.Conn.OpenUniStream(ctx)
+}
+
+func (c *countingConn) OpenStream(ctx context.Context) (transport.Stream, error) {
+	c.biOpens.Add(1)
+	return c.Conn.OpenStream(ctx)
 }
 
 func newTestPair(t *testing.T) *testPair {
 	t.Helper()
-	client := newTestEndpoint(t)
-	server := newTestEndpoint(t)
+	client := transporttest.NewEndpoint(t)
+	server := transporttest.NewEndpoint(t)
 
-	clientListener, err := client.shared.Libp2p().Listen(nil, nil)
+	clientListener, err := client.Shared.Libp2p().Listen(nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	serverListener, err := server.shared.Libp2p().Listen(nil, nil)
+	serverListener, err := server.Shared.Libp2p().Listen(nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	ctx, cancel := context.WithTimeout(t.Context(), testTimeout)
 	defer cancel()
-	type dialResult struct {
-		conn transport.Conn
-		err  error
-	}
-	dialed := make(chan dialResult, 1)
-	go func() {
-		conn, err := client.eth.Dial(ctx, server.eth.Addr(), server.eth.PeerID())
-		dialed <- dialResult{conn: conn, err: err}
-	}()
-
-	serverConn, err := server.eth.Accept(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	dial := <-dialed
-	if dial.err != nil {
-		t.Fatal(dial.err)
-	}
+	clientConn, serverConn := transporttest.Connect(t, client, server)
 	clientLib, err := clientListener.Accept(ctx)
 	if err != nil {
 		t.Fatal(err)
@@ -110,7 +80,7 @@ func newTestPair(t *testing.T) *testPair {
 	return &testPair{
 		client:     client,
 		server:     server,
-		clientConn: dial.conn,
+		clientConn: clientConn,
 		serverConn: serverConn,
 		clientLib:  clientLib,
 		serverLib:  serverLib,
@@ -151,9 +121,22 @@ func awaitPeer(t *testing.T, peers <-chan *Peer) *Peer {
 }
 
 func selectorWire(selectors ...protocol.Selector) []byte {
-	wire := make([]byte, 0, len(selectors)*binary.MaxVarintLen64)
+	wire := selectorFrame(protocol.AdvertisementSelector)
 	for _, selector := range selectors {
-		wire = binary.AppendUvarint(wire, uint64(selector))
+		wire = append(wire, selectorFrame(selector)...)
+	}
+	return wire
+}
+
+func selectorFrame(selector protocol.Selector) []byte {
+	payload := binary.AppendUvarint(nil, uint64(selector))
+	return protocol.AppendFrame(nil, payload)
+}
+
+func selectorFrames(selectors ...protocol.Selector) []byte {
+	var wire []byte
+	for _, selector := range selectors {
+		wire = append(wire, selectorFrame(selector)...)
 	}
 	return wire
 }
@@ -268,6 +251,14 @@ func TestStackRegisterSubsystemRejectsInvalidRegistrationsAtomically(t *testing.
 	if _, err := stack.RegisterSubsystem("collision", selectorAlpha); err == nil {
 		t.Fatal("selector assigned to another subsystem was accepted")
 	}
+	for _, reserved := range []protocol.Selector{0, '/'} {
+		if _, err := stack.RegisterSubsystem("reserved", selectorCommon, reserved); !errors.Is(err, protocol.ErrReservedSelector) {
+			t.Fatalf("reserved selector %d: %v", reserved, err)
+		}
+	}
+	if _, err := stack.RegisterSubsystem("common", selectorCommon); err != nil {
+		t.Fatalf("failed to register after rejected reserved selector: %v", err)
+	}
 }
 
 func TestStackServeConnReportsNoProtocols(t *testing.T) {
@@ -327,8 +318,8 @@ func TestStackAdvertisesCanonicalSelectorsAndNotifiesAfterExchange(t *testing.T)
 	if !slices.Equal(peer.Selectors, []protocol.Selector{selectorAlpha, selectorGamma}) {
 		t.Fatalf("peer selectors = %v, want [%d %d]", peer.Selectors, selectorAlpha, selectorGamma)
 	}
-	if peer.Conn != pair.serverConn {
-		t.Fatal("peer notification did not retain the borrowed connection")
+	if peer.ID != pair.serverConn.RemotePeerID() {
+		t.Fatalf("peer ID = %q, want authenticated remote ID %q", peer.ID, pair.serverConn.RemotePeerID())
 	}
 	if peer.Context == nil {
 		t.Fatal("peer notification has nil context")
@@ -368,11 +359,236 @@ func TestStackExchangesAndIntersectsOnBothEnds(t *testing.T) {
 			t.Errorf("%s peer context is nil", name)
 		}
 	}
-	if clientPeer.Conn != pair.clientConn || serverPeer.Conn != pair.serverConn {
-		t.Fatal("peer notification did not retain each endpoint's borrowed connection")
+	if clientPeer.ID != pair.clientConn.RemotePeerID() || serverPeer.ID != pair.serverConn.RemotePeerID() {
+		t.Fatal("peer notification did not expose each authenticated remote ID")
 	}
 	stopServe(t, clientCancel, clientDone)
 	stopServe(t, serverCancel, serverDone)
+}
+
+func TestPeerOpenStreamsWriteSharedSelectors(t *testing.T) {
+	pair := newTestPair(t)
+	var client, server Stack
+	clientSubsystem, err := client.RegisterSubsystem("client", selectorAlpha, selectorCommon)
+	if err != nil {
+		t.Fatal(err)
+	}
+	serverSubsystem, err := server.RegisterSubsystem("server", selectorAlpha, selectorCommon)
+	if err != nil {
+		t.Fatal(err)
+	}
+	clientPeers := make(chan *Peer, 1)
+	serverStreams := make(chan StreamEvent, 2)
+	if err := clientSubsystem.NotifyPeers(clientPeers); err != nil {
+		t.Fatal(err)
+	}
+	if err := serverSubsystem.NotifyStreams(serverStreams); err != nil {
+		t.Fatal(err)
+	}
+
+	clientConn := &countingConn{Conn: pair.clientConn}
+	clientCancel, clientDone := startServe(t, &client, clientConn)
+	serverCancel, serverDone := startServe(t, &server, pair.serverConn)
+	clientPeer := awaitPeer(t, clientPeers)
+	ctx, cancel := context.WithTimeout(t.Context(), testTimeout)
+	defer cancel()
+
+	uniOpens := clientConn.uniOpens.Load()
+	if _, err := clientPeer.OpenUniStream(ctx, selectorGamma); !errors.Is(err, ErrSelectorNotShared) {
+		t.Fatalf("OpenUniStream with unshared selector = %v, want ErrSelectorNotShared", err)
+	}
+	if got := clientConn.uniOpens.Load(); got != uniOpens {
+		t.Fatalf("unshared OpenUniStream opened %d streams, want none", got-uniOpens)
+	}
+	biOpens := clientConn.biOpens.Load()
+	if _, err := clientPeer.OpenStream(ctx, selectorGamma); !errors.Is(err, ErrSelectorNotShared) {
+		t.Fatalf("OpenStream with unshared selector = %v, want ErrSelectorNotShared", err)
+	}
+	if got := clientConn.biOpens.Load(); got != biOpens {
+		t.Fatalf("unshared OpenStream opened %d streams, want none", got-biOpens)
+	}
+
+	uni, err := clientPeer.OpenUniStream(ctx, selectorAlpha)
+	if err != nil {
+		t.Fatalf("OpenUniStream: %v", err)
+	}
+	if _, err := uni.Write([]byte("unidirectional payload")); err != nil {
+		t.Fatal(err)
+	}
+	if err := uni.Close(); err != nil {
+		t.Fatal(err)
+	}
+	uniEvent := awaitStreamEvent(t, serverStreams)
+	if uniEvent.Selector != selectorAlpha {
+		t.Fatalf("unidirectional selector = %d, want %d", uniEvent.Selector, selectorAlpha)
+	}
+	if _, ok := uniEvent.Stream.(transport.Stream); ok {
+		t.Fatal("unidirectional stream was delivered as bidirectional")
+	}
+	uniPayload := make([]byte, len("unidirectional payload"))
+	if _, err := io.ReadFull(uniEvent.Stream, uniPayload); err != nil {
+		t.Fatalf("read unidirectional payload: %v", err)
+	}
+	if string(uniPayload) != "unidirectional payload" {
+		t.Fatalf("unidirectional payload = %q", uniPayload)
+	}
+	uniEvent.Reject()
+
+	bi, err := clientPeer.OpenStream(ctx, selectorCommon)
+	if err != nil {
+		t.Fatalf("OpenStream: %v", err)
+	}
+	if _, err := bi.Write([]byte("bidirectional payload")); err != nil {
+		t.Fatal(err)
+	}
+	if err := bi.Close(); err != nil {
+		t.Fatal(err)
+	}
+	biEvent := awaitStreamEvent(t, serverStreams)
+	if biEvent.Selector != selectorCommon {
+		t.Fatalf("bidirectional selector = %d, want %d", biEvent.Selector, selectorCommon)
+	}
+	remoteBi, ok := biEvent.Stream.(transport.Stream)
+	if !ok {
+		t.Fatal("bidirectional stream was delivered without a write side")
+	}
+	biPayload := make([]byte, len("bidirectional payload"))
+	if _, err := io.ReadFull(remoteBi, biPayload); err != nil {
+		t.Fatalf("read bidirectional payload: %v", err)
+	}
+	if string(biPayload) != "bidirectional payload" {
+		t.Fatalf("bidirectional payload = %q", biPayload)
+	}
+	biEvent.Reject()
+
+	clientCancel()
+	if err := waitServe(t, clientDone); err != nil && !errors.Is(err, context.Canceled) {
+		t.Fatalf("ServeConn after cancellation = %v", err)
+	}
+	uniOpens = clientConn.uniOpens.Load()
+	if _, err := clientPeer.OpenUniStream(ctx, selectorAlpha); !errors.Is(err, context.Canceled) {
+		t.Fatalf("OpenUniStream after peer cancellation = %v, want context.Canceled", err)
+	}
+	if got := clientConn.uniOpens.Load(); got != uniOpens {
+		t.Fatalf("cancelled OpenUniStream opened %d streams, want none", got-uniOpens)
+	}
+	biOpens = clientConn.biOpens.Load()
+	if _, err := clientPeer.OpenStream(ctx, selectorCommon); !errors.Is(err, context.Canceled) {
+		t.Fatalf("OpenStream after peer cancellation = %v, want context.Canceled", err)
+	}
+	if got := clientConn.biOpens.Load(); got != biOpens {
+		t.Fatalf("cancelled OpenStream opened %d streams, want none", got-biOpens)
+	}
+	stopServe(t, serverCancel, serverDone)
+}
+
+func awaitStreamEvent(t *testing.T, events <-chan StreamEvent) StreamEvent {
+	t.Helper()
+	select {
+	case event := <-events:
+		return event
+	case <-time.After(testTimeout):
+		t.Fatal("stream event did not arrive")
+		return StreamEvent{}
+	}
+}
+
+type selectorWriteConn struct {
+	transport.Conn
+	stream *selectorWriteStream
+}
+
+func (c *selectorWriteConn) OpenUniStream(context.Context) (transport.SendStream, error) {
+	return c.stream, nil
+}
+
+func (c *selectorWriteConn) OpenStream(context.Context) (transport.Stream, error) {
+	return c.stream, nil
+}
+
+type selectorWriteStream struct {
+	started    chan struct{}
+	canceled   chan struct{}
+	startOnce  sync.Once
+	cancelOnce sync.Once
+}
+
+func newSelectorWriteStream() *selectorWriteStream {
+	return &selectorWriteStream{started: make(chan struct{}), canceled: make(chan struct{})}
+}
+
+func (s *selectorWriteStream) Read([]byte) (int, error) { return 0, io.EOF }
+
+func (s *selectorWriteStream) Write([]byte) (int, error) {
+	s.startOnce.Do(func() { close(s.started) })
+	<-s.canceled
+	return 0, io.ErrClosedPipe
+}
+
+func (s *selectorWriteStream) Close() error { return nil }
+
+func (s *selectorWriteStream) Reset() error {
+	s.cancel()
+	return nil
+}
+
+func (s *selectorWriteStream) CancelRead(uint64) {}
+
+func (s *selectorWriteStream) CancelWrite(uint64) { s.cancel() }
+
+func (s *selectorWriteStream) SetDeadline(time.Time) error { return nil }
+
+func (s *selectorWriteStream) SetReadDeadline(time.Time) error { return nil }
+
+func (s *selectorWriteStream) SetWriteDeadline(time.Time) error { return nil }
+
+func (s *selectorWriteStream) cancel() {
+	s.cancelOnce.Do(func() { close(s.canceled) })
+}
+
+func TestPeerOpenCancelsStreamWhenSelectorWriteIsCanceled(t *testing.T) {
+	tests := []struct {
+		name string
+		open func(*Peer, context.Context) error
+	}{
+		{
+			name: "unidirectional",
+			open: func(peer *Peer, ctx context.Context) error {
+				_, err := peer.OpenUniStream(ctx, selectorAlpha)
+				return err
+			},
+		},
+		{
+			name: "bidirectional",
+			open: func(peer *Peer, ctx context.Context) error {
+				_, err := peer.OpenStream(ctx, selectorAlpha)
+				return err
+			},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			stream := newSelectorWriteStream()
+			peer := &Peer{
+				Context:   t.Context(),
+				Selectors: []protocol.Selector{selectorAlpha},
+				conn:      &selectorWriteConn{stream: stream},
+			}
+			ctx, cancel := context.WithCancel(t.Context())
+			result := make(chan error, 1)
+			go func() { result <- test.open(peer, ctx) }()
+			<-stream.started
+			cancel()
+			if err := <-result; !errors.Is(err, context.Canceled) {
+				t.Fatalf("open after selector-write cancellation = %v, want context.Canceled", err)
+			}
+			select {
+			case <-stream.canceled:
+			default:
+				t.Fatal("selector write cancellation did not cancel the stream")
+			}
+		})
+	}
 }
 
 func TestStackNotifiesOnlySubsystemsWithSharedSelectors(t *testing.T) {
@@ -555,6 +771,91 @@ func TestStackRoutesBidirectionalStreamAndPreservesResponse(t *testing.T) {
 	}
 }
 
+func TestStackBidiSelectorFrameDeliversBeforePayload(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		payload string
+		close   bool
+	}{
+		{name: "slash payload", payload: "/request", close: true},
+		{name: "empty body", close: true},
+		{name: "wait for response"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			pair := newTestPair(t)
+			var stack Stack
+			subsystem, err := stack.RegisterSubsystem("bidi", selectorCommon)
+			if err != nil {
+				t.Fatal(err)
+			}
+			peers := make(chan *Peer, 1)
+			streams := make(chan StreamEvent, 1)
+			if err := subsystem.NotifyPeers(peers); err != nil {
+				t.Fatal(err)
+			}
+			if err := subsystem.NotifyStreams(streams); err != nil {
+				t.Fatal(err)
+			}
+			serveCancel, serveDone := startServe(t, &stack, pair.serverConn)
+			defer stopServe(t, serveCancel, serveDone)
+			writeRawUni(t, pair.clientConn, selectorWire(selectorCommon))
+			awaitPeer(t, peers)
+
+			ctx, cancel := context.WithTimeout(t.Context(), testTimeout)
+			defer cancel()
+			stream, err := pair.clientConn.OpenStream(ctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer stream.Reset()
+			_ = stream.SetReadDeadline(time.Now().Add(testTimeout))
+			if err := protocol.WriteSelector(stream, selectorCommon); err != nil {
+				t.Fatal(err)
+			}
+			if test.payload != "" {
+				if _, err := io.WriteString(stream, test.payload); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if test.close {
+				if err := stream.Close(); err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			select {
+			case event := <-streams:
+				if event.Selector != selectorCommon {
+					t.Fatalf("selector = %d", event.Selector)
+				}
+				bidi, ok := event.Stream.(transport.Stream)
+				if !ok {
+					t.Fatal("delivered stream is not bidirectional")
+				}
+				defer bidi.Reset()
+				if test.close {
+					body, err := io.ReadAll(bidi)
+					if err != nil || string(body) != test.payload {
+						t.Fatalf("body = %q, err = %v, want %q", body, err, test.payload)
+					}
+				}
+				if _, err := io.WriteString(bidi, "response"); err != nil {
+					t.Fatal(err)
+				}
+				if err := bidi.Close(); err != nil {
+					t.Fatal(err)
+				}
+			case <-time.After(2 * time.Second):
+				t.Fatal("bidi stream was not delivered before classifier timeout")
+			}
+			response, err := io.ReadAll(stream)
+			if err != nil || string(response) != "response" {
+				t.Fatalf("response = %q, err = %v", response, err)
+			}
+		})
+	}
+}
+
 func TestStackUnmatchedUniSelectorIsReset(t *testing.T) {
 	pair := newTestPair(t)
 	var client, server Stack
@@ -644,6 +945,33 @@ func TestStackMalformedAdvertisementDoesNotNotifyPeer(t *testing.T) {
 	select {
 	case peer := <-peers:
 		t.Fatalf("malformed advertisement notified peer %v", peer)
+	default:
+	}
+}
+
+func TestStackFirstUnidirectionalStreamRequiresAdvertisementHeader(t *testing.T) {
+	pair := newTestPair(t)
+	var stack Stack
+	subsystem, err := stack.RegisterSubsystem("server", selectorAlpha)
+	if err != nil {
+		t.Fatal(err)
+	}
+	peers := make(chan *Peer, 1)
+	if err := subsystem.NotifyPeers(peers); err != nil {
+		t.Fatal(err)
+	}
+	serveCancel, serveDone := startServe(t, &stack, pair.serverConn)
+
+	// A regular selector as the first frame is missing the advertisement header.
+	writeRawUni(t, pair.clientConn, selectorFrames(selectorAlpha))
+	err = waitServe(t, serveDone)
+	serveCancel()
+	if !errors.Is(err, protocol.ErrInvalidSelectors) {
+		t.Fatalf("ServeConn with missing advertisement header = %v, want ErrInvalidSelectors", err)
+	}
+	select {
+	case peer := <-peers:
+		t.Fatalf("missing advertisement header notified peer %v", peer)
 	default:
 	}
 }
@@ -917,7 +1245,7 @@ func TestStackCancellationPreservesBorrowedAndSharedViews(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if want := append(selectorWire(selectorAlpha), payload...); !bytes.Equal(got, want) {
+	if want := append(selectorFrame(selectorAlpha), payload...); !bytes.Equal(got, want) {
 		t.Fatalf("borrowed ethp2p stream = %x, want %x", got, want)
 	}
 }

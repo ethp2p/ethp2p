@@ -8,19 +8,6 @@ import (
 // PeerID is not the human-readable base-encoded form of that multihash.
 type PeerID string
 
-// ConnDir records which endpoint sent the first QUIC packet. Its zero
-// value is ConnDirOut. No Conn reports it: the dialing side already knows
-// whether it dialed or accepted, and the connection manager carries the
-// direction alongside the connection it owns.
-type ConnDir int
-
-const (
-	// ConnDirOut means the local endpoint initiated the connection.
-	ConnDirOut ConnDir = iota
-	// ConnDirIn means the remote endpoint initiated the connection.
-	ConnDirIn
-)
-
 // Conn is the ethp2p view of an authenticated QUIC connection. A Conn can be
 // used concurrently by multiple goroutines.
 type Conn interface {
@@ -42,11 +29,11 @@ type Conn interface {
 	// RecvDatagram waits for the next QUIC datagram. It returns when a datagram
 	// arrives, ctx ends, or the connection closes.
 	RecvDatagram(context.Context) ([]byte, error)
-	// Close releases the ethp2p view. The QUIC connection closes when both views
-	// are released. Until then, Close does not interrupt this view's I/O.
+	// Close releases the ethp2p view. Pending and later accepts, opens, and
+	// datagram calls fail, and streams arriving for this view are reset. Streams
+	// already handed out remain usable until the physical connection closes.
+	// The QUIC connection closes when both views are released.
 	Close() error
-	// SupportsStreams always reports true for this QUIC transport.
-	SupportsStreams() bool
 	// SupportsDatagrams reports whether both peers enabled QUIC datagrams.
 	SupportsDatagrams() bool
 	// ConnectionStats returns QUIC bytes sent and received. The sent count

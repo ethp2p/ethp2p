@@ -50,7 +50,7 @@ type channelEvent interface {
 // channelChunkStream represents an inbound chunk stream. The frame carries
 // the wire metadata; the stream holds the unread payload.
 type channelChunkStream struct {
-	peerID PeerID
+	peerID transport.PeerID
 	frame  *bcastpb.Chunk_Header
 	stream transport.ReceiveStream
 }
@@ -59,7 +59,7 @@ type channelChunkStream struct {
 // reading chunk data from a stream. Routes back through the channel inbox.
 type channelChunkData struct {
 	messageID MessageID
-	peerID    PeerID
+	peerID    transport.PeerID
 	chunkID   []byte
 	payload   []byte
 }
@@ -67,7 +67,7 @@ type channelChunkData struct {
 // channelSessionOpen notifies Channel that a remote peer opened a session
 // control stream.
 type channelSessionOpen struct {
-	peerID PeerID
+	peerID transport.PeerID
 	msg    *bcastpb.Sess_Open
 }
 
@@ -79,7 +79,7 @@ type channelSessionDisposed struct {
 // channelPeerChange notifies the channel of a topology mutation.
 // peerRef != nil means joined; nil means left.
 type channelPeerChange struct {
-	peerID  PeerID
+	peerID  transport.PeerID
 	peerRef *PeerConn // non-nil = joined, nil = left
 }
 
@@ -87,7 +87,7 @@ type channelPeerChange struct {
 // session close (nil bitmap routing update).
 type channelPeerReconstructed struct {
 	messageID MessageID
-	peerID    PeerID
+	peerID    transport.PeerID
 }
 
 type channelPublish struct {
@@ -100,7 +100,7 @@ type channelPublish struct {
 // channelChunkSent is sent by PeerConn after a chunk write completes.
 type channelChunkSent struct {
 	messageID MessageID
-	peerID    PeerID
+	peerID    transport.PeerID
 	handle    ChunkHandle
 	err       error
 	size      int
@@ -108,7 +108,7 @@ type channelChunkSent struct {
 
 // channelRoutingUpdate is sent when a routing update arrives on a SESS stream.
 type channelRoutingUpdate struct {
-	peerID    PeerID
+	peerID    transport.PeerID
 	messageID MessageID
 	msg       *bcastpb.Sess_Update
 }
@@ -123,7 +123,7 @@ type channelWork struct {
 // chunk verification completes.
 type channelVerifyResult struct {
 	messageID MessageID
-	peerID    PeerID
+	peerID    transport.PeerID
 	chunkID   []byte
 	payload   []byte
 	verdict   Verdict
@@ -207,7 +207,7 @@ func (peerCloseStream) peerCtrlEvent()  {}
 // maintain a session-to-inbox map. handle is threaded back in
 // channelChunkSent for correlation; chunkID carries the wire bytes.
 type peerSendChunk struct {
-	peerID      PeerID
+	peerID      transport.PeerID
 	channelID   ChannelID
 	messageID   MessageID
 	handle      ChunkHandle

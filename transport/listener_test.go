@@ -15,7 +15,7 @@ func TestEthp2pDialPublishesBothViews(t *testing.T) {
 	// dial is observable alongside the returned ethp2p view.
 	clientListener := listen(t, clientLib, clientEth)
 
-	clientEthConn, err := clientEth.Dial(ctx, serverPC.LocalAddr(), serverEth.PeerID())
+	clientEthConn, err := clientEth.Dial(ctx, serverPC.LocalAddr(), serverEth.shared.PeerID())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -34,8 +34,8 @@ func TestEthp2pDialPublishesBothViews(t *testing.T) {
 
 	assertSharedALPN(t, clientLibConn)
 	assertSharedALPN(t, serverLibConn)
-	assertPeer(t, clientEthConn, serverEth.PeerID())
-	assertPeer(t, serverEthConn, clientEth.PeerID())
+	assertPeer(t, clientEthConn, serverEth.shared.PeerID())
+	assertPeer(t, serverEthConn, clientEth.shared.PeerID())
 	if !clientEthConn.SupportsDatagrams() || !serverEthConn.SupportsDatagrams() {
 		t.Fatal("shared QUIC configuration did not negotiate datagrams")
 	}
@@ -52,7 +52,7 @@ func TestEthp2pAcceptStartsSharedListener(t *testing.T) {
 	}
 	dialed := make(chan dialResult, 1)
 	go func() {
-		conn, err := clientEth.Dial(ctx, serverPC.LocalAddr(), serverEth.PeerID())
+		conn, err := clientEth.Dial(ctx, serverPC.LocalAddr(), serverEth.shared.PeerID())
 		dialed <- dialResult{conn: conn, err: err}
 	}()
 
@@ -70,8 +70,8 @@ func TestEthp2pAcceptStartsSharedListener(t *testing.T) {
 		t.Fatal(err)
 	}
 	assertSharedALPN(t, serverLibConn)
-	assertPeer(t, result.conn, serverEth.PeerID())
-	assertPeer(t, serverConn, clientEth.PeerID())
+	assertPeer(t, result.conn, serverEth.shared.PeerID())
+	assertPeer(t, serverConn, clientEth.shared.PeerID())
 }
 
 func TestSecondListenFails(t *testing.T) {
@@ -82,28 +82,45 @@ func TestSecondListenFails(t *testing.T) {
 	}
 }
 
-func TestListenerCloseIsRejected(t *testing.T) {
+func TestListenerCloseDetachesLibp2p(t *testing.T) {
 	ctx := testContext(t)
-	_, _, clientEth, _ := newEndpoint(t)
+	_, clientEth, _ := newEthp2pEndpoint(t)
 	_, serverLib, serverEth, serverPC := newEndpoint(t)
 	listener := listen(t, serverLib, serverEth)
 
-	// Listener.Close is rejected: listening stops only with the whole
-	// transport, and delivery keeps working after the rejection.
-	if err := listener.Close(); err == nil {
-		t.Fatal("listener.Close succeeded, want rejection")
-	}
-	if _, err := clientEth.Dial(ctx, serverPC.LocalAddr(), serverEth.PeerID()); err != nil {
+	if err := listener.Close(); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := listener.Accept(ctx); err != nil {
+	if err := listener.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := listener.Accept(ctx); !errors.Is(err, ErrClosed) {
+		t.Fatalf("Accept after Close = %v, want %v", err, ErrClosed)
+	}
+	if _, err := serverLib.Listen(nil, nil); !errors.Is(err, errAlreadyListening) {
+		t.Fatalf("Listen after detach = %v, want %v", err, errAlreadyListening)
+	}
+	clientConn, err := clientEth.Dial(ctx, serverPC.LocalAddr(), serverEth.shared.PeerID())
+	if err != nil {
 		t.Fatal(err)
 	}
 	serverEthConn, err := serverEth.Accept(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
-	assertPeer(t, serverEthConn, clientEth.PeerID())
+	assertPeer(t, serverEthConn, clientEth.shared.PeerID())
+	raw := clientConn.(*ethp2pConn).conn
+	if err := clientConn.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := serverEthConn.Close(); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-raw.Context().Done():
+	case <-ctx.Done():
+		t.Fatal("physical connection remained open after both ethp2p views closed")
+	}
 }
 
 func TestShutdownEndsAccept(t *testing.T) {
@@ -120,14 +137,14 @@ func TestShutdownEndsAccept(t *testing.T) {
 	if err := serverSt.Close(); err != nil {
 		t.Fatal(err)
 	}
-	if err := <-accepted; !errors.Is(err, errClosed) {
-		t.Fatalf("eth Accept after Close = %v, want %v", err, errClosed)
+	if err := <-accepted; !errors.Is(err, ErrClosed) {
+		t.Fatalf("eth Accept after Close = %v, want %v", err, ErrClosed)
 	}
-	if _, err := listener.Accept(ctx); !errors.Is(err, errClosed) {
-		t.Fatalf("lib Accept after Close = %v, want %v", err, errClosed)
+	if _, err := listener.Accept(ctx); !errors.Is(err, ErrClosed) {
+		t.Fatalf("lib Accept after Close = %v, want %v", err, ErrClosed)
 	}
-	if _, err := serverLib.Listen(nil, nil); !errors.Is(err, errClosed) {
-		t.Fatalf("Listen after Close = %v, want %v", err, errClosed)
+	if _, err := serverLib.Listen(nil, nil); !errors.Is(err, ErrClosed) {
+		t.Fatalf("Listen after Close = %v, want %v", err, ErrClosed)
 	}
 	if err := serverSt.Close(); err != nil {
 		t.Fatalf("second Close = %v, want nil", err)

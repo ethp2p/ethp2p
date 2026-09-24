@@ -5,6 +5,7 @@ import (
 	"time"
 
 	bcastpb "github.com/ethp2p/ethp2p/broadcast/pb"
+	"github.com/ethp2p/ethp2p/internal/ctxutil"
 	"github.com/ethp2p/ethp2p/transport"
 )
 
@@ -25,6 +26,8 @@ func (p *PeerConn) acceptBcast(stream transport.ReceiveStream) {
 		stream.CancelRead(0)
 		return
 	}
+	// Each side opens exactly one outbound BCAST stream per connection, so a
+	// second inbound one is a protocol violation, not a simultaneous open.
 	if !p.bcastAccepted.CompareAndSwap(false, true) {
 		stream.CancelRead(0)
 		return
@@ -97,7 +100,7 @@ func (p *PeerConn) awaitHandshake(stream transport.ReceiveStream) bool {
 // subsequent frames are RoutingUpdate. EOF signals the peer has
 // reconstructed (completed).
 func (p *PeerConn) runInboundSession(s transport.ReceiveStream) {
-	stop := onCancel(p.ctx, func() { s.CancelRead(0) })
+	stop := ctxutil.OnCancel(p.ctx, func() { s.CancelRead(0) })
 	defer stop()
 	defer s.CancelRead(0)
 
@@ -162,7 +165,7 @@ func (p *PeerConn) processChunk(s transport.ReceiveStream) {
 	s.SetReadDeadline(time.Now().Add(chunkReadTimeout))
 
 	var frame bcastpb.Chunk_Header
-	stop := onCancel(p.ctx, func() { s.CancelRead(0) })
+	stop := ctxutil.OnCancel(p.ctx, func() { s.CancelRead(0) })
 	err := ReadFrame(s, &frame)
 	stop()
 	if err != nil || p.ctx.Err() != nil {
