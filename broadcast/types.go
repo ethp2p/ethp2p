@@ -164,6 +164,11 @@ type Session interface {
 //
 // # Lifecycle
 //
+// Methods called by the channel actor, including factories and Close, must not
+// wait for engine or peer progress, stream credit, or further channel events.
+// Async work must use Work/Verified rather than block the actor. This keeps
+// inbox backpressure independent of the network's stream-credit backpressure.
+//
 // Factory (Scheme.NewOrigin / Scheme.NewRelay)
 //
 //	→ AttachPeer (one or more)

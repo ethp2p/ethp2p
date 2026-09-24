@@ -137,6 +137,7 @@ func registerTestPeer(e *Engine, id transport.PeerID, streams uniStreamOpener, v
 		ctrlOut:       bcastOut,
 		ctrlIn:        bcastIn,
 		ctrlQ:         make(chan peerCtrlEvent, ctrlQCap),
+		lifecycle:     newFIFO[peerCtrlEvent](),
 		wakeCh:        make(chan struct{}, 1),
 		engine:        e,
 		handshakeDone: make(chan struct{}),

@@ -33,6 +33,7 @@ type engineEvent struct {
 	inbox     chan<- channelEvent // evChannelCreated
 	done      <-chan struct{}     // evChannelCreated
 	cancel    func()              // evChannelCreated: called on rejection
+	delivery  *channelDelivery
 }
 
 // ---------------------------------------------------------------------------
@@ -61,12 +62,29 @@ type channelChunkData struct {
 	payload   []byte
 }
 
+// channelReadDone wakes the actor after a payload reader frees its slot.
+// The session identity prevents a late completion waking a replacement.
+type channelReadDone struct {
+	messageID MessageID
+	session   any
+}
+
+func (channelReadDone) channelEvent() {}
+
 // channelSessionOpen notifies Channel that a remote peer opened a session
 // control stream.
 type channelSessionOpen struct {
 	peerID transport.PeerID
 	msg    *bcastpb.Sess_Open
+	peer   *PeerConn
+	stream ethp2p.ReceiveStream
 }
+
+// channelCreatorDeparted identifies a departed binding, independent of its
+// remaining subscriptions or the current binding with the same peer ID.
+type channelCreatorDeparted struct{ peer *PeerConn }
+
+func (channelCreatorDeparted) channelEvent() {}
 
 // channelSessionDisposed is sent by a session when it has no remaining work.
 type channelSessionDisposed struct {
@@ -184,6 +202,12 @@ type peerCloseSession struct {
 	messageID MessageID
 }
 
+// peerClosures batches adjacent close operations without changing wire order.
+// Detached attachments need no FIFO node of their own while control is stalled.
+type peerClosures struct{ events []peerCtrlEvent }
+
+func (*peerClosures) peerCtrlEvent() {}
+
 // peerCloseStream tells PeerConn to close the outbound SESS
 // stream (signaling we no longer need chunks) but keep the chunk slot
 // alive so we can continue serving chunks to this peer.
@@ -213,4 +237,5 @@ type peerSendChunk struct {
 	ctx         context.Context
 	resultCh    chan<- channelEvent
 	sessionDone <-chan struct{}
+	channelDone <-chan struct{}
 }

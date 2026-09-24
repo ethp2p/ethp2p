@@ -191,9 +191,10 @@ The selector code tables are:
 | -------- | ----: | ---- | ------- |
 | `SESS` | 1 | `Reconstructed` | The sender has reconstructed the message. |
 | `CHUNK` | 1 | `Redundant` | The receiver no longer needs this chunk. |
+| `CHUNK` | 2 | `InvalidChunk` | The peer exceeded the post-header queued-stream abuse bound. |
 
 The Go values are declared beside the selectors in `broadcast/protocol.go`:
-`Reconstructed = SESS.Code(1)` and `Redundant = CHUNK.Code(1)`.
+`Reconstructed = SESS.Code(1)`, `Redundant = CHUNK.Code(1)`, and `InvalidChunk = CHUNK.Code(2)`.
 Shared stack outcomes are referenced from `protocol` directly.
 
 Codepoint `0` is reserved for Stack's selector advertisement stream.
@@ -259,9 +260,71 @@ the application still owns the underlying connection.
 
 After a successful handshake, both sides know the remote identity authenticated by the transport's
 TLS handshake, the protocol version, and the initial channel set.
-Incoming `SESS` and `CHUNK` streams wait in bounded queues until the handshake completes.
+Incoming `SESS` streams wait in a bounded queue until the handshake completes.
+Incoming `CHUNK` streams wait unread in a FIFO bounded by QUIC stream credit.
 If it fails, those queued streams are cancelled;
-streams that overflow either queue are cancelled as well.
+streams that overflow the SESS queue are cancelled with `Overloaded`.
+
+### 4.1.1. Capacity and progress
+
+A receiver may retain stream credit while waiting only
+if completing the stream does not require another stream from that peer.
+CHUNK payloads for an existing session are independent:
+header-reader concurrency and session payload-reader concurrency delay reads instead of resetting
+with `Overloaded`.
+The engine and channel actors enqueue work without waiting for a reader slot.
+A reader completion schedules the next queued payload read.
+
+SESS is long-lived and depends on CHUNK progress.
+Its handoff queue and reader budget remain bounded at 64 each;
+excess streams are reset with `Overloaded` to release credit needed by CHUNK.
+Ending SESS does not release the live session itself.
+`EngineConfig.MaxLiveSessionsPerPeer`
+therefore separately bounds relay sessions first opened by a peer, across channels.
+The default is 32768, covering about 90 new sessions per second over TTL plus cleanup interval
+(300 + 30 = 330 seconds, about 29700 resident), with roughly 10% headroom for bursts and scheduling.
+TTL is not a strict residence bound; applications expecting higher rates MUST raise the limit.
+Excess SessionOpen requests are refused with `Overloaded` on SESS.
+Creator departure disposes that binding's creator sessions in every channel,
+including channels it unsubscribed from; the count is released on disposal, including TTL expiry.
+Local publishes are not charged.
+BCAST permits exactly one inbound stream, with a one-element handoff;
+additional BCAST streams are refused.
+
+A CHUNK with no session depends on a missing SESS.
+Parked chunks therefore retain a limit of 32 per message
+and add a limit of 64 per peer across channels and messages.
+Excess parked chunks are reset with `Overloaded`.
+The per-peer bound leaves uni credit available under the Interop profile alongside the SESS bounds,
+rather than allowing distinct message IDs to evade the parking limit.
+The existing 30-second cleanup tick cancels all remaining parked groups with `Refused`.
+
+Completed header-only streams can return QUIC credit before a session reads payload.
+To bound retained references, `EngineConfig.MaxQueuedChunkStreams` limits streams waiting in session
+payload-read queues per peer across channels and messages.
+It defaults to 16384, the Shadow incoming uni-stream limit.
+Applications MUST configure it at least as high as their endpoint's incoming uni-stream limit.
+Exceeding it is abuse (`InvalidChunk`, wire 5), not capacity overload.
+Counts are released on dispatch, cancellation, peer closure and session disposal.
+
+Session lifecycle commands use a per-peer FIFO so a channel actor never waits
+for the peer's control loop to open or write SESS.
+The FIFO preserves lifecycle order and elides a queued open when its final close arrives.
+Enrollment and attachment are idempotent per peer binding; removal retires the outbound lifecycle.
+Adjacent close operations share one FIFO node, preserving their order.
+FIFO nodes per peer are at most twice that peer's live attachments plus one;
+close batches also retain already-open attachments awaiting retirement.
+Total lifecycle memory is O(peers × per-peer session cap), plus local publishes.
+Peer shutdown discards queued commands and cancels streams already opened.
+Routing updates retain their separate bounded, nonblocking queue and may be dropped.
+
+Every channel-inbox producer observes channel termination as well as its own cancellation.
+A channel-lifetime registry owns inbound streams before enqueueing:
+termination atomically rejects new registrations and cancels the registered streams,
+including events still buffered in the inbox.
+Thus a send racing termination cannot leave a stream without an owner,
+even if its select chooses the send after termination.
+Registry cancellation is local work and does not await remote credit.
 
 ### 4.2. Channel subscription
 

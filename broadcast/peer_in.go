@@ -30,6 +30,9 @@ func (p *PeerConn) acceptBcast(stream ethp2p.ReceiveStream) {
 		stream.CancelRead(protocol.Refused)
 		return
 	}
+	// The sole successful admission owns the one-element handoff slot, so
+	// this cannot block the engine actor. BCAST is long-lived: keep its
+	// one-stream admission bound instead of retaining a FIFO of duplicates.
 	select {
 	case p.bcastIn <- stream:
 	case <-p.ctx.Done():
@@ -60,6 +63,8 @@ func (p *PeerConn) acceptSession(stream ethp2p.ReceiveStream) {
 	case <-p.ctx.Done():
 		stream.CancelRead(protocol.Unspecified)
 	default:
+		// SESS needs other streams to finish; waiting here could exhaust the
+		// uni credit needed by CHUNK, so session capacity remains a refusal.
 		stream.CancelRead(protocol.Overloaded)
 	}
 }
@@ -68,9 +73,17 @@ func (p *PeerConn) acceptChunk(stream ethp2p.ReceiveStream) {
 	if !p.awaitHandshake(stream) {
 		return
 	}
+	// Wait outside handlersMu: shutdown must be able to stop new handlers.
+	select {
+	case p.chunkSem <- struct{}{}:
+	case <-p.ctx.Done():
+		stream.CancelRead(protocol.Unspecified)
+		return
+	}
 	p.handlersMu.Lock()
 	defer p.handlersMu.Unlock()
 	if !p.ready {
+		<-p.chunkSem
 		if p.ctx.Err() != nil {
 			stream.CancelRead(protocol.Unspecified)
 		} else {
@@ -78,17 +91,10 @@ func (p *PeerConn) acceptChunk(stream ethp2p.ReceiveStream) {
 		}
 		return
 	}
-	select {
-	case p.chunkSem <- struct{}{}:
-		p.wg.Go(func() {
-			defer func() { <-p.chunkSem }()
-			p.processChunk(stream)
-		})
-	case <-p.ctx.Done():
-		stream.CancelRead(protocol.Unspecified)
-	default:
-		stream.CancelRead(protocol.Overloaded)
-	}
+	p.wg.Go(func() {
+		defer func() { <-p.chunkSem }()
+		p.processChunk(stream)
+	})
 }
 
 func (p *PeerConn) awaitHandshake(stream ethp2p.ReceiveStream) bool {
@@ -140,13 +146,25 @@ func (p *PeerConn) runInboundSession(s ethp2p.ReceiveStream) {
 		s.CancelRead(protocol.Refused)
 		return
 	}
+	if !ch.add(s) {
+		s.CancelRead(protocol.Unspecified)
+		return
+	}
+	defer ch.release(s)
+	stopChannel := ctxutil.OnCancel(ch.ctx, func() { s.CancelRead(protocol.Unspecified) })
+	defer stopChannel()
 
 	// Deliver SessionOpen to channel (with initial routing if present).
 	select {
-	case ch <- channelSessionOpen{
+	case ch.inbox <- channelSessionOpen{
 		peerID: p.id,
 		msg:    so,
+		peer:   p,
+		stream: s,
 	}:
+	case <-ch.done:
+		s.CancelRead(protocol.Unspecified)
+		return
 	case <-p.ctx.Done():
 		s.CancelRead(streamFailureCode(p.ctx.Err()))
 		return
@@ -163,7 +181,8 @@ func (p *PeerConn) runInboundSession(s ethp2p.ReceiveStream) {
 			if re, ok := errors.AsType[*ethp2p.ResetError](err); ok {
 				if re.Code == Reconstructed {
 					select {
-					case ch <- channelPeerReconstructed{messageID: messageID, peerID: p.id}:
+					case ch.inbox <- channelPeerReconstructed{messageID: messageID, peerID: p.id}:
+					case <-ch.done:
 					case <-p.ctx.Done():
 					}
 				}
@@ -178,7 +197,10 @@ func (p *PeerConn) runInboundSession(s ethp2p.ReceiveStream) {
 			return
 		}
 		select {
-		case ch <- channelRoutingUpdate{peerID: p.id, messageID: messageID, msg: ru}:
+		case ch.inbox <- channelRoutingUpdate{peerID: p.id, messageID: messageID, msg: ru}:
+		case <-ch.done:
+			s.CancelRead(protocol.Unspecified)
+			return
 		case <-p.ctx.Done():
 			s.CancelRead(streamFailureCode(p.ctx.Err()))
 			return
@@ -212,14 +234,25 @@ func (p *PeerConn) processChunk(s ethp2p.ReceiveStream) {
 		return
 	}
 
+	held := p.holdChunk(s, ch)
+	if !ch.add(held) {
+		held.CancelRead(protocol.Unspecified)
+		return
+	}
+	if p.ctx.Err() != nil {
+		held.CancelRead(protocol.Unspecified)
+		return
+	}
 	chnk := channelChunkStream{
 		peerID: p.id,
 		frame:  &frame,
-		stream: s,
+		stream: held,
 	}
 	select {
-	case ch <- chnk:
+	case ch.inbox <- chnk:
+	case <-ch.done:
+		chnk.stream.CancelRead(protocol.Unspecified)
 	case <-p.ctx.Done():
-		s.CancelRead(streamFailureCode(p.ctx.Err()))
+		chnk.stream.CancelRead(streamFailureCode(p.ctx.Err()))
 	}
 }

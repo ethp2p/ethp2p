@@ -58,7 +58,8 @@ func benchmarkSessionDispatchFanout(b *testing.B, numPeers int) {
 		go func(p *PeerConn) {
 			for {
 				select {
-				case ctrl := <-p.ctrlQ:
+				case <-p.lifecycle.ready:
+					ctrl, _ := p.lifecycle.pop()
 					if e, ok := ctrl.(peerOpenSession); ok {
 						go func() {
 							for {
@@ -120,13 +121,14 @@ func BenchmarkOutboundLoopChunkThroughput(b *testing.B) {
 	streams := &blackholeOpener{}
 	bcastOut := &blackholeStream{}
 	p := &PeerConn{
-		id:      "bench-peer",
-		streams: streams,
-		ctrlOut: bcastOut,
-		ctrlQ:   make(chan peerCtrlEvent, ctrlQCap),
-		wakeCh:  make(chan struct{}, 1),
-		ctx:     ctx,
-		cancel:  cancel,
+		id:        "bench-peer",
+		streams:   streams,
+		ctrlOut:   bcastOut,
+		ctrlQ:     make(chan peerCtrlEvent, ctrlQCap),
+		lifecycle: newFIFO[peerCtrlEvent](),
+		wakeCh:    make(chan struct{}, 1),
+		ctx:       ctx,
+		cancel:    cancel,
 	}
 
 	// Result sink: channel drained in background.

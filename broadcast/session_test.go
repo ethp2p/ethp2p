@@ -5,6 +5,7 @@ import (
 	"context"
 	"testing"
 	"testing/synctest"
+	"time"
 
 	"github.com/ethp2p/ethp2p/transport"
 )
@@ -184,6 +185,7 @@ func testPeer(peerID transport.PeerID) *PeerConn {
 		streams:       newHighCapTransport(context.Background()),
 		ctrlOut:       bcastOut,
 		ctrlQ:         make(chan peerCtrlEvent, ctrlQCap),
+		lifecycle:     newFIFO[peerCtrlEvent](),
 		wakeCh:        make(chan struct{}, 1),
 		ctx:           ctx,
 		cancel:        cancel,
@@ -199,8 +201,9 @@ func newTestChannel(inbox chan channelEvent) *Channel[*testChunk, *testRouting, 
 			NewCI: func() *testChunk { return &testChunk{} },
 			NewR:  func() *testRouting { r := testRouting{}; return &r },
 		},
-		inbox: inbox,
-		ctx:   context.Background(),
+		inbox:    inbox,
+		delivery: newChannelDelivery(inbox),
+		ctx:      context.Background(),
 	}
 }
 
@@ -735,22 +738,33 @@ func TestSession_HandleInboundStream_SemaphoreFull(t *testing.T) {
 		s.readSem <- struct{}{}
 	}
 
-	// This stream should be rejected because the semaphore is full.
-	raw, stream := newWrappedRecordingReceiveStream(t, CHUNK, []byte("data"))
+	// This stream waits without being read until a payload slot is free.
+	_, stream := newWrappedRecordingReceiveStream(t, CHUNK, []byte("data"))
 	s.handleChunkStream("p1", []byte("data"), 4, stream)
-	requireWireCancelCode(t, raw, 4)
+	if len(s.readQueue) != 1 {
+		t.Fatal("stream was not queued")
+	}
 
 	select {
 	case <-inbox:
-		t.Fatal("should reject when semaphore is full")
+		t.Fatal("read started while semaphore was full")
 	default:
 	}
 
-	// Drain semaphore so Close can proceed.
+	// Free the slots and dispatch the queued stream.
 	for range maxConcurrentReads {
 		<-s.readSem
 	}
-
+	s.drainReads()
+	select {
+	case e := <-inbox:
+		data, ok := e.(channelChunkData)
+		if !ok || string(data.payload) != "data" {
+			t.Fatalf("delivery = %#v", e)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("queued payload was not delivered")
+	}
 	s.Close()
 
 }

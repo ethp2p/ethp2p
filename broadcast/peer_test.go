@@ -171,13 +171,12 @@ func TestPeerEnqueueStreamRejectsFullQueuesAsOverloaded(t *testing.T) {
 		selector protocol.Selector
 	}{
 		{name: "session", selector: SESS},
-		{name: "chunk", selector: CHUNK},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			peer := &PeerConn{
 				ctx:       context.Background(),
 				sessionIn: make(chan ethp2p.ReceiveStream, 1),
-				chunkIn:   make(chan ethp2p.ReceiveStream, 1),
+				chunkIn:   newFIFO[ethp2p.ReceiveStream](),
 			}
 			raw, stream := newWrappedRecordingReceiveStream(t, test.selector, nil)
 			if test.selector == SESS {
@@ -185,7 +184,7 @@ func TestPeerEnqueueStreamRejectsFullQueuesAsOverloaded(t *testing.T) {
 				peer.sessionIn <- queued
 			} else {
 				_, queued := newWrappedRecordingReceiveStream(t, test.selector, nil)
-				peer.chunkIn <- queued
+				peer.chunkIn.push(queued)
 			}
 
 			peer.enqueueStream(test.selector, stream)

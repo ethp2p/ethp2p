@@ -18,6 +18,9 @@ const (
 // Observer is the observer interface for broadcast system events.
 // Strategy-specific typed observations (e.g. chunk indices, generations)
 // are handled by strategy-internal observers.
+// Callbacks run inline on engine, channel or peer goroutines. They must return
+// promptly and must not wait for work on those goroutines (including reentrant
+// synchronous broadcast calls), or they can prevent inboxes from draining.
 type Observer interface {
 	// Channel lifecycle
 	OnChannelAttached(channelID ChannelID, err error)

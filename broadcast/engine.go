@@ -21,6 +21,31 @@ type EngineConfig struct {
 	// MaxInboundChunkStreams bounds the number of concurrent inbound
 	// chunk streams per peer. Zero uses the default (5).
 	MaxInboundChunkStreams int
+	// MaxQueuedChunkStreams bounds post-header CHUNK streams waiting for a
+	// session read slot, per peer across sessions/channels. Zero uses 16384
+	// (the Shadow uni limit). Configure at least the endpoint's incoming uni
+	// stream limit; unfinished streams from an honest peer cannot exceed it.
+	MaxQueuedChunkStreams int
+	// MaxLiveSessionsPerPeer bounds relay sessions first opened by one peer,
+	// across channels, including sessions whose SESS stream has ended. Zero
+	// uses 32768: about 90 new sessions/second over TTL + cleanup interval
+	// (300 + 30 seconds, ~29700 resident), with roughly 10% burst/scheduling
+	// headroom. TTL is not a strict residence bound. Raise this for higher rates.
+	MaxLiveSessionsPerPeer int
+}
+
+func (c *EngineConfig) maxLiveSessionsPerPeer() int {
+	if c.MaxLiveSessionsPerPeer > 0 {
+		return c.MaxLiveSessionsPerPeer
+	}
+	return 32768
+}
+
+func (c *EngineConfig) maxQueuedChunkStreams() int {
+	if c.MaxQueuedChunkStreams > 0 {
+		return c.MaxQueuedChunkStreams
+	}
+	return 16384
 }
 
 func (c *EngineConfig) maxInboundChunkStreams() int {
@@ -153,8 +178,9 @@ func (e *Engine) onPeerUnsubscribed(p *PeerConn, channelID ChannelID) {
 }
 
 type channelHandle struct {
-	inbox chan<- channelEvent
-	done  <-chan struct{}
+	inbox    chan<- channelEvent
+	done     <-chan struct{}
+	delivery *channelDelivery
 }
 
 func (e *Engine) run() {
@@ -183,7 +209,7 @@ func (e *Engine) handle(ev engineEvent) {
 			e.config.Observer.OnChannelAttached(ev.channelID, ErrChannelExists)
 			return
 		}
-		e.channels[ev.channelID] = &channelHandle{inbox: ev.inbox, done: ev.done}
+		e.channels[ev.channelID] = &channelHandle{inbox: ev.inbox, done: ev.done, delivery: ev.delivery}
 		e.config.Observer.OnChannelAttached(ev.channelID, nil)
 
 		// Bind any existing peers that had already declared this channel during
@@ -225,6 +251,9 @@ func (e *Engine) handle(ev engineEvent) {
 		if e.peers[p.id] != p {
 			return
 		}
+		if _, subscribed := e.peerSubs[p.id][ev.channelID]; subscribed {
+			return
+		}
 		e.peerSubs[p.id][ev.channelID] = struct{}{}
 		e.enrolPeerToChannel(p, ev.channelID)
 		e.config.Observer.OnPeerSubscribed(p.id, ev.channelID)
@@ -234,12 +263,16 @@ func (e *Engine) handle(ev engineEvent) {
 		if e.peers[p.id] != p {
 			return
 		}
+		if _, subscribed := e.peerSubs[p.id][ev.channelID]; !subscribed {
+			return
+		}
 		delete(e.peerSubs[p.id], ev.channelID)
 		p.UnbindChannel(ev.channelID)
 		e.config.Observer.OnPeerUnsubscribed(p.id, ev.channelID)
 		if t := e.channels[ev.channelID]; t != nil && t.inbox != nil {
 			select {
 			case t.inbox <- channelPeerChange{peerID: p.id}:
+			case <-t.done:
 			case <-e.ctx.Done():
 			}
 		}
@@ -315,6 +348,9 @@ func (e *Engine) handlePeerHandshake(ev engineEvent) {
 	e.peers[p.id] = p
 	subs := make(map[ChannelID]struct{}, len(ev.channels))
 	for _, channelID := range ev.channels {
+		if _, exists := subs[channelID]; exists {
+			continue
+		}
 		subs[channelID] = struct{}{}
 		e.enrolPeerToChannel(p, channelID)
 	}
@@ -354,6 +390,7 @@ func (e *Engine) removePeer(p *PeerConn) {
 			if t := e.channels[channelID]; t != nil && t.inbox != nil {
 				select {
 				case t.inbox <- channelPeerChange{peerID: p.id}:
+				case <-t.done:
 				case <-e.ctx.Done():
 				}
 			}
@@ -380,9 +417,13 @@ func (e *Engine) enrolPeerToChannel(p *PeerConn, channelID ChannelID) {
 	if !ok || t.inbox == nil {
 		return
 	}
-	p.BindChannel(channelID, t.inbox)
+	if p.channelInboxFor(channelID) == t.delivery && t.delivery != nil {
+		return
+	}
+	p.BindChannel(channelID, t.delivery)
 	select {
 	case t.inbox <- channelPeerChange{peerID: p.id, peerRef: p}:
+	case <-t.done:
 	case <-e.ctx.Done():
 	}
 }

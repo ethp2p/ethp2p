@@ -40,11 +40,11 @@ type PeerConn struct {
 
 	bcastAccepted atomic.Bool
 	bcastIn       chan ethp2p.ReceiveStream
-	// The bounded handoff queues keep a stream that arrives before the BCAST
+	// The handoff queues keep a stream that arrives before the BCAST
 	// handshake from blocking the engine's event actor. Dedicated loops wait for
 	// handshake completion and then start the owned stream readers.
 	sessionIn chan ethp2p.ReceiveStream
-	chunkIn   chan ethp2p.ReceiveStream
+	chunkIn   *fifo[ethp2p.ReceiveStream]
 	// handshakeDone publishes the engine's channel bindings, not just the
 	// completed wire handshake. Readers must wait before looking up channels.
 	handshakeDone chan struct{}
@@ -57,11 +57,22 @@ type PeerConn struct {
 	// We use a CoW map because channel subscriptions change infrequently,
 	// and this approach skips a channel hop via the Engine and provides
 	// an O(1) lookup.
-	channelInboxes atomic.Pointer[map[ChannelID]chan<- channelEvent]
+	channelInboxes atomic.Pointer[map[ChannelID]*channelDelivery]
 
 	// ctrlQ carries control events (session lifecycle, routing,
 	// subscriptions) to the outbound loop. Buffered to absorb bursts.
 	ctrlQ chan peerCtrlEvent
+	// Lifecycle FIFO nodes per peer <= 2 × live attachments + 1: at most one
+	// queued open per attachment, separated by batches of adjacent closes.
+	// Elision joins neighboring batches. Batch contents also retain already-open
+	// attachments awaiting retirement; total memory is O(peers × per-peer live
+	// session cap), plus application-owned local publishes. No network wait occurs
+	// while enqueueing or retiring an attachment.
+	lifecycle                  *fifo[peerCtrlEvent]
+	chunkMu                    sync.Mutex
+	heldChunks                 map[*heldChunk]chunkHolding
+	liveSessions               map[*sessionLease]struct{}
+	parkedChunks, queuedChunks int
 
 	// ctrlOut is our outbound BCAST stream (we opened it, we write to it).
 	// bcastIn is the peer's outbound BCAST stream (they opened it, we read from it).
@@ -79,7 +90,8 @@ type PeerConn struct {
 
 	// These semaphores bound concurrent inbound readers. Chunk readers hand
 	// payloads to sessions; SESS readers keep a slot for the stream's lifetime.
-	// Excess SESS streams are reset rather than creating unbounded goroutines.
+	// Excess SESS streams are reset because their completion needs CHUNK.
+	// CHUNK header readers instead wait for a slot outside handlersMu.
 	chunkSem   chan struct{}
 	sessionSem chan struct{}
 
@@ -101,12 +113,13 @@ func newPeerConn(engine *Engine, bindCtx context.Context, id transport.PeerID, s
 	p := &PeerConn{
 		streams:       streams,
 		ctrlQ:         make(chan peerCtrlEvent, ctrlQCap),
+		lifecycle:     newFIFO[peerCtrlEvent](),
 		wakeCh:        make(chan struct{}, 1),
 		chunkSem:      make(chan struct{}, engine.config.maxInboundChunkStreams()),
 		sessionSem:    make(chan struct{}, streamQueueCap),
 		bcastIn:       make(chan ethp2p.ReceiveStream, 1),
 		sessionIn:     make(chan ethp2p.ReceiveStream, streamQueueCap),
-		chunkIn:       make(chan ethp2p.ReceiveStream, streamQueueCap),
+		chunkIn:       newFIFO[ethp2p.ReceiveStream](),
 		handshakeDone: make(chan struct{}),
 		engine:        engine,
 		ctx:           ctx,
@@ -117,7 +130,7 @@ func newPeerConn(engine *Engine, bindCtx context.Context, id transport.PeerID, s
 }
 
 // channelInboxFor returns the channel event channel for the given channel, or nil.
-func (p *PeerConn) channelInboxFor(channelID ChannelID) chan<- channelEvent {
+func (p *PeerConn) channelInboxFor(channelID ChannelID) *channelDelivery {
 	m := p.channelInboxes.Load()
 	if m == nil {
 		return nil
@@ -127,8 +140,8 @@ func (p *PeerConn) channelInboxFor(channelID ChannelID) chan<- channelEvent {
 
 // BindChannel registers a channel inbox channel using atomic copy-on-write
 // for lock-free reads on the dispatch hot path.
-func (p *PeerConn) BindChannel(channelID ChannelID, inbox chan<- channelEvent) {
-	newMap := make(map[ChannelID]chan<- channelEvent)
+func (p *PeerConn) BindChannel(channelID ChannelID, inbox *channelDelivery) {
+	newMap := make(map[ChannelID]*channelDelivery)
 	if old := p.channelInboxes.Load(); old != nil {
 		maps.Copy(newMap, *old)
 	}
@@ -234,11 +247,15 @@ func (p *PeerConn) runSessionAcceptLoop() {
 
 func (p *PeerConn) runChunkAcceptLoop() {
 	for {
+		if p.ctx.Err() != nil {
+			return
+		}
+		if stream, ok := p.chunkIn.pop(); ok {
+			p.acceptChunk(stream)
+			continue
+		}
 		select {
-		case stream := <-p.chunkIn:
-			if stream != nil {
-				p.acceptChunk(stream)
-			}
+		case <-p.chunkIn.ready:
 		case <-p.ctx.Done():
 			return
 		}
@@ -246,8 +263,8 @@ func (p *PeerConn) runChunkAcceptLoop() {
 }
 
 // enqueueStream transfers an incoming stream from the root Stack adapter to
-// the stream-class loop. Queues are bounded so unread streams cannot grow
-// without limit under a peer-controlled stream burst.
+// the stream-class loop. Unread CHUNK streams retain QUIC credit, bounding
+// that FIFO. SESS keeps a capacity bound because it depends on CHUNK progress.
 func (p *PeerConn) enqueueStream(selector protocol.Selector, stream ethp2p.ReceiveStream) {
 	if stream == nil {
 		return
@@ -260,6 +277,8 @@ func (p *PeerConn) enqueueStream(selector protocol.Selector, stream ethp2p.Recei
 	case BCAST:
 		p.acceptBcast(stream)
 	case SESS:
+		// SESS completion depends on CHUNK progress. Refuse excess streams
+		// so they cannot retain all credit needed to deliver those chunks.
 		select {
 		case p.sessionIn <- stream:
 		case <-p.ctx.Done():
@@ -268,12 +287,8 @@ func (p *PeerConn) enqueueStream(selector protocol.Selector, stream ethp2p.Recei
 			stream.CancelRead(protocol.Overloaded)
 		}
 	case CHUNK:
-		select {
-		case p.chunkIn <- stream:
-		case <-p.ctx.Done():
+		if !p.chunkIn.push(stream) {
 			stream.CancelRead(protocol.Unspecified)
-		default:
-			stream.CancelRead(protocol.Overloaded)
 		}
 	default:
 		stream.CancelRead(protocol.Refused)
@@ -281,9 +296,15 @@ func (p *PeerConn) enqueueStream(selector protocol.Selector, stream ethp2p.Recei
 }
 
 func (p *PeerConn) disposeQueuedStreams() {
+	p.notifyCreatorDeparture()
+	p.cancelHeldChunks()
+	p.lifecycle.close()
+	for _, stream := range p.chunkIn.close() {
+		stream.CancelRead(protocol.Unspecified)
+	}
 	// Engine calls Close on the same actor that enqueues streams. Run only
 	// reports completion; draining here therefore cannot race a final enqueue.
-	for _, streams := range []chan ethp2p.ReceiveStream{p.bcastIn, p.sessionIn, p.chunkIn} {
+	for _, streams := range []chan ethp2p.ReceiveStream{p.bcastIn, p.sessionIn} {
 		for streams != nil {
 			select {
 			case stream := <-streams:
@@ -440,6 +461,7 @@ func (p *PeerConn) Close() {
 
 func (p *PeerConn) stop() {
 	p.cancel()
+	p.lifecycle.close()
 	p.finishHandshake(false, p.ctx.Err())
 }
 

@@ -14,6 +14,13 @@ import (
 
 const maxConcurrentReads = 64
 
+type pendingChunkRead struct {
+	peer    transport.PeerID
+	chunkID []byte
+	dataLen uint32
+	stream  ethp2p.ReceiveStream
+}
+
 // outboundKey identifies an in-flight outbound chunk send to a specific peer.
 // handle is the strategy-assigned opaque token from ChunkID.Handle().
 type outboundKey struct {
@@ -53,6 +60,7 @@ const (
 )
 
 type session[CI ChunkIdent, R Wire] struct {
+	lease     *sessionLease
 	channelID ChannelID
 	messageID MessageID
 	preamble  []byte // wire bytes, sent to new peers
@@ -70,6 +78,7 @@ type session[CI ChunkIdent, R Wire] struct {
 	everHadPeers bool
 	peers        map[transport.PeerID]*sessionPeer
 	channelInbox chan<- channelEvent
+	channelDone  <-chan struct{}
 	observer     Observer
 
 	// outboundCancels tracks cancel functions for in-flight chunk sends.
@@ -78,7 +87,8 @@ type session[CI ChunkIdent, R Wire] struct {
 	outboundCancels map[outboundKey]context.CancelFunc
 
 	// readSem bounds the number of concurrent inbound data reads.
-	readSem chan struct{}
+	readSem   chan struct{}
+	readQueue []pendingChunkRead
 
 	// dedupGroups maps dedup keys to cancel functions. All concurrent
 	// reads with the same non-nil key share a context; when one
@@ -125,8 +135,13 @@ func (s *session[CI, R]) closeWithCode(code protocol.Code) error {
 		cause = errStreamRefused
 	}
 	s.sessCancel(cause)
+	for _, pending := range s.readQueue {
+		pending.stream.CancelRead(code)
+	}
+	s.readQueue = nil
 	s.wg.Wait()
 	s.strategy.Close()
+	s.lease.release()
 	close(s.done)
 	return nil
 }
@@ -147,11 +162,7 @@ func (s *session[CI, R]) MessageID() MessageID {
 // is non-recoverable.
 func (s *session[CI, R]) notifyPeersComplete() {
 	for _, sp := range s.peers {
-		select {
-		case sp.conn.ctrlQ <- peerCloseStream{channelID: s.channelID, messageID: s.messageID}:
-		case <-sp.conn.ctx.Done():
-		default:
-		}
+		sp.conn.enqueueLifecycle(peerCloseStream{channelID: s.channelID, messageID: s.messageID})
 	}
 }
 
@@ -169,10 +180,7 @@ func (s *session[CI, R]) signalReconstructed() {
 // stream, it didn't remove the chunk slot).
 func (s *session[CI, R]) notifyPeersSessionDone() {
 	for _, sp := range s.peers {
-		select {
-		case sp.conn.ctrlQ <- peerCloseSession{channelID: s.channelID, messageID: s.messageID}:
-		case <-sp.conn.ctx.Done():
-		}
+		sp.conn.enqueueLifecycle(peerCloseSession{channelID: s.channelID, messageID: s.messageID})
 	}
 }
 
@@ -214,11 +222,19 @@ func (s *session[CI, R]) handleChunkStream(peer transport.PeerID, chunkID []byte
 		return
 	}
 
-	// Acquire semaphore (non-blocking).
+	// The actor never waits for a reader. Queue independent payload reads and
+	// let a completion wake the actor when a slot becomes available.
 	select {
 	case s.readSem <- struct{}{}:
 	default:
-		stream.CancelRead(protocol.Overloaded)
+		if held, ok := stream.(*heldChunk); ok && !held.move(chunkQueued) {
+			// After EOF, CancelRead cannot reclaim credit or signal a wire reset;
+			// rejection still releases local ownership. Unfinished excess streams
+			// receive InvalidChunk (wire 5).
+			stream.CancelRead(InvalidChunk)
+			return
+		}
+		s.readQueue = append(s.readQueue, pendingChunkRead{peer, chunkID, dataLen, stream})
 		return
 	}
 
@@ -239,7 +255,17 @@ func (s *session[CI, R]) handleChunkStream(peer transport.PeerID, chunkID []byte
 	msgID := s.messageID
 	inbox := s.channelInbox
 	s.wg.Go(func() {
-		defer func() { <-s.readSem }()
+		defer func() {
+			if held, ok := stream.(*heldChunk); ok {
+				held.release()
+			}
+			<-s.readSem
+			select {
+			case inbox <- channelReadDone{messageID: msgID, session: s}:
+			case <-s.channelDone:
+			case <-s.sessCtx.Done():
+			}
+		}()
 
 		// Watcher: cancel stream read when context is done.
 		done := make(chan struct{})
@@ -274,8 +300,23 @@ func (s *session[CI, R]) handleChunkStream(peer transport.PeerID, chunkID []byte
 		case <-readCtx.Done():
 			close(done)
 			stream.CancelRead(streamCancellationCode(context.Cause(readCtx)))
+		case <-s.channelDone:
+			close(done)
+			stream.CancelRead(protocol.Unspecified)
 		}
 	})
+}
+
+func (s *session[CI, R]) drainReads() {
+	for len(s.readQueue) > 0 && len(s.readSem) < cap(s.readSem) {
+		pending := s.readQueue[0]
+		s.readQueue[0] = pendingChunkRead{}
+		s.readQueue = s.readQueue[1:]
+		if held, ok := pending.stream.(*heldChunk); ok && !held.move(chunkActive) {
+			continue
+		}
+		s.handleChunkStream(pending.peer, pending.chunkID, pending.dataLen, pending.stream)
+	}
 }
 
 // handleChunkData processes fully-read chunk data. Called on the channel
@@ -376,6 +417,7 @@ func (s *session[CI, R]) acceptChunk(peer transport.PeerID, chunk CI, payload []
 				payload, err := strategy.Decode()
 				select {
 				case inbox <- channelDecoded{messageID: msgID, payload: payload, err: err}:
+				case <-s.channelDone:
 				case <-s.sessCtx.Done():
 				}
 			})
@@ -445,6 +487,12 @@ func (s *session[CI, R]) handleSendComplete(peer transport.PeerID, handle ChunkH
 }
 
 func (s *session[CI, R]) handlePeerAttached(p *PeerConn) {
+	if old := s.peers[p.id]; old != nil {
+		if old.conn == p {
+			return
+		}
+		s.handlePeerDropped(p.id)
+	}
 	s.everHadPeers = true
 	chunkOutbox := make(chan peerSendChunk, 16)
 	sp := &sessionPeer{
@@ -466,22 +514,31 @@ func (s *session[CI, R]) handlePeerAttached(p *PeerConn) {
 		initialRouting, _ = routing.Marshal()
 		s.observer.OnRoutingUpdate(p.id, s.channelID, s.messageID)
 	}
-	select {
-	case p.ctrlQ <- peerOpenSession{
+	p.enqueueLifecycle(peerOpenSession{
 		channelID:      s.channelID,
 		messageID:      s.messageID,
 		preamble:       s.preamble,
 		initialRouting: initialRouting,
 		channelInbox:   s.channelInbox,
 		chunkOutbox:    chunkOutbox,
-	}:
-	case <-s.ctx.Done():
-		return
-	}
+	})
 	s.drainPolls()
 }
 
 func (s *session[CI, R]) handlePeerDropped(peer transport.PeerID) {
+	if sp := s.peers[peer]; sp != nil {
+		sp.conn.enqueueLifecycle(peerCloseSession{channelID: s.channelID, messageID: s.messageID})
+	}
+	kept := s.readQueue[:0]
+	for _, pending := range s.readQueue {
+		if pending.peer == peer {
+			pending.stream.CancelRead(protocol.Unspecified)
+		} else {
+			kept = append(kept, pending)
+		}
+	}
+	clear(s.readQueue[len(kept):])
+	s.readQueue = kept
 	delete(s.peers, peer)
 	s.strategy.DetachPeer(peer, false)
 	s.maybeDispose()
@@ -539,6 +596,7 @@ func (s *session[CI, R]) maybeDispose() {
 	}
 	select {
 	case s.channelInbox <- channelSessionDisposed{messageID: s.messageID}:
+	case <-s.channelDone:
 	default:
 	}
 }
@@ -590,6 +648,7 @@ func (s *session[CI, R]) sendChunk(peer transport.PeerID, chunkID CI, data []byt
 		ctx:         ctx,
 		resultCh:    s.channelInbox,
 		sessionDone: s.done,
+		channelDone: s.channelDone,
 	}
 	select {
 	case sp.chunkOutbox <- chunk:

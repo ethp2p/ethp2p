@@ -44,7 +44,10 @@ type Channel[CI ChunkIdent, R Wire, P Wire] struct {
 	// backpressure to the sender.
 	parked map[MessageID][]channelChunkStream
 
-	inbox chan channelEvent
+	// Producers wait only while the actor is running: delivery.done releases
+	// every send when it stops. The actor never waits on engine or peer progress.
+	inbox    chan channelEvent
+	delivery *channelDelivery
 
 	// watchWg tracks watchWork/watchVerified goroutines.
 	watchWg sync.WaitGroup
@@ -77,10 +80,11 @@ func AttachChannel[CI ChunkIdent, R Wire, P Wire](e *Engine, id ChannelID, schem
 		done:     make(chan struct{}),
 	}
 
+	tr.delivery = newChannelDelivery(tr.inbox)
 	go tr.run()
 
 	select {
-	case e.eventCh <- engineEvent{kind: evChannelCreated, channelID: id, inbox: tr.inbox, done: tr.done, cancel: cancel}:
+	case e.eventCh <- engineEvent{kind: evChannelCreated, channelID: id, inbox: tr.inbox, done: tr.done, cancel: cancel, delivery: tr.delivery}:
 	case <-e.ctx.Done():
 	}
 
@@ -111,6 +115,10 @@ func (tr *Channel[CI, R, P]) newSession(
 	strategy Strategy[CI, R],
 ) *session[CI, R] {
 	sessCtx, sessCancel := context.WithCancelCause(tr.ctx)
+	channelDone := tr.ctx.Done()
+	if tr.delivery != nil {
+		channelDone = tr.delivery.done
+	}
 	stage := stageConsuming
 	if isOrigin {
 		stage = stageOrigin
@@ -126,6 +134,7 @@ func (tr *Channel[CI, R, P]) newSession(
 		createdAt:       time.Now(),
 		peers:           make(map[transport.PeerID]*sessionPeer),
 		channelInbox:    tr.inbox,
+		channelDone:     channelDone,
 		observer:        tr.engine.config.Observer,
 		outboundCancels: make(map[outboundKey]context.CancelFunc),
 		readSem:         make(chan struct{}, maxConcurrentReads),
@@ -164,10 +173,14 @@ func (tr *Channel[CI, R, P]) Publish(messageID MessageID, payload []byte) error 
 		select {
 		case err := <-errCh:
 			return err
+		case <-tr.delivery.done:
+			return ErrEngineClosed
 		case <-tr.ctx.Done():
 			return ErrEngineClosed
 		}
 	case <-tr.ctx.Done():
+		return ErrEngineClosed
+	case <-tr.delivery.done:
 		return ErrEngineClosed
 	}
 }
@@ -222,6 +235,16 @@ func (tr *Channel[CI, R, P]) tickRouting() {
 
 func (tr *Channel[CI, R, P]) handle(evt channelEvent) {
 	switch e := evt.(type) {
+	case channelCreatorDeparted:
+		for mid, sess := range tr.sessions {
+			if sess.lease != nil && sess.lease.peer == e.peer {
+				tr.disposeSession(mid, "creator_disconnected")
+			}
+		}
+	case channelReadDone:
+		if sess := tr.sessions[e.messageID]; sess != nil && e.session == sess {
+			sess.drainReads()
+		}
 	case channelChunkStream:
 		tr.handleChunk(e)
 	case channelChunkData:
@@ -280,14 +303,19 @@ func (tr *Channel[CI, R, P]) handleChunk(e channelChunkStream) {
 	messageID := MessageID(e.frame.MessageId)
 	sess, ok := tr.sessions[messageID]
 	if ok {
+		sess.drainReads()
 		sess.handleChunkStream(e.peerID, e.frame.ChunkId, e.frame.DataLength, e.stream)
 		return
 	}
 
-	// No session yet; buffer the stream reference. QUIC flow control
-	// applies backpressure to the sender until the session drains it.
+	// A parked CHUNK depends on a missing SESS. Bound it rather than holding
+	// all credit that the SESS itself needs, both per message and per peer.
 	buf := tr.parked[messageID]
 	if len(buf) >= maxParkedChunks {
+		e.stream.CancelRead(protocol.Overloaded)
+		return
+	}
+	if held, ok := e.stream.(*heldChunk); ok && !held.move(chunkParked) {
 		e.stream.CancelRead(protocol.Overloaded)
 		return
 	}
@@ -299,12 +327,28 @@ func (tr *Channel[CI, R, P]) handleSessionOpen(e channelSessionOpen) {
 	if _, exists := tr.sessions[messageID]; exists {
 		return
 	}
-	if _, err := tr.createRelaySession(messageID, e.msg.Preamble, e.peerID, e.msg.InitialUpdate); err != nil {
-		tr.engine.config.Observer.OnChunkError(ChunkProcessError{Peer: e.peerID, ChannelID: tr.id, MessageID: messageID, Err: err})
+	var lease *sessionLease
+	if e.peer != nil {
+		var code protocol.Code
+		lease, code = e.peer.reserveSession(tr.delivery)
+		if lease == nil {
+			e.stream.CancelRead(code)
+			return
+		}
 	}
+	sess, err := tr.createRelaySession(messageID, e.msg.Preamble, e.peerID, e.msg.InitialUpdate)
+	if err != nil {
+		lease.release()
+		tr.engine.config.Observer.OnChunkError(ChunkProcessError{Peer: e.peerID, ChannelID: tr.id, MessageID: messageID, Err: err})
+		return
+	}
+	sess.lease = lease
 }
 
 func (tr *Channel[CI, R, P]) handlePeerBound(e channelPeerChange) {
+	if tr.members[e.peerID] == e.peerRef {
+		return
+	}
 	tr.members[e.peerID] = e.peerRef
 	for _, sess := range tr.sessions {
 		sess.handlePeerAttached(e.peerRef)
@@ -313,6 +357,22 @@ func (tr *Channel[CI, R, P]) handlePeerBound(e channelPeerChange) {
 
 func (tr *Channel[CI, R, P]) handlePeerUnbound(e channelPeerChange) {
 	delete(tr.members, e.peerID)
+	for id, chunks := range tr.parked {
+		kept := chunks[:0]
+		for _, chunk := range chunks {
+			if chunk.peerID == e.peerID {
+				chunk.stream.CancelRead(protocol.Unspecified)
+			} else {
+				kept = append(kept, chunk)
+			}
+		}
+		clear(chunks[len(kept):])
+		if len(kept) == 0 {
+			delete(tr.parked, id)
+		} else {
+			tr.parked[id] = kept
+		}
+	}
 	for _, sess := range tr.sessions {
 		sess.handlePeerDropped(e.peerID)
 	}
@@ -325,6 +385,9 @@ func (tr *Channel[CI, R, P]) handlePublish(e channelPublish) {
 		return
 	}
 
+	// Replacing a relay with a local publication must retire its attachment
+	// lifecycle and creator lease before overwriting the session map entry.
+	tr.disposeSession(e.messageID, "replaced")
 	sess := tr.newSession(e.messageID, e.preambleData, true, strat)
 
 	tr.sessions[e.messageID] = sess
@@ -379,6 +442,9 @@ func (tr *Channel[CI, R, P]) createRelaySession(messageID MessageID, preambleByt
 	// Flush pending chunk streams that arrived before the session existed.
 	if chunks := tr.parked[messageID]; len(chunks) > 0 {
 		for _, c := range chunks {
+			if held, ok := c.stream.(*heldChunk); ok && !held.move(chunkActive) {
+				continue
+			}
 			sess.handleChunkStream(c.peerID, c.frame.ChunkId, c.frame.DataLength, c.stream)
 		}
 		delete(tr.parked, messageID)
@@ -406,6 +472,8 @@ func (tr *Channel[CI, R, P]) maybeWatchWork(sess *session[CI, R]) {
 				}
 				select {
 				case tr.inbox <- channelWork{messageID: msgID}:
+				case <-tr.delivery.done:
+					return
 				case <-tr.ctx.Done():
 					return
 				}
@@ -445,6 +513,8 @@ func (tr *Channel[CI, R, P]) maybeWatchVerified(sess *session[CI, R]) {
 					payload:   result.Data,
 					verdict:   result.Verdict,
 				}:
+				case <-tr.delivery.done:
+					return
 				case <-tr.ctx.Done():
 					return
 				}
@@ -498,6 +568,7 @@ func (tr *Channel[CI, R, P]) cleanup() {
 }
 
 func (tr *Channel[CI, R, P]) shutdown() {
+	tr.delivery.close()
 	for _, sess := range tr.sessions {
 		sess.Close()
 	}

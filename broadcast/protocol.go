@@ -25,6 +25,8 @@ var (
 	Reconstructed = SESS.Code(1)
 	// Redundant ends a CHUNK stream when the receiver no longer needs its chunk.
 	Redundant = CHUNK.Code(1)
+	// InvalidChunk signals abuse of the post-header waiting-stream bound.
+	InvalidChunk = CHUNK.Code(2)
 
 	errChunkRedundant = errors.New("chunk is no longer needed")
 	errStreamRefused  = errors.New("stream will not be processed")

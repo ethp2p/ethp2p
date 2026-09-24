@@ -84,7 +84,15 @@ func (p *PeerConn) runCtrlLoop(slotCh chan<- slotUpdate) {
 		}
 	}()
 	for {
+		if ctrl, ok := p.lifecycle.pop(); ok {
+			if p.ctx.Err() != nil {
+				return
+			}
+			p.handleCtrl(ctrl, sessions, slotCh)
+			continue
+		}
 		select {
+		case <-p.lifecycle.ready:
 		case ctrl := <-p.ctrlQ:
 			p.handleCtrl(ctrl, sessions, slotCh)
 		case <-p.ctx.Done():
@@ -152,6 +160,10 @@ func (p *PeerConn) runDataLoop(slotCh <-chan slotUpdate) {
 
 func (p *PeerConn) handleCtrl(evt peerCtrlEvent, sessions map[sessionKey]*peerSessionState, slotCh chan<- slotUpdate) {
 	switch e := evt.(type) {
+	case *peerClosures:
+		for _, close := range e.events {
+			p.handleCtrl(close, sessions, slotCh)
+		}
 	case peerOpenSession:
 		p.handleSessionOpen(e, sessions, slotCh)
 	case peerSendRouting:
@@ -200,6 +212,11 @@ func (p *PeerConn) handleSessionOpen(e peerOpenSession, sessions map[sessionKey]
 	}
 	ss.channelInbox = e.channelInbox
 	ss.messageID = e.messageID
+	// A duplicate open is an internal lifecycle bug. Never abandon its stream
+	// even if a future caller violates the idempotent attachment contract.
+	if ss.sessOut != nil {
+		_ = ss.sessOut.Close()
+	}
 	ss.sessOut = s
 
 	select {
@@ -279,6 +296,7 @@ func (p *PeerConn) handleSendChunk(e peerSendChunk) {
 		messageID: e.messageID, peerID: e.peerID, handle: e.handle, err: err, size: size,
 	}:
 	case <-e.sessionDone:
+	case <-e.channelDone:
 	case <-p.ctx.Done():
 	}
 }
