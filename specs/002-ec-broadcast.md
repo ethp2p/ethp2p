@@ -163,22 +163,24 @@ a uvarint payload length followed by the selector codepoint as a uvarint.
 Stack reads the selector before routing an incoming stream.
 Streams opened through `Peer.OpenUniStream`
 or `Peer.OpenStream` have their selector written by Stack
-before the stream is returned to the subsystem.
+before the stream is returned to the Family's consumer.
 
-The stack negotiates broadcast as one protocol, with all three selectors,
-in the `Hello` exchange of [008](008-stack.md), section 4.3.
-Its protocol identifier is `1`.
-The broadcast package declares these stable selectors and their stream allowances
-(008, section 4.4):
+Broadcast registers one local Family containing the BCAST, SESS, and CHUNK protocols.
+The `Hello` exchange advertises their selectors ([008](008-stack.md), section 4.3).
+The Family is shared only with a peer that announces all three,
+so a broadcast peer handle always supports BCAST, SESS, and CHUNK.
+There is no broadcast Family identifier on the wire.
+The broadcast package declares these stable selectors and local per-peer queue limits
+(008, section 9.3):
 
-| Selector | Stream | `MaxInbound` | `MaxOutbound` |
-| -------: | ------ | -----------: | ------------: |
-| `0x01` | `BCAST` | 1 | 1 |
-| `0x02` | `SESS` | 64 | 64 |
-| `0x03` | `CHUNK` | 128 | 128 |
+| Selector | Protocol | `MaxQueued` |
+| -------: | ------ | ----------: |
+| `0x01` | `BCAST` | 1 |
+| `0x02` | `SESS` | 64 |
+| `0x03` | `CHUNK` | 128 |
 
-With the control stream, the allowances total 194 streams,
-within the Interop profile's 256 incoming streams in each direction.
+These limits are local and are not announced to peers.
+QUIC limits and flow control apply across the connection; no capacity is reserved per protocol.
 
 Broadcast's stream cancellation outcomes use the protocol namespace
 (`value<<1 | 1` on the wire), in one table for all three selectors.
@@ -253,15 +255,14 @@ the application still owns the underlying connection.
 
 After a successful handshake, both sides know the remote identity authenticated by the transport's
 TLS handshake, the protocol version, and the initial channel set.
-Incoming `SESS` and `CHUNK` streams wait unread until the handshake completes,
-bounded by their allowances.
+Incoming `SESS` and `CHUNK` streams wait until the handshake completes in bounded local queues.
+The stack resets streams beyond a protocol's `MaxQueued` with `Unspecified` (008, section 9.3).
 If it fails, those queued streams are cancelled.
 
 ### 4.1.1. Capacity and progress
 
-Every unfinished incoming stream counts against its selector's allowance
-(008, section 9.3), so the allowances above bound the streams broadcast holds per peer.
-Broadcast never resets a stream to release credit for another selector: each selector has its own.
+Protocols are expected to actively consume incoming streams and cancel reads they no longer need.
+QUIC capacity is shared, so broadcast must avoid exhausting it with streams waiting for other streams.
 
 CHUNK payloads for an existing session are independent:
 header-reader concurrency and session payload-reader concurrency delay reads instead of resetting
@@ -271,9 +272,9 @@ A reader completion schedules the next queued payload read.
 
 SESS is long-lived and depends on CHUNK progress,
 and a CHUNK with no session depends on a missing SESS.
-Broadcast satisfies 008's rule for streams
-that wait on each other across selectors by keeping parked CHUNK streams below the CHUNK allowance:
-at most 32 per message and 64 per peer across channels and messages.
+Broadcast bounds parked CHUNK streams to at most 32 per message
+and 64 per peer across channels and messages.
+These local bounds do not reserve QUIC capacity or by themselves guarantee progress.
 Excess parked chunks are reset with `Overloaded`.
 The existing 30-second cleanup tick cancels all remaining parked groups with `Refused`.
 
@@ -287,7 +288,7 @@ Excess SessionOpen requests are refused with `Overloaded` on SESS.
 Creator departure disposes that binding's creator sessions in every channel,
 including channels it unsubscribed from; the count is released on disposal, including TTL expiry.
 Local publishes are not charged.
-BCAST's allowance of 1 admits exactly one inbound stream per connection.
+BCAST permits one active inbound stream per connection as a local protocol rule.
 
 Session lifecycle commands use a per-peer FIFO so a channel actor never waits
 for the peer's control loop to open or write SESS.

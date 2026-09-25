@@ -39,8 +39,8 @@ Sections 3 through 7 use RFC 2119 language such as MUST, SHOULD, and MAY.
 ## 2. Terminology
 
 **Selector.**
-The unsigned integer identifying one kind of a protocol's streams and datagrams on the wire.
-Each selector belongs to exactly one protocol.
+The unsigned integer identifying a protocol's streams and datagrams on the wire.
+Each registered selector belongs to exactly one local Family (008, section 2).
 Selector `0` is reserved for the stack's control stream.
 Selector `0x2f` is an ordinary protocol selector.
 
@@ -52,12 +52,12 @@ which occupies exactly `n` bytes.
 Every ethp2p stream begins with one selector frame.
 
 **Shared selectors.**
-The selectors of the protocols both endpoints announced in `Hello` on a connection
+The protocol selectors present in both endpoints' `Hello` messages on a connection
 (008, section 4.3).
 
 **Datagram protocol.**
-A protocol whose specification defines datagram payloads under one or more of its selectors.
-A protocol MAY use streams, datagrams, or both under each of its selectors.
+A protocol whose specification defines datagram payloads under its selector.
+A protocol MAY use streams, datagrams, or both under that selector.
 
 ## 3. Negotiation
 
@@ -77,7 +77,7 @@ or treat the peer as not supporting the protocol.
 Streams and datagrams share one selector namespace.
 There is no separate datagram announcement.
 Announcing a protocol announces support for every stream and datagram usage
-that its specification defines under its selectors.
+that its specification defines under its selector.
 
 A protocol that later adds datagram payloads under an existing selector changes
 that protocol's wire contract.
@@ -245,12 +245,8 @@ Whether polling the exposed maximum is sufficient is open.
 
 This section is not normative.
 
-The delivery API depends on the stack's runtime model, which is still under discussion.
-Under the current push model, datagram delivery would follow stream delivery:
-a subsystem registers a datagram destination, the stack runs one receive loop per connection,
-and delivery never blocks that loop.
-Under a pull model, the per-connection receive loop would sit in the transport's connection
-dispatcher, which already runs for each connection, and protocols would pull from per-selector
-buffers.
-In both models, the send path is a single call on the peer handle that prepends the selector frame,
+Datagram delivery follows the pull model specified in 008 and remains deferred until a consumer needs it.
+The transport's per-connection dispatcher receives datagrams without blocking on consumers.
+Families pull events backed by bounded per-protocol buffers.
+The send path is a single call on the peer handle that prepends the selector frame,
 which the stack already writes for streams opened through the peer handle.
