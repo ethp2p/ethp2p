@@ -16,16 +16,16 @@ import (
 
 // Observe queue admission without transferring stream ownership to the test.
 // This distinguishes streams pending in the stack from those still in QUIC.
-func waitPending(t *testing.T, sub *Subsystem, count int) {
+func waitPending(t *testing.T, f *Family, count int) {
 	t.Helper()
 	deadline := time.Now().Add(testTimeout)
 	for time.Now().Before(deadline) {
-		sub.mu.Lock()
+		f.mu.Lock()
 		n := 0
-		for e := sub.ready.Front(); e != nil; e = e.Next() {
+		for e := f.ready.Front(); e != nil; e = e.Next() {
 			n += len(e.Value.(*peerDelivery).streams)
 		}
-		sub.mu.Unlock()
+		f.mu.Unlock()
 		if n == count {
 			return
 		}
@@ -34,19 +34,10 @@ func waitPending(t *testing.T, sub *Subsystem, count int) {
 	t.Fatalf("stack did not queue %d streams", count)
 }
 
-func registerTestSub(t *testing.T, stack *Stack, name string, selectors ...wire.Selector) *Subsystem {
-	t.Helper()
-	sub, err := stack.Register(name, selectors, SubsystemConfig{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	return sub
-}
-
 func TestDeliveryOrderingAndManyQueued(t *testing.T) {
 	pair := newTestPair(t)
 	stack := newTestStack(t, pair.server)
-	sub := registerTestSub(t, stack, "ordered", selectorAlpha)
+	fam, wake := registerTestFamily(t, stack, ProtocolSpec{Selector: selectorAlpha, MaxQueued: 128})
 	pair.connect(t, nil, stack)
 	ctx, stop := context.WithTimeout(t.Context(), testTimeout)
 	defer stop()
@@ -55,7 +46,7 @@ func TestDeliveryOrderingAndManyQueued(t *testing.T) {
 	// classifiers run concurrently. Leave PeerUp and every stream undrained.
 	for i := range 100 {
 		writeSelectorPayload(t, pair.clientConn, selectorAlpha, []byte{byte(i)})
-		waitPending(t, sub, i+1)
+		waitPending(t, fam, i+1)
 	}
 	for i := range 16 {
 		stream, err := pair.clientConn.OpenStream(ctx, selectorAlpha)
@@ -68,11 +59,11 @@ func TestDeliveryOrderingAndManyQueued(t *testing.T) {
 		if err := stream.Close(); err != nil {
 			t.Fatal(err)
 		}
-		waitPending(t, sub, 101+i)
+		waitPending(t, fam, 101+i)
 	}
-	peer := awaitPeer(t, sub)
+	peer := awaitPeer(t, fam, wake)
 	for i := range 116 {
-		event := awaitStreamEvent(t, sub)
+		event := awaitStreamEvent(t, fam, wake)
 		if event.Peer != peer {
 			t.Fatal("stream changed peer handle")
 		}
@@ -93,15 +84,15 @@ func TestDeliveryOrderingAndManyQueued(t *testing.T) {
 			t.Fatal("bidirectional stream lost write side")
 		}
 	}
-	if event, ok := sub.Next(); ok {
+	if event, ok := fam.Next(); ok {
 		t.Fatalf("extra event: %+v", event)
 	}
 	disconnectTest(t, stack, pair.client.Shared.PeerID())
-	down := awaitEvent(t, sub)
+	down := awaitEvent(t, fam, wake)
 	if down.Kind != PeerDown || down.Peer != peer || down.Code != wire.Closing || peer.Context().Err() == nil {
 		t.Fatalf("PeerDown = %+v, context = %v", down, peer.Context().Err())
 	}
-	if _, ok := sub.Next(); ok {
+	if _, ok := fam.Next(); ok {
 		t.Fatal("event after PeerDown")
 	}
 }
@@ -114,10 +105,10 @@ func TestDeliveryQueuedStreamsResetOnDown(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			pair := newTestPair(t)
 			stack := newTestStack(t, pair.server)
-			sub := registerTestSub(t, stack, "queued", selectorAlpha)
+			fam, wake := registerTestFamily(t, stack, ProtocolSpec{Selector: selectorAlpha, MaxQueued: 8})
 			pair.connect(t, nil, stack)
 			if test.takeUp {
-				awaitPeer(t, sub)
+				awaitPeer(t, fam, wake)
 			}
 			ctx, stop := context.WithTimeout(t.Context(), testTimeout)
 			defer stop()
@@ -131,7 +122,7 @@ func TestDeliveryQueuedStreamsResetOnDown(t *testing.T) {
 			}
 			_, _ = uni.Write([]byte{1})
 			_, _ = bi.Write([]byte{2})
-			waitPending(t, sub, 2)
+			waitPending(t, fam, 2)
 			if test.closeStack {
 				if err := stack.Close(); err != nil {
 					t.Fatal(err)
@@ -140,12 +131,12 @@ func TestDeliveryQueuedStreamsResetOnDown(t *testing.T) {
 				disconnectTest(t, stack, pair.client.Shared.PeerID())
 			}
 			if test.takeUp {
-				down := awaitEvent(t, sub)
+				down := awaitEvent(t, fam, wake)
 				if down.Kind != PeerDown || down.Code != wire.Closing || down.Peer.Context().Err() == nil {
 					t.Fatalf("down = %+v", down)
 				}
 			}
-			if event, ok := sub.Next(); ok {
+			if event, ok := fam.Next(); ok {
 				t.Fatalf("unexpected event after close: %+v", event)
 			}
 			for _, out := range []transport.SendStream{uni, bi} {
@@ -162,7 +153,9 @@ func TestDeliveryQueuedStreamsResetOnDown(t *testing.T) {
 			if !ok || reset.Code != 20 {
 				t.Fatalf("bidi read = %v, want wire 20", err)
 			}
-			if _, err := pair.serverConn.PeerHello(ctx); err == nil {
+			select {
+			case <-pair.clientConn.Done():
+			case <-time.After(testTimeout):
 				t.Fatal("disconnected view remained open")
 			}
 			lib, err := pair.clientLib.OpenStreamSync(ctx)
@@ -187,10 +180,10 @@ func TestDeliveryQueuedStreamsResetOnDown(t *testing.T) {
 func TestDeliveryRoundRobin(t *testing.T) {
 	pair := newTestPair(t)
 	stack := newTestStack(t, pair.server)
-	sub := registerTestSub(t, stack, "fair", selectorAlpha)
+	fam, wake := registerTestFamily(t, stack, ProtocolSpec{Selector: selectorAlpha, MaxQueued: 8})
 	pair.connect(t, nil, stack)
 	defer disconnectTest(t, stack, pair.client.Shared.PeerID())
-	a := awaitPeer(t, sub)
+	a := awaitPeer(t, fam, wake)
 	clientB := transporttest.NewEndpoint(t)
 	if err := clientB.Eth.SetHello(transport.Hello{Selectors: []wire.Selector{selectorAlpha}}); err != nil {
 		t.Fatal(err)
@@ -200,13 +193,13 @@ func TestDeliveryRoundRobin(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer disconnectTest(t, stack, clientB.Shared.PeerID())
-	b := awaitPeer(t, sub)
+	b := awaitPeer(t, fam, wake)
 	for i := range 4 {
 		writeSelectorPayload(t, pair.clientConn, selectorAlpha, []byte{byte(i)})
 	}
 	writeSelectorPayload(t, outB, selectorAlpha, []byte{9})
-	waitPending(t, sub, 5)
-	first, second := awaitStreamEvent(t, sub), awaitStreamEvent(t, sub)
+	waitPending(t, fam, 5)
+	first, second := awaitStreamEvent(t, fam, wake), awaitStreamEvent(t, fam, wake)
 	if first.Peer == second.Peer || (first.Peer != a && first.Peer != b) || (second.Peer != a && second.Peer != b) {
 		t.Fatal("one peer monopolized the first two events")
 	}
@@ -217,32 +210,24 @@ func TestDeliveryRoundRobin(t *testing.T) {
 func TestDeliverySharedWake(t *testing.T) {
 	pair := newTestPair(t)
 	stack := newTestStack(t, pair.server)
-	a := registerTestSub(t, stack, "alpha", selectorAlpha)
-	b := registerTestSub(t, stack, "common", selectorCommon)
-	old := make(chan struct{}, 1)
 	wake := make(chan struct{}, 1)
-	if err := a.Notify(old); err != nil {
+	a, err := stack.Register([]ProtocolSpec{{Selector: selectorAlpha, MaxQueued: 8}}, wake)
+	if err != nil {
 		t.Fatal(err)
 	}
-	for _, sub := range []*Subsystem{a, b} {
-		if err := sub.Notify(wake); err != nil {
-			t.Fatal(err)
-		}
+	b, err := stack.Register([]ProtocolSpec{{Selector: selectorCommon, MaxQueued: 8}}, wake)
+	if err != nil {
+		t.Fatal(err)
 	}
 	pair.connect(t, nil, stack)
 	defer disconnectTest(t, stack, pair.client.Shared.PeerID())
-	awaitPeer(t, a)
-	awaitPeer(t, b)
-	select {
-	case <-old:
-		t.Fatal("replaced wake signalled")
-	default:
-	}
+	awaitPeer(t, a, wake)
+	awaitPeer(t, b, wake)
 	for _, item := range []struct {
-		sub *Subsystem
+		fam *Family
 		sel wire.Selector
 	}{{a, selectorAlpha}, {b, selectorCommon}} {
-		if _, ok := item.sub.Next(); ok {
+		if _, ok := item.fam.Next(); ok {
 			t.Fatal("queue not empty")
 		}
 		select {
@@ -255,7 +240,7 @@ func TestDeliverySharedWake(t *testing.T) {
 		case <-time.After(testTimeout):
 			t.Fatal("missing wake")
 		}
-		event, ok := item.sub.Next()
+		event, ok := item.fam.Next()
 		if !ok || event.Kind != StreamIn {
 			t.Fatalf("woken event = %+v, %v", event, ok)
 		}
@@ -295,29 +280,32 @@ func TestDeliveryViewClosureCode(t *testing.T) {
 		t.Run(map[bool]string{false: "unobserved", true: "observed"}[takeUp], func(t *testing.T) {
 			pair := newTestPair(t)
 			stack := newTestStack(t, pair.server)
-			sub := registerTestSub(t, stack, "closed", selectorAlpha)
+			fam, wake := registerTestFamily(t, stack, ProtocolSpec{Selector: selectorAlpha, MaxQueued: 8})
 			pair.connect(t, nil, stack)
 			if takeUp {
-				awaitPeer(t, sub)
+				awaitPeer(t, fam, wake)
 			}
 			writeSelectorPayload(t, pair.clientConn, selectorAlpha, []byte("queued"))
-			waitPending(t, sub, 1)
-			if err := pair.serverConn.CloseWithCode(wire.Duplicate); err != nil {
+			waitPending(t, fam, 1)
+			if err := pair.clientConn.CloseWithCode(wire.Duplicate); err != nil {
 				t.Fatal(err)
 			}
 			waitFor(t, func() bool { return len(stack.Connections()) == 0 })
-			_, err := pair.serverConn.PeerHello(t.Context())
-			closed, ok := errors.AsType[*transport.ViewClosedError](err)
-			if !ok || closed.Code != wire.Duplicate || closed.Remote {
-				t.Fatalf("view cause = %v", err)
+			select {
+			case <-pair.clientConn.Done():
+			case <-time.After(testTimeout):
+				t.Fatal("closed view remained open")
+			}
+			if code := pair.clientConn.CloseCode(); code != wire.Duplicate {
+				t.Fatalf("view close code = %s", code)
 			}
 			if takeUp {
-				down := awaitEvent(t, sub)
+				down := awaitEvent(t, fam, wake)
 				if down.Kind != PeerDown || down.Code != wire.Duplicate || down.Peer.Context().Err() == nil {
 					t.Fatalf("view PeerDown = %+v", down)
 				}
 			}
-			if event, ok := sub.Next(); ok {
+			if event, ok := fam.Next(); ok {
 				t.Fatalf("closed peer left event: %+v", event)
 			}
 		})
@@ -327,12 +315,12 @@ func TestDeliveryViewClosureCode(t *testing.T) {
 func TestDeliverySelectorOnlyStream(t *testing.T) {
 	pair := newTestPair(t)
 	stack := newTestStack(t, pair.server)
-	sub := registerTestSub(t, stack, "empty", selectorAlpha)
+	fam, wake := registerTestFamily(t, stack, ProtocolSpec{Selector: selectorAlpha, MaxQueued: 8})
 	pair.connect(t, nil, stack)
 	defer disconnectTest(t, stack, pair.client.Shared.PeerID())
-	awaitPeer(t, sub)
+	awaitPeer(t, fam, wake)
 	writeSelectorPayload(t, pair.clientConn, selectorAlpha, nil)
-	event := awaitStreamEvent(t, sub)
+	event := awaitStreamEvent(t, fam, wake)
 	var one [1]byte
 	n, err := event.Stream.Read(one[:])
 	if n != 0 || err != io.EOF {

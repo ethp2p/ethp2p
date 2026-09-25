@@ -4,13 +4,14 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"io"
+	"testing"
+	"time"
+
 	"github.com/ethp2p/ethp2p/wire"
 	"github.com/ethp2p/ethp2p/transport"
 	"github.com/ethp2p/ethp2p/transport/transporttest"
 	"github.com/libp2p/go-libp2p/p2p/transport/quicreuse"
-	"io"
-	"testing"
-	"time"
 )
 
 const (
@@ -21,14 +22,15 @@ const (
 )
 
 type testPair struct {
-	client, server         *transporttest.Endpoint
-	clientConn, serverConn transport.Conn
-	clientLib, serverLib   quicreuse.QUICConn
+	client, server       *transporttest.Endpoint
+	clientConn           *transport.Conn
+	clientLib, serverLib quicreuse.QUICConn
 }
 
 func newTestPair(t *testing.T) *testPair {
 	return &testPair{client: transporttest.NewEndpoint(t), server: transporttest.NewEndpoint(t)}
 }
+
 func newTestStack(t *testing.T, endpoint *transporttest.Endpoint) *Stack {
 	t.Helper()
 	s, err := NewStack(endpoint.Eth, Config{})
@@ -38,6 +40,7 @@ func newTestStack(t *testing.T, endpoint *transporttest.Endpoint) *Stack {
 	t.Cleanup(func() { _ = s.Close() })
 	return s
 }
+
 func waitFor(t *testing.T, ready func() bool) {
 	t.Helper()
 	end := time.Now().Add(testTimeout)
@@ -49,19 +52,7 @@ func waitFor(t *testing.T, ready func() bool) {
 	}
 	t.Fatal("condition did not become true")
 }
-func activeConn(t *testing.T, s *Stack, id transport.PeerID) transport.Conn {
-	t.Helper()
-	var conn transport.Conn
-	waitFor(t, func() bool {
-		s.mu.Lock()
-		defer s.mu.Unlock()
-		if v := s.active[id]; v != nil {
-			conn = v.conn
-		}
-		return conn != nil
-	})
-	return conn
-}
+
 func (p *testPair) connect(t *testing.T, client, server *Stack) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(t.Context(), testTimeout)
@@ -92,11 +83,21 @@ func (p *testPair) connect(t *testing.T, client, server *Stack) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if client != nil {
+		// A dialed view reaches the stack only through attach, as in Connect.
+		result := make(chan error, 1)
+		if !client.attach(p.clientConn, result) {
+			t.Fatal("attach refused on an open stack")
+		}
+		if err := <-result; err != nil {
+			t.Fatal(err)
+		}
+	}
 	if server != nil {
-		p.serverConn = activeConn(t, server, p.client.Shared.PeerID())
+		// The stack owns its view; wait for admission instead of reaching in.
+		waitFor(t, func() bool { return len(server.Connections()) == 1 })
 	} else {
-		p.serverConn, err = p.server.Eth.Accept(ctx)
-		if err != nil {
+		if _, err = p.server.Eth.Accept(ctx); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -109,38 +110,71 @@ func (p *testPair) connect(t *testing.T, client, server *Stack) {
 		t.Fatal(err)
 	}
 }
+
 func disconnectTest(t *testing.T, s *Stack, id transport.PeerID) {
 	t.Helper()
 	if err := s.Disconnect(id); err != nil {
 		t.Fatal(err)
 	}
 }
-func awaitEvent(t *testing.T, sub *Subsystem) Event {
+
+// registerTestFamily registers protocols with a fresh wake channel.
+func registerTestFamily(t *testing.T, s *Stack, protocols ...ProtocolSpec) (*Family, chan struct{}) {
+	t.Helper()
+	wake := make(chan struct{}, 1)
+	family, err := s.Register(protocols, wake)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return family, wake
+}
+
+func awaitEvent(t *testing.T, f *Family, wake <-chan struct{}) Event {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(t.Context(), testTimeout)
 	defer cancel()
 	for {
-		if event, ok := sub.Next(); ok {
+		if event, ok := f.Next(); ok {
 			return event
 		}
 		select {
 		case <-ctx.Done():
 			t.Fatal("event did not arrive")
 			return Event{}
-		case <-time.After(time.Millisecond):
+		case <-wake:
 		}
 	}
 }
-func awaitPeer(t *testing.T, sub *Subsystem) *Peer {
+
+func awaitPeer(t *testing.T, f *Family, wake <-chan struct{}) *Peer {
 	t.Helper()
-	event := awaitEvent(t, sub)
+	event := awaitEvent(t, f, wake)
 	if event.Kind != PeerUp {
 		t.Fatalf("event = %v, want PeerUp", event.Kind)
 	}
 	return event.Peer
 }
 
-func writeSelectorPayload(t *testing.T, conn transport.Conn, selector wire.Selector, payload []byte) {
+func awaitStreamEvent(t *testing.T, f *Family, wake <-chan struct{}) Event {
+	t.Helper()
+	event := awaitEvent(t, f, wake)
+	if event.Kind != StreamIn {
+		t.Fatalf("event = %v, want StreamIn", event.Kind)
+	}
+	return event
+}
+
+func mustPanic(t *testing.T, fn func()) {
+	t.Helper()
+	defer func() {
+		if recover() == nil {
+			t.Fatal("expected panic")
+		}
+	}()
+	fn()
+}
+
+func writeSelectorPayload(t *testing.T, conn *transport.Conn, selector wire.Selector, payload []byte) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(t.Context(), testTimeout)
 	defer cancel()
@@ -156,15 +190,6 @@ func writeSelectorPayload(t *testing.T, conn transport.Conn, selector wire.Selec
 	}
 }
 
-func awaitStreamEvent(t *testing.T, sub *Subsystem) Event {
-	t.Helper()
-	event := awaitEvent(t, sub)
-	if event.Kind != StreamIn {
-		t.Fatalf("event = %v, want StreamIn", event.Kind)
-	}
-	return event
-}
-
 func TestStackRegistrationAndLifecycle(t *testing.T) {
 	p := newTestPair(t)
 	if _, err := NewStack(nil, Config{}); err == nil {
@@ -174,39 +199,40 @@ func TestStackRegistrationAndLifecycle(t *testing.T) {
 		t.Fatal("wrong local identity accepted")
 	}
 	s := newTestStack(t, p.server)
-	for _, sels := range [][]wire.Selector{nil, {0}, {1, 1}} {
-		if _, err := s.Register("bad", sels, SubsystemConfig{}); err == nil {
-			t.Fatal("invalid registration accepted")
+	for _, protocols := range [][]ProtocolSpec{
+		nil,
+		{},
+		{{Selector: 2, MaxQueued: 1}, {Selector: 1, MaxQueued: 1}},
+		{{Selector: 0, MaxQueued: 1}},
+		{{Selector: 1, MaxQueued: 1}, {Selector: 1, MaxQueued: 1}},
+		{{Selector: 1, MaxQueued: 0}},
+	} {
+		if _, err := s.Register(protocols, make(chan struct{}, 1)); err == nil {
+			t.Fatalf("invalid registration accepted: %+v", protocols)
 		}
 	}
-	sub := registerTestSub(t, s, "ok", selectorAlpha)
-	if _, err := s.Register("collision", []wire.Selector{selectorAlpha}, SubsystemConfig{}); err == nil {
-		t.Fatal("collision accepted")
-	}
-	if _, err := s.Register("ok", []wire.Selector{selectorGamma}, SubsystemConfig{}); err == nil {
-		t.Fatal("duplicate name accepted")
-	}
-	registerTestSub(t, s, "gamma", selectorGamma)
 	for _, wake := range []chan struct{}{nil, make(chan struct{})} {
-		if err := sub.Notify(wake); err == nil {
+		if _, err := s.Register([]ProtocolSpec{{Selector: selectorAlpha, MaxQueued: 1}}, wake); err == nil {
 			t.Fatal("invalid wake accepted")
 		}
 	}
-	if err := sub.Notify(make(chan struct{}, 1)); err != nil {
-		t.Fatal(err)
+	// Failed registrations leave the stack unchanged: the same selectors
+	// register cleanly afterwards.
+	family, _ := registerTestFamily(t, s, ProtocolSpec{Selector: selectorAlpha, MaxQueued: 1})
+	if _, err := s.Register([]ProtocolSpec{{Selector: selectorAlpha, MaxQueued: 1}}, make(chan struct{}, 1)); err == nil {
+		t.Fatal("collision accepted")
 	}
+	registerTestFamily(t, s, ProtocolSpec{Selector: selectorGamma, MaxQueued: 1})
 	if err := s.Start(); err != nil {
 		t.Fatal(err)
 	}
 	if err := s.Start(); err == nil {
 		t.Fatal("second Start succeeded")
 	}
-	if _, err := s.Register("late", []wire.Selector{5}, SubsystemConfig{}); err == nil {
+	if _, err := s.Register([]ProtocolSpec{{Selector: 5, MaxQueued: 1}}, make(chan struct{}, 1)); err == nil {
 		t.Fatal("late Register succeeded")
 	}
-	if err := sub.Notify(make(chan struct{}, 1)); err == nil {
-		t.Fatal("late Notify succeeded")
-	}
+	_ = family
 	if err := s.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -224,26 +250,24 @@ func TestStackRegistrationAndLifecycle(t *testing.T) {
 func TestPeerStreamsAndSelectorIntersection(t *testing.T) {
 	pair := newTestPair(t)
 	client, server := newTestStack(t, pair.client), newTestStack(t, pair.server)
-	csub := registerTestSub(t, client, "client", selectorAlpha, selectorCommon)
-	ssub := registerTestSub(t, server, "server", selectorAlpha, selectorGamma)
+	// The server shares only alpha; the client's gamma family is never shared.
+	cAlpha, cAlphaWake := registerTestFamily(t, client, ProtocolSpec{Selector: selectorAlpha, MaxQueued: 8})
+	cGamma, _ := registerTestFamily(t, client, ProtocolSpec{Selector: selectorGamma, MaxQueued: 8})
+	sAlpha, sAlphaWake := registerTestFamily(t, server, ProtocolSpec{Selector: selectorAlpha, MaxQueued: 8})
 	pair.connect(t, client, server)
-	cp, sp := awaitPeer(t, csub), awaitPeer(t, ssub)
+	cp, sp := awaitPeer(t, cAlpha, cAlphaWake), awaitPeer(t, sAlpha, sAlphaWake)
 	if cp.ID() != pair.server.Shared.PeerID() || sp.ID() != pair.client.Shared.PeerID() {
 		t.Fatal("wrong identity")
 	}
-	sels := cp.Selectors()
-	if len(sels) != 1 || sels[0] != selectorAlpha {
-		t.Fatal(sels)
+	if cp.Record() != nil {
+		t.Fatal("unexpected peer record")
 	}
-	sels[0] = 0
-	if cp.Selectors()[0] != selectorAlpha || cp.Record() != nil {
-		t.Fatal("peer metadata")
+	if _, ok := cGamma.Next(); ok {
+		t.Fatal("unshared family produced an event")
 	}
-	if _, err := cp.OpenUniStream(t.Context(), selectorCommon); !errors.Is(err, ErrSelectorNotShared) {
-		t.Fatal(err)
-	}
-	if _, err := cp.OpenStream(t.Context(), selectorCommon); !errors.Is(err, ErrSelectorNotShared) {
-		t.Fatal(err)
+	for _, sel := range []wire.Selector{selectorGamma, selectorCommon} {
+		mustPanic(t, func() { _, _ = cp.OpenUniStream(t.Context(), sel) })
+		mustPanic(t, func() { _, _ = cp.OpenStream(t.Context(), sel) })
 	}
 	uni, err := cp.OpenUniStream(t.Context(), selectorAlpha)
 	if err != nil {
@@ -251,7 +275,7 @@ func TestPeerStreamsAndSelectorIntersection(t *testing.T) {
 	}
 	_, _ = uni.Write([]byte("uni"))
 	_ = uni.Close()
-	e := awaitStreamEvent(t, ssub)
+	e := awaitStreamEvent(t, sAlpha, sAlphaWake)
 	got, err := io.ReadAll(e.Stream)
 	if err != nil || !bytes.Equal(got, []byte("uni")) {
 		t.Fatalf("%q %v", got, err)
@@ -261,7 +285,7 @@ func TestPeerStreamsAndSelectorIntersection(t *testing.T) {
 		t.Fatal(err)
 	}
 	// Selector-only bidi delivery must not await payload or FIN.
-	e = awaitStreamEvent(t, ssub)
+	e = awaitStreamEvent(t, sAlpha, sAlphaWake)
 	incoming, ok := e.Stream.(Stream)
 	if !ok {
 		t.Fatal("lost bidi write side")

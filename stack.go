@@ -1,4 +1,3 @@
-// Package ethp2p owns authenticated connection views and delivers protocol events.
 package ethp2p
 
 import (
@@ -8,7 +7,6 @@ import (
 	"os"
 	"slices"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/ethp2p/ethp2p/enr"
@@ -40,31 +38,26 @@ type ConnInfo struct {
 }
 
 // Stack owns ethp2p views, registration and delivery queues. Construct it with
-// NewStack; its zero value is not usable. Transport owns all connection pumps.
+// NewStack; its zero value is not usable. Transport owns all connection pumps:
+// the stack runs one accept loop and one supervisor goroutine per peer.
 type Stack struct {
+	transport *transport.Ethp2pTransport
+	config    Config
+	ctx       context.Context // ends in Close; stops the accept loop
+	cancel    context.CancelFunc
+	wg        sync.WaitGroup // accept loop, supervisors, closeView goroutines; joined by Close
+
 	mu             sync.Mutex
-	transport      *transport.Ethp2pTransport
-	config         Config
 	serving        bool
 	closed         bool
-	subsystems     map[string]*Subsystem
-	selectors      map[wire.Selector]*Subsystem
-	active         map[transport.PeerID]*stackView
-	unreleased     map[transport.Conn]*stackView
+	families       []*Family
+	selectors      map[wire.Selector]*Family
+	peers          map[transport.PeerID]*peerSupervisor
+	views          map[*transport.Conn]struct{} // committed views not yet released
 	dials          map[transport.PeerID]*dialAttempt
 	generations    map[transport.PeerID]uint64
 	nextID         ConnID
 	sent, received uint64
-}
-
-type stackView struct {
-	conn     transport.Conn
-	info     ConnInfo
-	record   atomic.Pointer[enr.Record]
-	routes   map[wire.Selector]*peerDelivery
-	cancels  []context.CancelFunc
-	peers    []*peerDelivery
-	released chan struct{}
 }
 
 type dialAttempt struct {
@@ -84,8 +77,10 @@ func NewStack(t *transport.Ethp2pTransport, cfg Config) (*Stack, error) {
 	if cfg.Record != nil && cfg.Record.PeerID() != t.PeerID() {
 		return nil, errors.New("local record identity mismatch")
 	}
-	return &Stack{transport: t, config: cfg, active: make(map[transport.PeerID]*stackView),
-		unreleased: make(map[transport.Conn]*stackView), dials: make(map[transport.PeerID]*dialAttempt),
+	ctx, cancel := context.WithCancel(context.Background())
+	return &Stack{transport: t, config: cfg, ctx: ctx, cancel: cancel,
+		selectors: make(map[wire.Selector]*Family), peers: make(map[transport.PeerID]*peerSupervisor),
+		views: make(map[*transport.Conn]struct{}), dials: make(map[transport.PeerID]*dialAttempt),
 		generations: make(map[transport.PeerID]uint64)}, nil
 }
 
@@ -93,11 +88,12 @@ func NewStack(t *transport.Ethp2pTransport, cfg Config) (*Stack, error) {
 // It may be called once. Listener errors are reported synchronously.
 func (s *Stack) Start() error {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	if s.closed {
+		s.mu.Unlock()
 		return ErrStackClosed
 	}
 	if s.serving {
+		s.mu.Unlock()
 		return errors.New("stack already started")
 	}
 	s.serving = true
@@ -105,9 +101,100 @@ func (s *Stack) Start() error {
 	if s.config.Record != nil {
 		hello.Record = s.config.Record.Encode()
 	}
-	return s.transport.Bind(hello, stackSink{s})
+	s.mu.Unlock()
+	if err := s.transport.SetHello(hello); err != nil {
+		return err
+	}
+	if err := s.transport.Listen(); err != nil {
+		return err
+	}
+	s.wg.Go(s.acceptLoop)
+	return nil
 }
 
+// acceptLoop hands every inbound view to its peer's supervisor. A view the
+// stack no longer accepts is closed at once.
+func (s *Stack) acceptLoop() {
+	for {
+		conn, err := s.transport.Accept(s.ctx)
+		if err != nil {
+			return
+		}
+		if !s.attach(conn, nil) {
+			_ = conn.CloseWithCode(wire.Closing)
+		}
+	}
+}
+
+// attach routes a view to its peer's supervisor, starting one when needed.
+// It reports whether the supervisor took the view.
+func (s *Stack) attach(conn *transport.Conn, result chan<- error) bool {
+	s.mu.Lock()
+	if s.closed {
+		s.mu.Unlock()
+		return false
+	}
+	id := conn.RemotePeerID()
+	sup := s.peers[id]
+	if sup == nil {
+		sup = &peerSupervisor{stack: s, id: id, wake: make(chan struct{}, 1)}
+		s.peers[id] = sup
+		s.wg.Go(sup.run)
+	}
+	sup.inbox = append(sup.inbox, supervisorRequest{kind: reqAttach, conn: conn, result: result})
+	s.mu.Unlock()
+	select {
+	case sup.wake <- struct{}{}:
+	default:
+	}
+	return true
+}
+
+// sharedFamilies returns the registered Families whose selectors are all in
+// selectors (ascending).
+func (s *Stack) sharedFamilies(selectors []wire.Selector) []*Family {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var shared []*Family
+	for _, family := range s.families {
+		if family.sharedWith(selectors) {
+			shared = append(shared, family)
+		}
+	}
+	return shared
+}
+
+// closeView releases a view with code in a goroutine joined by Close: the
+// QUIC close bounds GoAway delivery, so the supervisor never waits for it.
+// done, if given, closes once the view's traffic is accounted.
+func (s *Stack) closeView(conn *transport.Conn, code wire.Code, done chan<- struct{}) {
+	s.wg.Go(func() {
+		_ = conn.CloseWithCode(code)
+		s.mu.Lock()
+		if _, ok := s.views[conn]; ok {
+			sent, received := conn.ConnectionStats()
+			s.sent += sent
+			s.received += received
+			delete(s.views, conn)
+		}
+		s.mu.Unlock()
+		if done != nil {
+			close(done)
+		}
+	})
+}
+
+// cleanupGeneration runs under mu. A stale admission can only still be running
+// while its driver's dial record exists, so retaining generations until both
+// the peer's supervisor and dial record are gone is sufficient.
+func (s *Stack) cleanupGeneration(id transport.PeerID) {
+	if s.peers[id] == nil && s.dials[id] == nil {
+		delete(s.generations, id)
+	}
+}
+
+// localSelectors runs under mu. Registration is immutable after Start, so
+// attach-time readers never race it.
 func (s *Stack) localSelectors() []wire.Selector {
 	selectors := make([]wire.Selector, 0, len(s.selectors))
 	for sel := range s.selectors {
@@ -117,50 +204,34 @@ func (s *Stack) localSelectors() []wire.Selector {
 	return selectors
 }
 
-func (s *Stack) retire(v *stackView, code wire.Code) {
-	delete(s.active, v.info.Peer)
-	for _, cancel := range v.cancels {
-		cancel()
-	}
-	for _, peer := range v.peers {
-		peer.closePeer(code)
-	}
-}
-
-// cleanupGeneration runs under mu. A stale admission can only still be running
-// while its driver's dial record exists, so retaining generations until both
-// the active view and dial record are gone is sufficient.
-func (s *Stack) cleanupGeneration(id transport.PeerID) {
-	if s.active[id] == nil && s.dials[id] == nil {
-		delete(s.generations, id)
-	}
-}
-
-// Disconnect abandons the peer's dial and waits for its active view's release.
-// An unknown peer is a no-op.
+// Disconnect abandons the peer's dial and releases its view, returning once
+// the view is released. The generation gate keeps an outbound dial that
+// completes afterwards from being accepted. An unknown peer is a no-op.
 func (s *Stack) Disconnect(id transport.PeerID) error {
 	s.mu.Lock()
 	s.generations[id]++
 	if d := s.dials[id]; d != nil {
 		d.cancel()
 	}
-	v := s.active[id]
-	if v != nil {
-		s.retire(v, wire.Closing)
-	}
-	s.cleanupGeneration(id)
-	s.mu.Unlock()
-	if v == nil {
+	sup := s.peers[id]
+	if sup == nil {
+		s.cleanupGeneration(id)
+		s.mu.Unlock()
 		return nil
 	}
-	err := v.conn.CloseWithCode(wire.Closing)
-	<-v.released
-	return err
+	done := make(chan struct{})
+	sup.inbox = append(sup.inbox, supervisorRequest{kind: reqDisconnect, done: done})
+	s.mu.Unlock()
+	select {
+	case sup.wake <- struct{}{}:
+	default:
+	}
+	<-done
+	return nil
 }
 
-// Close releases every admitted view, without closing the endpoint or socket.
-// The only goroutines the stack starts are these caller-joined close calls.
-// Subsequent calls return nil immediately.
+// Close releases every view without closing the endpoint or socket, then joins
+// every stack goroutine. It is idempotent: later calls return nil at once.
 func (s *Stack) Close() error {
 	s.mu.Lock()
 	if s.closed {
@@ -171,35 +242,40 @@ func (s *Stack) Close() error {
 	for _, d := range s.dials {
 		d.cancel()
 	}
-	var active []*stackView
-	for _, v := range s.active {
-		active = append(active, v)
-		s.retire(v, wire.Closing)
-	}
-	var releases []<-chan struct{}
-	for _, v := range s.unreleased {
-		releases = append(releases, v.released)
+	// The accept loop observes this; supervisors drain their disconnect below.
+	s.cancel()
+	var sups []*peerSupervisor
+	var dones []chan struct{}
+	for _, sup := range s.peers {
+		done := make(chan struct{})
+		sup.inbox = append(sup.inbox, supervisorRequest{kind: reqDisconnect, done: done})
+		sups = append(sups, sup)
+		dones = append(dones, done)
 	}
 	s.mu.Unlock()
-	var wg sync.WaitGroup
-	errs := make([]error, len(active))
-	for i, v := range active {
-		wg.Go(func() { errs[i] = v.conn.CloseWithCode(wire.Closing) })
+	for _, sup := range sups {
+		select {
+		case sup.wake <- struct{}{}:
+		default:
+		}
 	}
-	wg.Wait()
-	for _, released := range releases {
-		<-released
+	s.transport.Close()
+	for _, done := range dones {
+		<-done
 	}
-	return errors.Join(errs...)
+	s.wg.Wait()
+	return nil
 }
 
-// Connections returns active view snapshots sorted by local ConnID.
+// Connections returns snapshots of connected views sorted by local ConnID.
 func (s *Stack) Connections() []ConnInfo {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	infos := make([]ConnInfo, 0, len(s.active))
-	for _, v := range s.active {
-		infos = append(infos, v.info)
+	var infos []ConnInfo
+	for _, sup := range s.peers {
+		if sup.connected {
+			infos = append(infos, sup.info)
+		}
 	}
 	slices.SortFunc(infos, func(a, b ConnInfo) int {
 		if a.ID < b.ID {
@@ -213,27 +289,18 @@ func (s *Stack) Connections() []ConnInfo {
 	return infos
 }
 
-// Traffic returns cumulative QUIC traffic across admitted views, including
-// released views. Shared connections include libp2p bytes.
+// Traffic returns cumulative QUIC traffic across committed views, including
+// released ones. Shared connections include libp2p bytes.
 func (s *Stack) Traffic() (sent, received uint64) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	sent, received = s.sent, s.received
-	for _, v := range s.unreleased {
-		a, b := v.conn.ConnectionStats()
+	for conn := range s.views {
+		a, b := conn.ConnectionStats()
 		sent += a
 		received += b
 	}
 	return
-}
-
-func updateRecord(v *stackView, rec *enr.Record) {
-	if rec != nil {
-		old := v.record.Load()
-		if old == nil || rec.Seq() > old.Seq() {
-			v.record.Store(rec)
-		}
-	}
 }
 
 // Connect authenticates and admits a peer using the record's endpoints.
@@ -261,8 +328,8 @@ func (s *Stack) Connect(ctx context.Context, rec *enr.Record) error {
 			s.mu.Unlock()
 			return errors.New("stack not started")
 		}
-		if v := s.active[id]; v != nil {
-			updateRecord(v, rec)
+		if sup := s.peers[id]; sup != nil && sup.connected {
+			sup.updateRecord(rec)
 			s.mu.Unlock()
 			return nil
 		}
@@ -278,8 +345,8 @@ func (s *Stack) Connect(ctx context.Context, rec *enr.Record) error {
 			case <-d.done:
 			}
 			s.mu.Lock()
-			if v := s.active[id]; v != nil {
-				updateRecord(v, rec)
+			if sup := s.peers[id]; sup != nil && sup.connected {
+				sup.updateRecord(rec)
 				s.mu.Unlock()
 				return nil
 			}
@@ -303,22 +370,34 @@ func (s *Stack) Connect(ctx context.Context, rec *enr.Record) error {
 				failures = append(failures, dialCtx.Err())
 				break
 			}
-			_, err := s.transport.Dial(dialCtx, net.UDPAddrFromAddrPort(endpoint), id)
-			if err == nil {
+			conn, err := s.transport.Dial(dialCtx, net.UDPAddrFromAddrPort(endpoint), id)
+			if err != nil {
+				failures = append(failures, err)
+				if errors.Is(err, transport.ErrDialLegacyPeer) {
+					break
+				}
+				continue
+			}
+			result := make(chan error, 1)
+			if !s.attach(conn, result) {
+				_ = conn.CloseWithCode(wire.Closing)
 				break
 			}
-			failures = append(failures, err)
-			if errors.Is(err, transport.ErrDialLegacyPeer) {
-				break
+			if err := <-result; err != nil {
+				failures = append(failures, err)
+				continue
 			}
+			break
 		}
 		cancel()
 		s.mu.Lock()
 		switch {
 		case s.closed:
 			d.err = ErrStackClosed
-		case s.active[id] != nil:
-			updateRecord(s.active[id], rec)
+		case s.peers[id] != nil && s.peers[id].connected:
+			// The attempt's own view, or one that beat it under the duplicate
+			// rule, is active: either way the peer is connected.
+			s.peers[id].updateRecord(rec)
 		case d.gen != s.generations[id]:
 			d.err = ErrDisconnected
 		default:
