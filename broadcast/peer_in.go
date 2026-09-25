@@ -67,8 +67,8 @@ func (p *PeerConn) acceptSession(stream ethp2p.ReceiveStream) {
 		stream.CancelRead(wire.Unspecified)
 	default:
 		// SESS needs other streams to finish; waiting here could exhaust the
-		// uni credit needed by CHUNK, so session capacity remains a refusal.
-		stream.CancelRead(wire.Overloaded)
+		// uni credit needed by CHUNK, so excess SESS is reset at once.
+		stream.CancelRead(wire.Unspecified)
 	}
 }
 

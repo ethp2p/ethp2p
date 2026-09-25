@@ -252,10 +252,10 @@ func TestEventMethods(t *testing.T) {
 	for _, kind := range []EventKind{PeerUp, PeerDown, StreamIn} {
 		raw := new(transporttest.RawReceiveStream)
 		event := Event{Kind: kind, Stream: wrapReceiveStream(raw)}
-		event.Cancel(wire.Overloaded)
+		event.Cancel(wire.Refused)
 		codes := raw.CancelReadCodes()
 		if kind == StreamIn {
-			if len(codes) != 1 || codes[0] != 4 {
+			if len(codes) != 1 || codes[0] != 2 {
 				t.Fatalf("stream cancellation = %v", codes)
 			}
 		} else if len(codes) != 0 {

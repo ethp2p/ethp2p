@@ -564,7 +564,7 @@ func TestControlOverloadDoesNotBlockOtherConnections(t *testing.T) {
 	if blockedView.RemoteAddr().String() != blocked.LocalAddr().String() || normalView.RemoteAddr().String() != normal.LocalAddr().String() {
 		t.Fatal("listener delivered unexpected peers")
 	}
-	transport.AssertEthp2pViewClosed(t, blockedView, wire.Overloaded, false)
+	transport.AssertEthp2pViewClosed(t, blockedView, wire.Unspecified, false)
 	// Prove the rejected connection still carries libp2p traffic after the
 	// ethp2p release, without reading its blocked outbound control stream.
 	out, err := blocked.OpenStreamSync(ctx)

@@ -40,13 +40,13 @@ func TestCapacityReviewFinishedSessionsDoNotBoundLiveState(t *testing.T) {
 	if len(tr.sessions) != 16 || len(p.sessionSem) != 0 || len(p.liveSessions) != 16 {
 		t.Fatal("completed SESS exceeded live-session cap")
 	}
-	// Unlike completed SESS, an unfinished excess SESS observes wire Overloaded.
+	// Unlike completed SESS, an unfinished excess SESS observes wire Unspecified.
 	var wire bytes.Buffer
 	_ = WriteFrame(&wire, &bcastpb.Sess{Frame: &bcastpb.Sess_SessionOpen{SessionOpen: &bcastpb.Sess_Open{Channel: "channel", MessageId: "excess"}}})
 	raw, in := f.incoming(t, SESS, &wire)
 	p.acceptSession(in)
 	tr.handle(capacityTake(t, inbox))
-	requireWireCancelCode(t, raw, 4)
+	requireWireCancelCode(t, raw, 0)
 	p.wg.Wait()
 	for _, s := range tr.sessions {
 		s.createdAt = time.Now().Add(-activeSessionTTL - time.Second)

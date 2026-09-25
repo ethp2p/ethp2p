@@ -665,7 +665,7 @@ func TestChannel_PeerChurnMidSession(t *testing.T) {
 	})
 }
 
-func TestChannelRejectsFullParkedChunkQueueAsOverloaded(t *testing.T) {
+func TestChannelRejectsFullParkedChunkQueueAsUnspecified(t *testing.T) {
 	const messageID MessageID = "msg-full"
 	channel := &Channel[*testChunk, *testRouting, *testPreamble]{
 		parked: map[MessageID][]channelChunkStream{
@@ -678,5 +678,5 @@ func TestChannelRejectsFullParkedChunkQueueAsOverloaded(t *testing.T) {
 
 	channel.handleChunk(chunk)
 
-	requireWireCancelCode(t, raw, 4)
+	requireWireCancelCode(t, raw, 0)
 }

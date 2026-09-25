@@ -17,7 +17,7 @@ func (p *PeerConn) reserveSession(target *channelDelivery) (*sessionLease, wire.
 		return nil, wire.Unspecified
 	}
 	if len(p.liveSessions) >= p.engine.config.maxLiveSessionsPerPeer() {
-		return nil, wire.Overloaded
+		return nil, wire.Unspecified
 	}
 	if p.liveSessions == nil {
 		p.liveSessions = make(map[*sessionLease]struct{})

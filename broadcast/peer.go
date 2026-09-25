@@ -289,7 +289,7 @@ func (p *PeerConn) enqueueStream(selector wire.Selector, stream ethp2p.ReceiveSt
 		case <-p.ctx.Done():
 			stream.CancelRead(wire.Unspecified)
 		default:
-			stream.CancelRead(wire.Overloaded)
+			stream.CancelRead(wire.Unspecified)
 		}
 	case CHUNK:
 		if !p.chunkIn.push(stream) {

@@ -26,7 +26,7 @@ func TestStreamEndPolicyUsesWireCodes(t *testing.T) {
 	}{
 		{
 			name:     "deadline expires while reading",
-			want:     6,
+			want:     4,
 			wantRead: true,
 			run: func(t *testing.T, f *outcomeFixture) (*wireReceiveProbe, *wireSendProbe) {
 				raw, stream := f.incoming(t, CHUNK, failReader{os.ErrDeadlineExceeded})
@@ -47,7 +47,7 @@ func TestStreamEndPolicyUsesWireCodes(t *testing.T) {
 		},
 		{
 			name:     "bounded stream queue is full",
-			want:     4,
+			want:     0,
 			wantRead: true,
 			run: func(t *testing.T, f *outcomeFixture) (*wireReceiveProbe, *wireSendProbe) {
 				raw, stream := f.incoming(t, SESS, nil)

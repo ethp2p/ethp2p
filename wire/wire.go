@@ -40,10 +40,8 @@ var (
 	Unspecified = Code{}
 	// Refused means the receiver will not process this stream.
 	Refused = Code{value: 1}
-	// Overloaded means a bounded queue or budget is full.
-	Overloaded = Code{value: 2}
 	// Timeout means a deadline expired.
-	Timeout = Code{value: 3}
+	Timeout = Code{value: 2}
 
 	// BadSelector means the stream head was not a valid selector frame.
 	BadSelector = Code{value: 8}
@@ -84,7 +82,7 @@ func ParseCode(raw uint64) Code {
 		return Code{value: value, protocol: true}
 	}
 	switch value {
-	case 0, 1, 2, 3, 8, 9, 10, 11, 12, 13:
+	case 0, 1, 2, 8, 9, 10, 11, 12, 13:
 		return Code{value: value}
 	default:
 		return Unspecified
@@ -102,8 +100,6 @@ func (c Code) String() string {
 	case 1:
 		return "Refused"
 	case 2:
-		return "Overloaded"
-	case 3:
 		return "Timeout"
 	case 8:
 		return "BadSelector"

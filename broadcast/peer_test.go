@@ -165,7 +165,7 @@ func TestBindContextUnblocksChunkBackpressure(t *testing.T) {
 	peer.Close()
 }
 
-func TestPeerEnqueueStreamRejectsFullQueuesAsOverloaded(t *testing.T) {
+func TestPeerEnqueueStreamRejectsFullQueuesAsUnspecified(t *testing.T) {
 	for _, test := range []struct {
 		name     string
 		selector wire.Selector
@@ -189,12 +189,12 @@ func TestPeerEnqueueStreamRejectsFullQueuesAsOverloaded(t *testing.T) {
 
 			peer.enqueueStream(test.selector, stream)
 
-			requireWireCancelCode(t, raw, 4)
+			requireWireCancelCode(t, raw, 0)
 		})
 	}
 }
 
-func TestAcceptSessionRejectsFullHandlerBudgetAsOverloaded(t *testing.T) {
+func TestAcceptSessionRejectsFullHandlerBudgetAsUnspecified(t *testing.T) {
 	peer := &PeerConn{
 		ctx:           context.Background(),
 		sessionSem:    make(chan struct{}, 1),
@@ -207,7 +207,7 @@ func TestAcceptSessionRejectsFullHandlerBudgetAsOverloaded(t *testing.T) {
 
 	raw, stream := newWrappedRecordingReceiveStream(t, SESS, nil)
 	peer.acceptSession(stream)
-	requireWireCancelCode(t, raw, 4)
+	requireWireCancelCode(t, raw, 0)
 }
 
 type gateStream struct {

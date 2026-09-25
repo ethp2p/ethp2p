@@ -314,9 +314,9 @@ func TestFullEthp2pQueueKeepsInboundLibp2pView(t *testing.T) {
 	}
 	clientEthConn, err := clientEth.Dial(ctx, serverPC.LocalAddr(), serverEth.shared.PeerID())
 	if err != nil {
-		// The server released its view with Overloaded before the dialer's
+		// The server released its view with Unspecified before the dialer's
 		// Hello wait observed the peer Hello; the rejection is the assertion.
-		assertEthViewCause(t, err, wire.Overloaded, true)
+		assertEthViewCause(t, err, wire.Unspecified, true)
 	} else {
 		defer clientEthConn.Close()
 		clientContext := clientEthConn.ethp2pCtx
@@ -325,7 +325,7 @@ func TestFullEthp2pQueueKeepsInboundLibp2pView(t *testing.T) {
 		case <-ctx.Done():
 			t.Fatal(ctx.Err())
 		}
-		assertEthViewCause(t, context.Cause(clientContext), wire.Overloaded, true)
+		assertEthViewCause(t, context.Cause(clientContext), wire.Unspecified, true)
 	}
 	clientView, err := clientListener.Accept(ctx)
 	if err != nil {
@@ -343,7 +343,7 @@ func TestFullEthp2pQueueKeepsInboundLibp2pView(t *testing.T) {
 	case <-ctx.Done():
 		t.Fatal(ctx.Err())
 	}
-	assertEthViewCause(t, context.Cause(serverContext), wire.Overloaded, false)
+	assertEthViewCause(t, context.Cause(serverContext), wire.Unspecified, false)
 	stream, err := clientView.OpenStreamSync(ctx)
 	if err != nil {
 		t.Fatal(err)

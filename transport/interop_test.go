@@ -523,8 +523,8 @@ func TestInteropStalledSelectorRecovers(t *testing.T) {
 	}
 	if _, err := stream.Read(make([]byte, 1)); err == nil {
 		t.Fatal("stalled selector was not reset")
-	} else if reset, ok := errors.AsType[*quic.StreamError](err); !ok || !reset.Remote || uint64(reset.ErrorCode) != 6 {
-		t.Fatalf("stalled selector reset = %v, want remote wire 6", err)
+	} else if reset, ok := errors.AsType[*quic.StreamError](err); !ok || !reset.Remote || uint64(reset.ErrorCode) != 4 {
+		t.Fatalf("stalled selector reset = %v, want remote wire 4", err)
 	}
 	h.echoEth(pair, []byte("after timeout"))
 }
@@ -606,8 +606,8 @@ func TestInteropUnconsumedEthp2pKeepsLibp2p(t *testing.T) {
 		cancel()
 		if err != nil {
 			// Dial returns after Hello, so a view released for a full
-			// delivery queue reports its Overloaded rejection here.
-			if closed, ok := errors.AsType[*transport.ViewClosedError](err); !ok || !closed.Remote || closed.Code != wire.Overloaded {
+			// delivery queue reports its Unspecified rejection here.
+			if closed, ok := errors.AsType[*transport.ViewClosedError](err); !ok || !closed.Remote || closed.Code != wire.Unspecified {
 				t.Fatalf("client %d ethp2p dial: %v", i, err)
 			}
 		} else {

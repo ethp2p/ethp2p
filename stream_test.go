@@ -23,7 +23,7 @@ func TestStreamWrappersSendSuppliedCode(t *testing.T) {
 		want uint64
 	}{
 		{name: "protocol namespace", code: wire.ProtocolCode(1), want: 3},
-		{name: "shared stack code", code: wire.Overloaded, want: 4},
+		{name: "shared stack code", code: wire.Refused, want: 2},
 		{name: "stack-only code not rewritten", code: wire.BadSelector, want: 16},
 		{name: "closing not rewritten", code: wire.Closing, want: 20},
 	} {
@@ -36,10 +36,10 @@ func TestStreamWrappersSendSuppliedCode(t *testing.T) {
 
 	rawReceive := new(rawReceiveStream)
 	receive := wrapReceiveStream(rawReceive)
-	receive.CancelRead(wire.Overloaded)
-	assertCancelCodes(t, rawReceive.CancelReadCodes(), []uint64{4})
 	receive.CancelRead(wire.Refused)
-	assertCancelCodes(t, rawReceive.CancelReadCodes(), []uint64{4})
+	assertCancelCodes(t, rawReceive.CancelReadCodes(), []uint64{2})
+	receive.CancelRead(wire.Timeout)
+	assertCancelCodes(t, rawReceive.CancelReadCodes(), []uint64{2})
 }
 
 func TestStreamErrorsDoNotCancel(t *testing.T) {

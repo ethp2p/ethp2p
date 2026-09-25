@@ -27,8 +27,7 @@ func TestProtocolCodeWire(t *testing.T) {
 	}{
 		{name: "Unspecified", code: Unspecified, want: 0},
 		{name: "Refused", code: Refused, want: 2},
-		{name: "Overloaded", code: Overloaded, want: 4},
-		{name: "Timeout", code: Timeout, want: 6},
+		{name: "Timeout", code: Timeout, want: 4},
 		{name: "BadSelector", code: BadSelector, want: 16},
 		{name: "UnsupportedSelector", code: UnsupportedSelector, want: 18},
 		{name: "Closing", code: Closing, want: 20},
@@ -55,8 +54,8 @@ func TestParseCode(t *testing.T) {
 	}{
 		{name: "Unspecified", wire: 0, want: Unspecified},
 		{name: "Refused", wire: 2, want: Refused},
-		{name: "Overloaded", wire: 4, want: Overloaded},
-		{name: "Timeout", wire: 6, want: Timeout},
+		{name: "Timeout", wire: 4, want: Timeout},
+		{name: "gap 3", wire: 6, want: Unspecified},
 		{name: "BadSelector", wire: 16, want: BadSelector},
 		{name: "UnsupportedSelector", wire: 18, want: UnsupportedSelector},
 		{name: "Closing", wire: 20, want: Closing},

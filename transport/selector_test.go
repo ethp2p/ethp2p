@@ -108,7 +108,7 @@ func TestDispatcherSlowloris(t *testing.T) {
 	ctx := testContext(t)
 	pair := newViewPair(t, 32)
 	out := rawBi(t, ctx, pair.clientEth, []byte{2})
-	assertBiReset(t, out, 6)
+	assertBiReset(t, out, 4)
 }
 
 func TestDispatcherAnswersPeerResetOnBidirectionalStream(t *testing.T) {
@@ -141,7 +141,7 @@ func TestUnidirectionalSelectorErrors(t *testing.T) {
 	}{
 		{"bad-frame", []byte{2, 0x81, 0}, 16, 0},
 		{"nonminimal-length", []byte{0x81, 0x00, 1}, 16, 0},
-		{"slowloris", []byte{2}, 6, 50 * time.Millisecond},
+		{"slowloris", []byte{2}, 4, 50 * time.Millisecond},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if tc.timeout != 0 {

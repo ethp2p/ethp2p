@@ -23,7 +23,7 @@
 // that side's view of every new connection immediately, so a process that
 // never uses a side never accumulates its views. Configure Hello before
 // connections arrive. Connection delivery has a bounded queue;
-// a full queue releases only that side's view with wire.Overloaded.
+// a full queue releases only that side's view with wire.Unspecified.
 //
 // [Ethp2pTransport.Accept] and [Ethp2pTransport.Dial] return views only after
 // the peer's Hello arrived and was validated. [Ethp2pTransport.Close] stops

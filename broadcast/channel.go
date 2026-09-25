@@ -314,11 +314,11 @@ func (tr *Channel[CI, R, P]) handleChunk(e channelChunkStream) {
 	// all credit that the SESS itself needs, both per message and per peer.
 	buf := tr.parked[messageID]
 	if len(buf) >= maxParkedChunks {
-		e.stream.CancelRead(wire.Overloaded)
+		e.stream.CancelRead(wire.Unspecified)
 		return
 	}
 	if held, ok := e.stream.(*heldChunk); ok && !held.move(chunkParked) {
-		e.stream.CancelRead(wire.Overloaded)
+		e.stream.CancelRead(wire.Unspecified)
 		return
 	}
 	tr.parked[messageID] = append(buf, e)

@@ -183,7 +183,7 @@ func TestParkedChunksBoundedAcrossMessagesAndDisposed(t *testing.T) {
 		p.processChunk(in)
 		tr.handleChunk(capacityTake(t, inbox).(channelChunkStream))
 		if i == maxPeerParkedChunks {
-			requireWireCancelCode(t, raw, 4)
+			requireWireCancelCode(t, raw, 0)
 		}
 	}
 	p.chunkMu.Lock()

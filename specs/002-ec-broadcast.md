@@ -266,7 +266,7 @@ QUIC capacity is shared, so broadcast must avoid exhausting it with streams wait
 
 CHUNK payloads for an existing session are independent:
 header-reader concurrency and session payload-reader concurrency delay reads instead of resetting
-with `Overloaded`.
+them.
 The engine and channel actors enqueue work without waiting for a reader slot.
 A reader completion schedules the next queued payload read.
 
@@ -275,7 +275,7 @@ and a CHUNK with no session depends on a missing SESS.
 Broadcast bounds parked CHUNK streams to at most 32 per message
 and 64 per peer across channels and messages.
 These local bounds do not reserve QUIC capacity or by themselves guarantee progress.
-Excess parked chunks are reset with `Overloaded`.
+Excess parked chunks are reset with `Unspecified`.
 The existing 30-second cleanup tick cancels all remaining parked groups with `Refused`.
 
 Ending SESS does not release the live session itself.
@@ -284,7 +284,7 @@ therefore separately bounds relay sessions first opened by a peer, across channe
 The default is 32768, covering about 90 new sessions per second over TTL plus cleanup interval
 (300 + 30 = 330 seconds, about 29700 resident), with roughly 10% headroom for bursts and scheduling.
 TTL is not a strict residence bound; applications expecting higher rates MUST raise the limit.
-Excess SessionOpen requests are refused with `Overloaded` on SESS.
+Excess SessionOpen requests are reset with `Unspecified` on SESS.
 Creator departure disposes that binding's creator sessions in every channel,
 including channels it unsubscribed from; the count is released on disposal, including TTL expiry.
 Local publishes are not charged.

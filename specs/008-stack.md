@@ -319,8 +319,7 @@ Values below 32 encode in one byte in either namespace, and values below 8192 in
 | ----: | ---- | ------- | ------- |
 | 0 | `Unspecified` | anyone | No specific reason, including ordinary cancellation. |
 | 1 | `Refused` | anyone | The receiver will not process this stream. |
-| 2 | `Overloaded` | anyone | A bounded queue or budget is full. Retrying later may succeed. |
-| 3 | `Timeout` | anyone | A deadline expired. |
+| 2 | `Timeout` | anyone | A deadline expired. |
 | 8 | `BadSelector` | stack | The stream head was not a valid selector frame. |
 | 9 | `UnsupportedSelector` | stack | The selector is not shared on this connection. |
 | 10 | `Closing` | stack | The view is closing. |
@@ -328,10 +327,12 @@ Values below 32 encode in one byte in either namespace, and values below 8192 in
 | 12 | `NoSharedProtocols` | stack | No Family is shared on the view, or no local Family holds it. |
 | 13 | `Duplicate` | stack | Another connection to the same peer was kept. |
 
-Values 0 to 3 are shared: either endpoint MAY send them on any stream,
+Values 0 to 2 are shared: either endpoint MAY send them on any stream,
 and protocols SHOULD use them instead of defining their own equivalents,
-so that senders can handle overload and refusal uniformly.
-Values 4 to 7 are unassigned and decode as `Unspecified`.
+so that senders can handle refusal and timeouts uniformly.
+There is no overload code: a stream or view rejected because a local queue or budget is full
+is reset with `Unspecified`, so the peer does not learn the receiver's load.
+Values 3 to 7 are unassigned and decode as `Unspecified`.
 Values 8 to 31 describe stack outcomes; callers should use them only for those outcomes.
 Values 14 to 31 are reserved for future stack codes, keeping every stack code to one byte.
 
@@ -363,7 +364,7 @@ Protocol specifications SHOULD follow these rules:
   Send a frame before FIN when the peer needs a count, an identifier, or a position.
 - Publish the protocol's code table, add values only at the end,
   and never renumber or reuse a value.
-- Use the shared stack codes for refusal, overload, and timeouts.
+- Use the shared stack codes for refusal and timeouts; reset overload with `Unspecified`.
 
 ## 6. Datagrams
 
@@ -609,7 +610,7 @@ func ParseCode(raw uint64) Code
 `ParseCode` preserves protocol-namespace values and maps unknown stack values to `Unspecified`.
 A protocol-namespace `Code` means whatever the protocol that owns the stream defines;
 the same value can mean different things to different protocols.
-The shared codes `Unspecified`, `Refused`, `Overloaded`, and `Timeout` are valid on any stream.
+The shared codes `Unspecified`, `Refused`, and `Timeout` are valid on any stream.
 Stack outcome codes are exported from `wire` so consumers can inspect and send them.
 Cancellation methods encode the supplied code without rewriting it.
 
@@ -660,7 +661,7 @@ var (
 )
 
 stream.CancelWrite(broadcast.Reconstructed)
-stream.CancelRead(wire.Overloaded)
+stream.CancelRead(wire.Refused)
 ```
 
 This gives protocols typed codes without generic types in the stack's API.
@@ -809,7 +810,7 @@ Broadcast defines its code table in spec 002:
 | 1 | `Reconstructed` | The sender has reconstructed the message. |
 | 2 | `Redundant` | The receiver no longer needs this chunk. |
 
-Overload of broadcast's own per-peer limits uses the shared `Overloaded`.
+Overload of broadcast's own per-peer limits resets with the shared `Unspecified`.
 In Go, the codes and selectors are declared in `broadcast/protocol.go`;
 shared stack codes are referenced from `wire` directly.
 

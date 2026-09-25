@@ -190,7 +190,7 @@ func (t *SharedTransport) start() error {
 // Hello in a transport-owned goroutine. A view whose Hello never arrives is
 // released by the control path. A validated view is queued in ethQ under the
 // same mutex Ethp2pTransport.Close uses; a full queue releases only the
-// ethp2p view with Overloaded. libp2p delivery is independent.
+// ethp2p view with Unspecified. libp2p delivery is independent.
 func (t *SharedTransport) offerEthp2p(c *Conn) {
 	if t.interest.Load()&uint32(sideEthp2p) == 0 {
 		_ = c.Close()
@@ -223,7 +223,7 @@ func (t *SharedTransport) offerEthp2p(c *Conn) {
 		case queued:
 		case full:
 			// A blocked Hello must not delay libp2p delivery or the next accept.
-			_ = c.CloseWithCode(wire.Overloaded)
+			_ = c.CloseWithCode(wire.Unspecified)
 		default:
 			_ = c.Close()
 		}
@@ -576,7 +576,7 @@ func (c *sharedConn) drainBidi() {
 					c.drainLibp2pQueue()
 				}
 			default:
-				resetBi(accepted, wire.Overloaded)
+				resetBi(accepted, wire.Unspecified)
 			}
 		})
 	}
