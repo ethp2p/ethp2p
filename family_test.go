@@ -33,15 +33,19 @@ func TestFamilySharedOnlyWhenComplete(t *testing.T) {
 	}
 	partialConn, err := partial.Eth.Dial(ctx, server.Shared.Addr(), server.Shared.PeerID())
 	if err != nil {
-		t.Fatal(err)
-	}
-	select {
-	case <-partialConn.Done():
-	case <-time.After(testTimeout):
-		t.Fatal("unshared view remained open")
-	}
-	if code := partialConn.CloseCode(); code != wire.NoSharedProtocols {
-		t.Fatalf("unshared close code = %s", code)
+		// The rejection can arrive before Dial returns.
+		if closed, ok := errors.AsType[*transport.ViewClosedError](err); !ok || !closed.Remote || closed.Code != wire.NoSharedProtocols {
+			t.Fatal(err)
+		}
+	} else {
+		select {
+		case <-partialConn.Done():
+		case <-time.After(testTimeout):
+			t.Fatal("unshared view remained open")
+		}
+		if code := partialConn.CloseCode(); code != wire.NoSharedProtocols {
+			t.Fatalf("unshared close code = %s", code)
+		}
 	}
 	if ev, ok := fam.Next(); ok {
 		t.Fatalf("unshared peer produced %+v", ev)
