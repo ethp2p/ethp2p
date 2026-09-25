@@ -59,7 +59,7 @@ func TestEngineCloseCleanup(t *testing.T) {
 		if err := a.Engine.Close(); err != nil {
 			t.Fatal(err)
 		}
-		// The engine borrows its connection. The probe subsystem still routes
+		// The engine borrows its connection. The probe family still routes
 		// a bidirectional stream through the same Stack after engine shutdown.
 		var peer *ethp2p.Peer
 		for peer == nil {

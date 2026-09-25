@@ -28,7 +28,7 @@ type Node struct {
 	Record *enr.Record
 	// Stack routes negotiated protocol streams.
 	Stack *ethp2p.Stack
-	// Engine runs the broadcast subsystem.
+	// Engine runs broadcast.
 	Engine       *broadcast.Engine
 	net          *Net
 	packet       net.PacketConn

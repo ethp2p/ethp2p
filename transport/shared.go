@@ -378,7 +378,7 @@ type sharedConn struct {
 	cancelLibp2p context.CancelCauseFunc
 	ethp2pCtx    context.Context
 	cancelEthp2p context.CancelCauseFunc
-	// wg owns this connection's control, dispatcher and sink goroutines.
+	// wg owns this connection's control, dispatcher and classification goroutines.
 	// Starts require a tracked parent: the accept loop or a Dial reservation.
 	wg *sync.WaitGroup
 
