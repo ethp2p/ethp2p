@@ -11,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/ethp2p/ethp2p/protocol"
+	"github.com/ethp2p/ethp2p/wire"
 	"github.com/ethp2p/ethp2p/transport"
 	"github.com/ethp2p/ethp2p/transport/pb"
 	"github.com/ethp2p/ethp2p/transport/transporttest"
@@ -71,7 +71,7 @@ func newRawControlPeerConfigured(t *testing.T, openControl bool, hello transport
 		t.Fatalf("control stream ID = %d, want first server uni stream 3", in.StreamID())
 	}
 	if readHello {
-		if selector, err := protocol.ReadSelector(in); err != nil || selector != 0 {
+		if selector, err := wire.ReadSelector(in); err != nil || selector != 0 {
 			t.Fatalf("server control selector = %d, %v", selector, err)
 		}
 		if message, err := readControlFrame(in); err != nil || message.GetHello() == nil {
@@ -84,7 +84,7 @@ func newRawControlPeerConfigured(t *testing.T, openControl bool, hello transport
 		if err != nil {
 			t.Fatal(err)
 		}
-		if err := protocol.WriteSelector(out, protocol.ControlSelector); err != nil {
+		if err := wire.WriteSelector(out, wire.ControlSelector); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -93,26 +93,26 @@ func newRawControlPeerConfigured(t *testing.T, openControl bool, hello transport
 
 func (p rawControlPeer) write(t *testing.T, message *pb.Control) {
 	t.Helper()
-	wire, err := proto.Marshal(message)
+	raw, err := proto.Marshal(message)
 	if err != nil {
 		t.Fatal(err)
 	}
-	p.writeBytes(t, protocol.AppendFrame(nil, wire))
+	p.writeBytes(t, wire.AppendFrame(nil, raw))
 }
 
-func (p rawControlPeer) writeBytes(t *testing.T, wire []byte) {
+func (p rawControlPeer) writeBytes(t *testing.T, raw []byte) {
 	t.Helper()
-	if _, err := p.out.Write(wire); err != nil {
+	if _, err := p.out.Write(raw); err != nil {
 		t.Fatal(err)
 	}
 }
 
-func (p rawControlPeer) writeViolation(t *testing.T, wire []byte) {
+func (p rawControlPeer) writeViolation(t *testing.T, raw []byte) {
 	t.Helper()
 	// The receiver can reject the frame's length prefix before Write has
 	// buffered its body. Either a completed write or that exact remote reset
 	// is expected; GoAway and the view cause are checked separately.
-	_, err := p.out.Write(wire)
+	_, err := p.out.Write(raw)
 	if err != nil {
 		reset, ok := errors.AsType[*quic.StreamError](err)
 		if !ok || !reset.Remote || uint64(reset.ErrorCode) != 22 {
@@ -125,11 +125,11 @@ func pbHello(selectors ...uint64) *pb.Control {
 	return &pb.Control{Message: &pb.Control_Hello{Hello: &pb.Hello{Selectors: selectors}}}
 }
 
-func pbGoAway(code protocol.Code) *pb.Control {
+func pbGoAway(code wire.Code) *pb.Control {
 	return &pb.Control{Message: &pb.Control_GoAway{GoAway: &pb.GoAway{Code: code.Wire() >> 1}}}
 }
 
-func assertViewCause(t *testing.T, err error, code protocol.Code, remote bool) {
+func assertViewCause(t *testing.T, err error, code wire.Code, remote bool) {
 	t.Helper()
 	closed, ok := errors.AsType[*transport.ViewClosedError](err)
 	if !ok || closed.Code != code || closed.Remote != remote || !errors.Is(err, transport.ErrViewClosed) {
@@ -137,7 +137,7 @@ func assertViewCause(t *testing.T, err error, code protocol.Code, remote bool) {
 	}
 }
 
-func waitViewCause(t *testing.T, conn transport.Conn, code protocol.Code, remote bool) {
+func waitViewCause(t *testing.T, conn transport.Conn, code wire.Code, remote bool) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(t.Context(), time.Second)
 	defer cancel()
@@ -156,19 +156,19 @@ func waitViewCause(t *testing.T, conn transport.Conn, code protocol.Code, remote
 	}
 }
 
-func assertRawGoAway(t *testing.T, in *quic.ReceiveStream, code protocol.Code) {
+func assertRawGoAway(t *testing.T, in *quic.ReceiveStream, code wire.Code) {
 	t.Helper()
 	_ = in.SetReadDeadline(time.Now().Add(time.Second))
 	message, err := readControlFrame(in)
 	if err != nil || message.GetGoAway() == nil || message.GetGoAway().Code != code.Wire()>>1 {
 		t.Fatalf("GoAway = %v, %v; want %s", message, err, code)
 	}
-	if _, err := protocol.ReadFrame(in, maxControlFrame); !errors.Is(err, io.EOF) {
+	if _, err := wire.ReadFrame(in, maxControlFrame); !errors.Is(err, io.EOF) {
 		t.Fatalf("after GoAway = %v, want FIN", err)
 	}
 }
 
-func assertRawReadCancel(t *testing.T, out *quic.SendStream, code protocol.Code) {
+func assertRawReadCancel(t *testing.T, out *quic.SendStream, code wire.Code) {
 	t.Helper()
 	_ = out.SetWriteDeadline(time.Now().Add(time.Second))
 	_, err := out.Write(bytes.Repeat([]byte{0x42}, 1<<20))
@@ -181,8 +181,8 @@ func assertRawReadCancel(t *testing.T, out *quic.SendStream, code protocol.Code)
 func TestControlHelloExchangeAndSnapshot(t *testing.T) {
 	_, _, clientEth, _ := controlEndpoint(t)
 	serverShared, _, serverEth, serverPC := controlEndpoint(t)
-	clientHello := transport.Hello{Selectors: []protocol.Selector{1, 3}, Record: []byte{1, 2, 3}}
-	serverHello := transport.Hello{Selectors: []protocol.Selector{2, 4}, Record: []byte{4, 5}}
+	clientHello := transport.Hello{Selectors: []wire.Selector{1, 3}, Record: []byte{1, 2, 3}}
+	serverHello := transport.Hello{Selectors: []wire.Selector{2, 4}, Record: []byte{4, 5}}
 	if err := clientEth.SetHello(clientHello); err != nil {
 		t.Fatal(err)
 	}
@@ -202,10 +202,10 @@ func TestControlHelloExchangeAndSnapshot(t *testing.T) {
 	if server == nil {
 		t.Fatal("server did not accept")
 	}
-	if err := clientEth.SetHello(transport.Hello{Selectors: []protocol.Selector{9}}); err != nil {
+	if err := clientEth.SetHello(transport.Hello{Selectors: []wire.Selector{9}}); err != nil {
 		t.Fatal(err)
 	}
-	if err := serverEth.SetHello(transport.Hello{Selectors: []protocol.Selector{10}}); err != nil {
+	if err := serverEth.SetHello(transport.Hello{Selectors: []wire.Selector{10}}); err != nil {
 		t.Fatal(err)
 	}
 	gotClient, err := client.PeerHello(ctx)
@@ -216,13 +216,13 @@ func TestControlHelloExchangeAndSnapshot(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !slices.Equal(gotClient.Selectors, []protocol.Selector{2, 4}) || !bytes.Equal(gotClient.Record, []byte{4, 5}) ||
-		!slices.Equal(gotServer.Selectors, []protocol.Selector{1, 3}) || !bytes.Equal(gotServer.Record, []byte{1, 2, 3}) {
+	if !slices.Equal(gotClient.Selectors, []wire.Selector{2, 4}) || !bytes.Equal(gotClient.Record, []byte{4, 5}) ||
+		!slices.Equal(gotServer.Selectors, []wire.Selector{1, 3}) || !bytes.Equal(gotServer.Record, []byte{1, 2, 3}) {
 		t.Fatalf("exchanged transport.Hello = client %+v, server %+v", gotClient, gotServer)
 	}
 	gotClient.Record[0], gotClient.Selectors[0] = 99, 99
 	again, err := client.PeerHello(ctx)
-	if err != nil || !bytes.Equal(again.Record, []byte{4, 5}) || !slices.Equal(again.Selectors, []protocol.Selector{2, 4}) {
+	if err != nil || !bytes.Equal(again.Record, []byte{4, 5}) || !slices.Equal(again.Selectors, []wire.Selector{2, 4}) {
 		t.Fatalf("PeerHello reused caller slices: %+v, %v", again, err)
 	}
 	go func() { conn, _ := serverEth.Accept(ctx); accepted <- conn }()
@@ -239,7 +239,7 @@ func TestControlHelloExchangeAndSnapshot(t *testing.T) {
 		t.Fatal(err)
 	}
 	nextFromClient, err := nextServer.PeerHello(ctx)
-	if err != nil || !slices.Equal(nextFromServer.Selectors, []protocol.Selector{10}) || !slices.Equal(nextFromClient.Selectors, []protocol.Selector{9}) {
+	if err != nil || !slices.Equal(nextFromServer.Selectors, []wire.Selector{10}) || !slices.Equal(nextFromClient.Selectors, []wire.Selector{9}) {
 		t.Fatalf("next view transport.Hello = client %+v, server %+v, err %v", nextFromServer, nextFromClient, err)
 	}
 	_ = nextClient.Close()
@@ -249,7 +249,7 @@ func TestControlHelloExchangeAndSnapshot(t *testing.T) {
 }
 
 func TestControlViolations(t *testing.T) {
-	tooMany := make([]uint64, protocol.MaxSelectors+1)
+	tooMany := make([]uint64, wire.MaxSelectors+1)
 	for i := range tooMany {
 		tooMany[i] = uint64(i + 1)
 	}
@@ -260,18 +260,18 @@ func TestControlViolations(t *testing.T) {
 		{"descending", controlWire(t, pbHello(2, 1))},
 		{"zero", controlWire(t, pbHello(0))},
 		{"too many", controlWire(t, pbHello(tooMany...))},
-		{"oversize", protocol.AppendFrame(nil, bytes.Repeat([]byte{0}, maxControlFrame+1))},
-		{"malformed protobuf", protocol.AppendFrame(nil, []byte{0xff})},
-		{"first GoAway", controlWire(t, pbGoAway(protocol.Refused))},
+		{"oversize", wire.AppendFrame(nil, bytes.Repeat([]byte{0}, maxControlFrame+1))},
+		{"malformed protobuf", wire.AppendFrame(nil, []byte{0xff})},
+		{"first GoAway", controlWire(t, pbGoAway(wire.Refused))},
 		{"first unset", controlWire(t, &pb.Control{})},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			p := newRawControlPeer(t)
 			p.writeViolation(t, test.wire)
-			assertRawGoAway(t, p.in, protocol.ControlViolation)
-			assertRawReadCancel(t, p.out, protocol.ControlViolation)
-			waitViewCause(t, p.server, protocol.ControlViolation, false)
+			assertRawGoAway(t, p.in, wire.ControlViolation)
+			assertRawReadCancel(t, p.out, wire.ControlViolation)
+			waitViewCause(t, p.server, wire.ControlViolation, false)
 		})
 	}
 	for _, test := range []string{"second transport.Hello", "second control", "bidirectional control"} {
@@ -289,13 +289,13 @@ func TestControlViolations(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				if err := protocol.WriteSelector(second, 0); err != nil {
+				if err := wire.WriteSelector(second, 0); err != nil {
 					t.Fatal(err)
 				}
 				_ = second.SetWriteDeadline(time.Now().Add(time.Second))
 				_, err = second.Write(bytes.Repeat([]byte{0xa5}, 1<<20))
 				reset, ok := errors.AsType[*quic.StreamError](err)
-				if !ok || !reset.Remote || uint64(reset.ErrorCode) != protocol.ControlViolation.Wire() {
+				if !ok || !reset.Remote || uint64(reset.ErrorCode) != wire.ControlViolation.Wire() {
 					t.Fatalf("second control reset = %v, want remote wire 22", err)
 				}
 			case "bidirectional control":
@@ -303,13 +303,13 @@ func TestControlViolations(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				if err := protocol.WriteSelector(stream, 0); err != nil {
+				if err := wire.WriteSelector(stream, 0); err != nil {
 					t.Fatal(err)
 				}
 				var one [1]byte
 				_, err = stream.Read(one[:])
 				reset, ok := errors.AsType[*quic.StreamError](err)
-				if !ok || !reset.Remote || uint64(reset.ErrorCode) != protocol.ControlViolation.Wire() {
+				if !ok || !reset.Remote || uint64(reset.ErrorCode) != wire.ControlViolation.Wire() {
 					t.Fatalf("bidi reset = %v, want remote wire 22", err)
 				}
 				_ = stream.SetWriteDeadline(time.Now().Add(time.Second))
@@ -319,20 +319,20 @@ func TestControlViolations(t *testing.T) {
 					t.Fatalf("bidi read cancellation = %v, want remote wire 22", err)
 				}
 			}
-			assertRawGoAway(t, p.in, protocol.ControlViolation)
-			assertRawReadCancel(t, p.out, protocol.ControlViolation)
-			waitViewCause(t, p.server, protocol.ControlViolation, false)
+			assertRawGoAway(t, p.in, wire.ControlViolation)
+			assertRawReadCancel(t, p.out, wire.ControlViolation)
+			waitViewCause(t, p.server, wire.ControlViolation, false)
 		})
 	}
 }
 
 func controlWire(t *testing.T, message *pb.Control) []byte {
 	t.Helper()
-	wire, err := proto.Marshal(message)
+	raw, err := proto.Marshal(message)
 	if err != nil {
 		t.Fatal(err)
 	}
-	return protocol.AppendFrame(nil, wire)
+	return wire.AppendFrame(nil, raw)
 }
 
 func TestControlTimeoutAndPeerClosure(t *testing.T) {
@@ -340,26 +340,26 @@ func TestControlTimeoutAndPeerClosure(t *testing.T) {
 		t.Run(test, func(t *testing.T) {
 			transport.ShortenHelloTimeout(t, 100*time.Millisecond)
 			p := newRawControlPeerWithStream(t, test == "empty stream")
-			assertRawGoAway(t, p.in, protocol.ControlViolation)
+			assertRawGoAway(t, p.in, wire.ControlViolation)
 			if p.out != nil {
-				assertRawReadCancel(t, p.out, protocol.ControlViolation)
+				assertRawReadCancel(t, p.out, wire.ControlViolation)
 			}
-			waitViewCause(t, p.server, protocol.ControlViolation, false)
+			waitViewCause(t, p.server, wire.ControlViolation, false)
 		})
 	}
 	for _, test := range []struct {
 		name   string
 		end    func(rawControlPeer)
-		want   protocol.Code
+		want   wire.Code
 		remote bool
 	}{
-		{"GoAway", func(p rawControlPeer) { p.write(t, pbGoAway(protocol.Refused)) }, protocol.Refused, true},
+		{"GoAway", func(p rawControlPeer) { p.write(t, pbGoAway(wire.Refused)) }, wire.Refused, true},
 		{"unknown GoAway", func(p rawControlPeer) {
 			p.write(t, &pb.Control{Message: &pb.Control_GoAway{GoAway: &pb.GoAway{Code: math.MaxUint64}}})
-		}, protocol.Unspecified, true},
-		{"FIN", func(p rawControlPeer) { _ = p.out.Close() }, protocol.Unspecified, true},
-		{"stack reset", func(p rawControlPeer) { p.out.CancelWrite(controlQuicCode(protocol.Duplicate)) }, protocol.Duplicate, true},
-		{"protocol reset", func(p rawControlPeer) { p.out.CancelWrite(quic.StreamErrorCode(23)) }, protocol.ControlViolation, false},
+		}, wire.Unspecified, true},
+		{"FIN", func(p rawControlPeer) { _ = p.out.Close() }, wire.Unspecified, true},
+		{"stack reset", func(p rawControlPeer) { p.out.CancelWrite(controlQuicCode(wire.Duplicate)) }, wire.Duplicate, true},
+		{"protocol reset", func(p rawControlPeer) { p.out.CancelWrite(quic.StreamErrorCode(23)) }, wire.ControlViolation, false},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			p := newRawControlPeer(t)
@@ -370,11 +370,11 @@ func TestControlTimeoutAndPeerClosure(t *testing.T) {
 			test.end(p)
 			if test.remote {
 				_ = p.in.SetReadDeadline(time.Now().Add(time.Second))
-				if _, err := protocol.ReadFrame(p.in, maxControlFrame); !errors.Is(err, io.EOF) {
+				if _, err := wire.ReadFrame(p.in, maxControlFrame); !errors.Is(err, io.EOF) {
 					t.Fatalf("peer closure reply = %v, want FIN", err)
 				}
 			} else {
-				assertRawGoAway(t, p.in, protocol.ControlViolation)
+				assertRawGoAway(t, p.in, wire.ControlViolation)
 			}
 			waitViewCause(t, p.server, test.want, test.remote)
 			if _, _, err := p.server.AcceptStream(controlContext(t)); err == nil {
@@ -398,12 +398,12 @@ func TestControlUnknownMessagesIgnored(t *testing.T) {
 		t.Fatal(err)
 	}
 	p.write(t, &pb.Control{})
-	p.writeBytes(t, protocol.AppendFrame(nil, []byte{0x1a, 0}))
+	p.writeBytes(t, wire.AppendFrame(nil, []byte{0x1a, 0}))
 	out, err := p.raw.OpenUniStream()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := protocol.WriteSelector(out, 1); err != nil {
+	if err := wire.WriteSelector(out, 1); err != nil {
 		t.Fatal(err)
 	}
 	in, selector, err := p.server.AcceptUniStream(controlContext(t))
@@ -412,32 +412,32 @@ func TestControlUnknownMessagesIgnored(t *testing.T) {
 	}
 	in.CancelRead(0)
 	// A later control frame proves the reader processed both ignored messages.
-	p.write(t, pbGoAway(protocol.Refused))
-	waitViewCause(t, p.server, protocol.Refused, true)
+	p.write(t, pbGoAway(wire.Refused))
+	waitViewCause(t, p.server, wire.Refused, true)
 }
 
 func TestControlRejectsInvalidLaterFrame(t *testing.T) {
-	for _, wire := range [][]byte{protocol.AppendFrame(nil, []byte{0xff}), protocol.AppendFrame(nil, make([]byte, maxControlFrame+1))} {
+	for _, raw := range [][]byte{wire.AppendFrame(nil, []byte{0xff}), wire.AppendFrame(nil, make([]byte, maxControlFrame+1))} {
 		p := newRawControlPeer(t)
 		p.write(t, pbHello(1))
 		if _, err := p.server.PeerHello(controlContext(t)); err != nil {
 			t.Fatal(err)
 		}
-		p.writeViolation(t, wire)
-		assertRawGoAway(t, p.in, protocol.ControlViolation)
-		assertRawReadCancel(t, p.out, protocol.ControlViolation)
-		waitViewCause(t, p.server, protocol.ControlViolation, false)
+		p.writeViolation(t, raw)
+		assertRawGoAway(t, p.in, wire.ControlViolation)
+		assertRawReadCancel(t, p.out, wire.ControlViolation)
+		waitViewCause(t, p.server, wire.ControlViolation, false)
 	}
 }
 
 func TestControlImmediateCloseSendsHelloFirst(t *testing.T) {
 	for range 30 {
 		pair := controlViewPair(t)
-		if err := pair.clientEth.CloseWithCode(protocol.Duplicate); err != nil {
+		if err := pair.clientEth.CloseWithCode(wire.Duplicate); err != nil {
 			t.Fatal(err)
 		}
-		waitViewCause(t, pair.clientEth, protocol.Duplicate, false)
-		waitViewCause(t, pair.serverEth, protocol.Duplicate, true)
+		waitViewCause(t, pair.clientEth, wire.Duplicate, false)
+		waitViewCause(t, pair.serverEth, wire.Duplicate, true)
 	}
 }
 
@@ -452,24 +452,24 @@ func TestControlHelloTimeoutWhileOutboundWriteBlocked(t *testing.T) {
 	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
 	defer cancel()
 	_, err := p.server.PeerHello(ctx)
-	assertViewCause(t, err, protocol.ControlViolation, false)
-	assertRawReadCancel(t, p.out, protocol.ControlViolation)
+	assertViewCause(t, err, wire.ControlViolation, false)
+	assertRawReadCancel(t, p.out, wire.ControlViolation)
 }
 
 func TestControlHelloWriteFailureClosesView(t *testing.T) {
 	p := newRawControlPeerConfigured(t, true,
 		transport.Hello{Record: make([]byte, maxControlFrame-32)},
 		&quic.Config{InitialStreamReceiveWindow: 1, MaxStreamReceiveWindow: 1}, false)
-	p.in.CancelRead(quic.StreamErrorCode(protocol.Refused.Wire()))
-	waitViewCause(t, p.server, protocol.Unspecified, false)
-	assertRawReadCancel(t, p.out, protocol.Closing)
+	p.in.CancelRead(quic.StreamErrorCode(wire.Refused.Wire()))
+	waitViewCause(t, p.server, wire.Unspecified, false)
+	assertRawReadCancel(t, p.out, wire.Closing)
 }
 
 func TestControlOverloadDoesNotBlockOtherConnections(t *testing.T) {
 	endpoint := transporttest.NewEndpoint(t)
-	selectors := make([]protocol.Selector, protocol.MaxSelectors)
+	selectors := make([]wire.Selector, wire.MaxSelectors)
 	for i := range selectors {
-		selectors[i] = protocol.Selector(1<<56) + protocol.Selector(i)
+		selectors[i] = wire.Selector(1<<56) + wire.Selector(i)
 	}
 	if err := endpoint.Eth.SetHello(transport.Hello{Selectors: selectors}); err != nil {
 		t.Fatal(err)
@@ -489,9 +489,9 @@ func TestControlOverloadDoesNotBlockOtherConnections(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		wire := protocol.AppendFrame(nil, []byte{0})
-		wire = append(wire, controlWire(t, pbHello(1))...)
-		if _, err := out.Write(wire); err != nil {
+		frames := wire.AppendFrame(nil, []byte{0})
+		frames = append(frames, controlWire(t, pbHello(1))...)
+		if _, err := out.Write(frames); err != nil {
 			t.Fatal(err)
 		}
 		return raw
@@ -504,7 +504,7 @@ func TestControlOverloadDoesNotBlockOtherConnections(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if selector, err := protocol.ReadSelector(in); err != nil || selector != protocol.ControlSelector {
+		if selector, err := wire.ReadSelector(in); err != nil || selector != wire.ControlSelector {
 			t.Fatalf("control selector = %d, %v", selector, err)
 		}
 		if message, err := readControlFrame(in); err != nil || message.GetHello() == nil {
@@ -543,14 +543,14 @@ func TestControlOverloadDoesNotBlockOtherConnections(t *testing.T) {
 	if blockedView.RemoteAddr().String() != blocked.LocalAddr().String() || normalView.RemoteAddr().String() != normal.LocalAddr().String() {
 		t.Fatal("listener delivered unexpected peers")
 	}
-	transport.AssertEthp2pViewClosed(t, blockedView, protocol.Overloaded, false)
+	transport.AssertEthp2pViewClosed(t, blockedView, wire.Overloaded, false)
 	// Prove the rejected connection still carries libp2p traffic after the
 	// ethp2p release, without reading its blocked outbound control stream.
 	out, err := blocked.OpenStreamSync(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := protocol.AppendFrame(nil, []byte("/multistream/1.0.0\n"))
+	want := wire.AppendFrame(nil, []byte("/multistream/1.0.0\n"))
 	if _, err := out.Write(want); err != nil {
 		t.Fatal(err)
 	}
@@ -576,7 +576,7 @@ func TestControlEarlyStreamWaitsForHello(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := protocol.WriteSelector(bi, 2); err != nil {
+	if err := wire.WriteSelector(bi, 2); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := bi.Write([]byte("early bidi")); err != nil {
@@ -587,7 +587,7 @@ func TestControlEarlyStreamWaitsForHello(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := protocol.WriteSelector(out, 1); err != nil {
+	if err := wire.WriteSelector(out, 1); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := out.Write([]byte("before transport.Hello")); err != nil {
@@ -626,11 +626,11 @@ func TestControlEarlyStreamWaitsForHello(t *testing.T) {
 func TestCloseWithCodeSendsGoAwayAndIsIdempotent(t *testing.T) {
 	for _, test := range []struct {
 		name  string
-		code  protocol.Code
+		code  wire.Code
 		close func(transport.Conn) error
 	}{
-		{"Close", protocol.Closing, func(c transport.Conn) error { return c.Close() }},
-		{"CloseWithCode", protocol.Duplicate, func(c transport.Conn) error { return c.CloseWithCode(protocol.Duplicate) }},
+		{"Close", wire.Closing, func(c transport.Conn) error { return c.Close() }},
+		{"CloseWithCode", wire.Duplicate, func(c transport.Conn) error { return c.CloseWithCode(wire.Duplicate) }},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			pair := controlViewPair(t)
@@ -642,7 +642,7 @@ func TestCloseWithCodeSendsGoAwayAndIsIdempotent(t *testing.T) {
 			}
 			waitViewCause(t, pair.clientEth, test.code, false)
 			waitViewCause(t, pair.serverEth, test.code, true)
-			if err := pair.clientEth.CloseWithCode(protocol.Refused); err != nil {
+			if err := pair.clientEth.CloseWithCode(wire.Refused); err != nil {
 				t.Fatal(err)
 			}
 			waitViewCause(t, pair.clientEth, test.code, false)
@@ -692,18 +692,18 @@ func TestSetHelloAndDialPreconditions(t *testing.T) {
 	if _, err := eth.Dial(controlContext(t), packet.LocalAddr(), ""); !errors.Is(err, transport.ErrNoHello) {
 		t.Fatalf("Dial before SetHello = %v", err)
 	}
-	for _, selectors := range [][]protocol.Selector{{2, 1}, {0}, make([]protocol.Selector, protocol.MaxSelectors+1)} {
+	for _, selectors := range [][]wire.Selector{{2, 1}, {0}, make([]wire.Selector, wire.MaxSelectors+1)} {
 		if err := eth.SetHello(transport.Hello{Selectors: selectors}); err == nil {
 			t.Fatalf("SetHello accepted %d invalid selectors", len(selectors))
 		}
 	}
-	if err := eth.SetHello(transport.Hello{Record: bytes.Repeat([]byte{0}, maxControlFrame+1)}); !errors.Is(err, protocol.ErrFrameTooLarge) {
+	if err := eth.SetHello(transport.Hello{Record: bytes.Repeat([]byte{0}, maxControlFrame+1)}); !errors.Is(err, wire.ErrFrameTooLarge) {
 		t.Fatalf("oversized transport.Hello = %v", err)
 	}
 	if _, err := eth.Dial(controlContext(t), packet.LocalAddr(), ""); !errors.Is(err, transport.ErrNoHello) {
 		t.Fatalf("invalid Hello registered interest: %v", err)
 	}
-	if err := eth.SetHello(transport.Hello{Selectors: []protocol.Selector{1}}); err != nil {
+	if err := eth.SetHello(transport.Hello{Selectors: []wire.Selector{1}}); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -847,17 +847,17 @@ func dialRawControl(t *testing.T, ctx context.Context, addr net.Addr, remote tra
 }
 
 func readControlFrame(in *quic.ReceiveStream) (*pb.Control, error) {
-	wire, err := protocol.ReadFrame(in, maxControlFrame)
+	raw, err := wire.ReadFrame(in, maxControlFrame)
 	if err != nil {
 		return nil, err
 	}
 	var message pb.Control
-	if err := proto.Unmarshal(wire, &message); err != nil {
+	if err := proto.Unmarshal(raw, &message); err != nil {
 		return nil, err
 	}
 	return &message, nil
 }
 
-func controlQuicCode(code protocol.Code) quic.StreamErrorCode {
+func controlQuicCode(code wire.Code) quic.StreamErrorCode {
 	return quic.StreamErrorCode(code.Wire())
 }

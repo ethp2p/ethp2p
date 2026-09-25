@@ -5,7 +5,7 @@ import (
 	"errors"
 	"net"
 
-	"github.com/ethp2p/ethp2p/protocol"
+	"github.com/ethp2p/ethp2p/wire"
 )
 
 // Sink receives ethp2p views after Bind. Calls run in transport-owned
@@ -16,12 +16,12 @@ type Sink interface {
 	// Admit decides whether to admit a view whose peer Hello has arrived,
 	// at most once per view.
 	// A rejection closes it with code; Stream and Closed are never called for it.
-	Admit(conn Conn, hello Hello) (code protocol.Code, ok bool)
+	Admit(conn Conn, hello Hello) (code wire.Code, ok bool)
 	// Stream transfers ownership of a classified stream from an admitted view.
 	// Bidirectional streams also implement Stream.
-	Stream(conn Conn, sel protocol.Selector, s ReceiveStream)
+	Stream(conn Conn, sel wire.Selector, s ReceiveStream)
 	// Closed reports exactly once that an admitted view was released.
-	Closed(conn Conn, code protocol.Code)
+	Closed(conn Conn, code wire.Code)
 }
 
 // PeerID returns this endpoint's authenticated identity.
@@ -99,13 +99,13 @@ func (t *SharedTransport) pump(c *ethp2pConn, sink Sink) {
 	}
 	cancel()
 	err := ethp2pError(errors.Join(context.Cause(c.ethp2pCtx), uniErr, <-done))
-	code := protocol.Unspecified
+	code := wire.Unspecified
 	if closed, ok := errors.AsType[*ViewClosedError](err); ok {
 		code = closed.Code
 	} else if t.ctx.Err() != nil {
-		code = protocol.Closing
+		code = wire.Closing
 	} else if timeout, ok := errors.AsType[net.Error](err); ok && timeout.Timeout() {
-		code = protocol.Timeout
+		code = wire.Timeout
 	}
 	_ = c.Close()
 	sink.Closed(c, code)

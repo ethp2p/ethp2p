@@ -7,7 +7,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/ethp2p/ethp2p/protocol"
+	"github.com/ethp2p/ethp2p/wire"
 	"github.com/ethp2p/ethp2p/transport"
 )
 
@@ -312,11 +312,11 @@ func (tr *Channel[CI, R, P]) handleChunk(e channelChunkStream) {
 	// all credit that the SESS itself needs, both per message and per peer.
 	buf := tr.parked[messageID]
 	if len(buf) >= maxParkedChunks {
-		e.stream.CancelRead(protocol.Overloaded)
+		e.stream.CancelRead(wire.Overloaded)
 		return
 	}
 	if held, ok := e.stream.(*heldChunk); ok && !held.move(chunkParked) {
-		e.stream.CancelRead(protocol.Overloaded)
+		e.stream.CancelRead(wire.Overloaded)
 		return
 	}
 	tr.parked[messageID] = append(buf, e)
@@ -329,7 +329,7 @@ func (tr *Channel[CI, R, P]) handleSessionOpen(e channelSessionOpen) {
 	}
 	var lease *sessionLease
 	if e.peer != nil {
-		var code protocol.Code
+		var code wire.Code
 		lease, code = e.peer.reserveSession(tr.delivery)
 		if lease == nil {
 			e.stream.CancelRead(code)
@@ -361,7 +361,7 @@ func (tr *Channel[CI, R, P]) handlePeerUnbound(e channelPeerChange) {
 		kept := chunks[:0]
 		for _, chunk := range chunks {
 			if chunk.peerID == e.peerID {
-				chunk.stream.CancelRead(protocol.Unspecified)
+				chunk.stream.CancelRead(wire.Unspecified)
 			} else {
 				kept = append(kept, chunk)
 			}
@@ -532,11 +532,11 @@ func (tr *Channel[CI, R, P]) disposeSession(messageID MessageID, reason string) 
 		return
 	}
 	delete(tr.sessions, messageID)
-	code := protocol.Unspecified
+	code := wire.Unspecified
 	if sess.stage >= stageDecoding {
 		code = Redundant
 	} else if reason == "ttl_expired" {
-		code = protocol.Refused
+		code = wire.Refused
 	}
 	for _, chunk := range tr.parked[messageID] {
 		chunk.stream.CancelRead(code)
@@ -560,7 +560,7 @@ func (tr *Channel[CI, R, P]) cleanup() {
 			// pending stream groups. For now, cancel all streams and
 			// drop the group unconditionally on GC tick.
 			for _, c := range chunks {
-				c.stream.CancelRead(protocol.Refused)
+				c.stream.CancelRead(wire.Refused)
 			}
 			delete(tr.parked, mid)
 		}
@@ -575,7 +575,7 @@ func (tr *Channel[CI, R, P]) shutdown() {
 	// Cancel all parked chunk streams.
 	for _, chunks := range tr.parked {
 		for _, c := range chunks {
-			c.stream.CancelRead(protocol.Unspecified)
+			c.stream.CancelRead(wire.Unspecified)
 		}
 	}
 	tr.watchWg.Wait()

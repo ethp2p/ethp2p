@@ -2,7 +2,7 @@ package broadcast
 
 import (
 	ethp2p "github.com/ethp2p/ethp2p"
-	"github.com/ethp2p/ethp2p/protocol"
+	"github.com/ethp2p/ethp2p/wire"
 )
 
 type chunkHolding uint8
@@ -36,7 +36,7 @@ func (p *PeerConn) holdChunk(stream ethp2p.ReceiveStream, delivery *channelDeliv
 	closed := p.ctx.Err() != nil
 	p.chunkMu.Unlock()
 	if closed {
-		h.CancelRead(protocol.Unspecified)
+		h.CancelRead(wire.Unspecified)
 	}
 	return h
 }
@@ -92,7 +92,7 @@ func (h *heldChunk) release() {
 	}
 }
 
-func (h *heldChunk) CancelRead(code protocol.Code) {
+func (h *heldChunk) CancelRead(code wire.Code) {
 	h.ReceiveStream.CancelRead(code)
 	h.release()
 }
@@ -105,6 +105,6 @@ func (p *PeerConn) cancelHeldChunks() {
 	}
 	p.chunkMu.Unlock()
 	for _, h := range held {
-		h.CancelRead(protocol.Unspecified)
+		h.CancelRead(wire.Unspecified)
 	}
 }

@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/ethp2p/ethp2p/protocol"
+	"github.com/ethp2p/ethp2p/wire"
 	"github.com/quic-go/quic-go"
 )
 
@@ -15,18 +15,18 @@ func TestConnectionCloseCode(t *testing.T) {
 	for _, test := range []struct {
 		wire   uint64
 		mapped bool
-		want   protocol.Code
+		want   wire.Code
 	}{
-		{0, true, protocol.Unspecified},
-		{2, true, protocol.Refused},
-		{20, true, protocol.Closing},
-		{22, true, protocol.ControlViolation},
-		{24, true, protocol.NoSharedProtocols},
-		{26, true, protocol.Duplicate},
-		{1, false, protocol.Unspecified},
-		{3, false, protocol.Unspecified},
-		{8, false, protocol.Unspecified},
-		{1 << 40, false, protocol.Unspecified},
+		{0, true, wire.Unspecified},
+		{2, true, wire.Refused},
+		{20, true, wire.Closing},
+		{22, true, wire.ControlViolation},
+		{24, true, wire.NoSharedProtocols},
+		{26, true, wire.Duplicate},
+		{1, false, wire.Unspecified},
+		{3, false, wire.Unspecified},
+		{8, false, wire.Unspecified},
+		{1 << 40, false, wire.Unspecified},
 	} {
 		t.Run(fmt.Sprint(test.wire), func(t *testing.T) {
 			client, eth, _ := newEthp2pEndpoint(t)
@@ -74,7 +74,7 @@ func TestConnectionCloseCode(t *testing.T) {
 }
 
 func TestViewCloseConnectionWireCode(t *testing.T) {
-	for _, code := range []protocol.Code{protocol.Unspecified, protocol.Closing, protocol.ControlViolation, protocol.NoSharedProtocols, protocol.Duplicate} {
+	for _, code := range []wire.Code{wire.Unspecified, wire.Closing, wire.ControlViolation, wire.NoSharedProtocols, wire.Duplicate} {
 		t.Run(code.String(), func(t *testing.T) {
 			p := newViewPair(t, 16)
 			if _, err := p.serverEth.PeerHello(t.Context()); err != nil {
@@ -108,14 +108,14 @@ func TestLibp2pLastClosePreservesGoAway(t *testing.T) {
 	if _, err := p.serverEth.PeerHello(t.Context()); err != nil {
 		t.Fatal(err)
 	}
-	if err := p.clientEth.CloseWithCode(protocol.Refused); err != nil {
+	if err := p.clientEth.CloseWithCode(wire.Refused); err != nil {
 		t.Fatal(err)
 	}
 	ctx, cancel := context.WithTimeout(t.Context(), 3*time.Second)
 	defer cancel()
 	_, _, err := p.serverEth.AcceptUniStream(ctx)
 	view, ok := errors.AsType[*ViewClosedError](err)
-	if !ok || view.Code != protocol.Refused {
+	if !ok || view.Code != wire.Refused {
 		t.Fatalf("GoAway = %v", err)
 	}
 	_ = p.clientLib.CloseWithError(appNoError, "release libp2p last")
@@ -131,7 +131,7 @@ func TestLibp2pLastClosePreservesGoAway(t *testing.T) {
 	}
 	_, err = p.serverEth.PeerHello(ctx)
 	view, ok = errors.AsType[*ViewClosedError](err)
-	if !ok || view.Code != protocol.Refused {
+	if !ok || view.Code != wire.Refused {
 		t.Fatalf("GoAway overwritten: %v", err)
 	}
 }

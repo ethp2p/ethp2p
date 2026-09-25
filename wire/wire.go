@@ -1,4 +1,4 @@
-package protocol
+package wire
 
 import (
 	"encoding/binary"
@@ -96,9 +96,9 @@ func (c Code) Wire() uint64 {
 // ParseCode decodes a received QUIC application error code on a stream with
 // selector sel. Protocol-namespace values remain bound to sel. Unknown stack
 // values decode as [Unspecified].
-func ParseCode(sel Selector, wire uint64) Code {
-	value := wire >> 1
-	if wire&1 != 0 {
+func ParseCode(sel Selector, raw uint64) Code {
+	value := raw >> 1
+	if raw&1 != 0 {
 		return Code{selector: sel, value: value, protocol: true}
 	}
 	switch value {

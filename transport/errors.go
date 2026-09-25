@@ -4,7 +4,7 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/ethp2p/ethp2p/protocol"
+	"github.com/ethp2p/ethp2p/wire"
 	"github.com/quic-go/quic-go"
 )
 
@@ -53,9 +53,9 @@ func ethp2pError(err error) error {
 	if !ok || !app.Remote || uint64(app.ErrorCode)&1 != 0 {
 		return err
 	}
-	wire := uint64(app.ErrorCode)
-	code := protocol.ParseCode(0, wire)
-	if code.Wire() != wire {
+	raw := uint64(app.ErrorCode)
+	code := wire.ParseCode(0, raw)
+	if code.Wire() != raw {
 		return err
 	}
 	return &ViewClosedError{Code: code, Remote: true}

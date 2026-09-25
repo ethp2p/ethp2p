@@ -4,7 +4,7 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/ethp2p/ethp2p/protocol"
+	"github.com/ethp2p/ethp2p/wire"
 	"github.com/ethp2p/ethp2p/transport"
 	"github.com/ethp2p/ethp2p/transport/transporttest"
 )
@@ -33,7 +33,7 @@ func TestPureEthp2pCloseCode(t *testing.T) {
 			}
 			for _, sub := range []*Subsystem{ls, rs} {
 				e := awaitEvent(t, sub)
-				if e.Kind != PeerDown || e.Code != protocol.Closing {
+				if e.Kind != PeerDown || e.Code != wire.Closing {
 					t.Fatalf("down = %+v", e)
 				}
 			}
@@ -50,7 +50,7 @@ func TestPureEthp2pRejectionCode(t *testing.T) {
 	startTestStack(t, right)
 	err := left.Connect(t.Context(), b.Record(t, 1))
 	closed, ok := errors.AsType[*transport.ViewClosedError](err)
-	if !ok || closed.Code != protocol.NoSharedProtocols {
+	if !ok || closed.Code != wire.NoSharedProtocols {
 		t.Fatalf("rejection = %v", err)
 	}
 }

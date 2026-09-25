@@ -10,7 +10,7 @@ import (
 
 	"github.com/decred/dcrd/dcrec/secp256k1/v4"
 	"github.com/ethp2p/ethp2p/enr"
-	"github.com/ethp2p/ethp2p/protocol"
+	"github.com/ethp2p/ethp2p/wire"
 	"github.com/ethp2p/ethp2p/transport"
 	"github.com/ethp2p/ethp2p/transport/transporttest"
 	"github.com/quic-go/quic-go"
@@ -41,14 +41,14 @@ func TestSinkRoutingRefusedAndUnsupported(t *testing.T) {
 	pair := newTestPair(t)
 	s := newTestStack(t, pair.server)
 	accepted := registerTestSub(t, s, "accepted", selectorCommon)
-	refused, err := s.Register("refused", []protocol.Selector{selectorAlpha}, SubsystemConfig{Policy: func(*Peer) bool { return false }})
+	refused, err := s.Register("refused", []wire.Selector{selectorAlpha}, SubsystemConfig{Policy: func(*Peer) bool { return false }})
 	if err != nil {
 		t.Fatal(err)
 	}
 	pair.connect(t, nil, s)
 	awaitPeer(t, accepted)
 	for _, test := range []struct {
-		selector protocol.Selector
+		selector wire.Selector
 		wire     uint64
 	}{{selectorAlpha, 2}, {selectorGamma, 18}} {
 		stream, err := pair.clientConn.OpenStream(t.Context(), test.selector)
@@ -134,7 +134,7 @@ func TestConnectInspectionRecordsAndClose(t *testing.T) {
 	}
 	for _, sub := range []*Subsystem{ls, rs} {
 		e := awaitEvent(t, sub)
-		if e.Kind != PeerDown || e.Code != protocol.Closing || e.Peer.Context().Err() == nil {
+		if e.Kind != PeerDown || e.Code != wire.Closing || e.Peer.Context().Err() == nil {
 			t.Fatalf("down = %+v", e)
 		}
 	}
@@ -174,7 +174,7 @@ func TestConnectValidationAndRejection(t *testing.T) {
 	}
 	err = left.Connect(t.Context(), b.Record(t, 1))
 	closed, ok := errors.AsType[*transport.ViewClosedError](err)
-	if !ok || closed.Code != protocol.NoSharedProtocols {
+	if !ok || closed.Code != wire.NoSharedProtocols {
 		t.Fatalf("no shared = %v", err)
 	}
 	c := transporttest.NewEndpoint(t)
@@ -247,7 +247,7 @@ func TestSimultaneousConnectConverges(t *testing.T) {
 	entered := make(chan struct{}, 4)
 	policy := func(*Peer) bool { entered <- struct{}{}; <-gate; return true }
 	for _, s := range []*Stack{left, right} {
-		if _, err := s.Register("one", []protocol.Selector{1}, SubsystemConfig{Policy: policy}); err != nil {
+		if _, err := s.Register("one", []wire.Selector{1}, SubsystemConfig{Policy: policy}); err != nil {
 			t.Fatal(err)
 		}
 		startTestStack(t, s)
@@ -278,7 +278,7 @@ func TestDisconnectDuringAdmission(t *testing.T) {
 	a, b := transporttest.NewEndpoint(t), transporttest.NewEndpoint(t)
 	left, right := newTestStack(t, a), newTestStack(t, b)
 	entered, release := make(chan struct{}), make(chan struct{})
-	_, err := left.Register("blocked", []protocol.Selector{1}, SubsystemConfig{Policy: func(*Peer) bool { _ = left.Connections(); close(entered); <-release; return true }})
+	_, err := left.Register("blocked", []wire.Selector{1}, SubsystemConfig{Policy: func(*Peer) bool { _ = left.Connections(); close(entered); <-release; return true }})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -337,7 +337,7 @@ func TestRestartReplacesView(t *testing.T) {
 	startTestStack(t, next)
 	connectTest(t, next, a)
 	down, up := awaitEvent(t, sub), awaitEvent(t, sub)
-	if down.Kind != PeerDown || down.Code != protocol.Duplicate || down.Peer != old || up.Kind != PeerUp || up.Peer == old {
+	if down.Kind != PeerDown || down.Code != wire.Duplicate || down.Peer != old || up.Kind != PeerUp || up.Peer == old {
 		t.Fatalf("replacement = %+v then %+v", down, up)
 	}
 }
@@ -350,7 +350,7 @@ func TestHelloRecordMismatchRejected(t *testing.T) {
 	s := newTestStack(t, server)
 	sub := registerTestSub(t, s, "one", 1)
 	startTestStack(t, s)
-	if err := client.Eth.SetHello(transport.Hello{Selectors: []protocol.Selector{1}, Record: server.Record(t, 1).Encode()}); err != nil {
+	if err := client.Eth.SetHello(transport.Hello{Selectors: []wire.Selector{1}, Record: server.Record(t, 1).Encode()}); err != nil {
 		t.Fatal(err)
 	}
 	c, err := client.Eth.Dial(t.Context(), server.Shared.Addr(), server.Shared.PeerID())
@@ -361,7 +361,7 @@ func TestHelloRecordMismatchRejected(t *testing.T) {
 	defer cancel()
 	_, _, err = c.AcceptUniStream(ctx)
 	closed, ok := errors.AsType[*transport.ViewClosedError](err)
-	if !ok || closed.Code != protocol.ControlViolation || !closed.Remote {
+	if !ok || closed.Code != wire.ControlViolation || !closed.Remote {
 		t.Fatalf("record rejection = %v", err)
 	}
 	if _, ok := sub.Next(); ok {

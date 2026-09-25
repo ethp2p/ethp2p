@@ -4,11 +4,11 @@ import (
 	"testing"
 
 	ethp2p "github.com/ethp2p/ethp2p"
-	"github.com/ethp2p/ethp2p/protocol"
+	"github.com/ethp2p/ethp2p/wire"
 )
 
 func TestBroadcastSelectors(t *testing.T) {
-	selectors := []protocol.Selector{BCAST, SESS, CHUNK}
+	selectors := []wire.Selector{BCAST, SESS, CHUNK}
 	if !supportsBroadcastSelectors(selectors) {
 		t.Fatalf("broadcast selectors rejected: %v", selectors)
 	}
@@ -21,7 +21,7 @@ func TestBroadcastSelectors(t *testing.T) {
 }
 
 func TestBroadcastSelectorsRequireCompleteSet(t *testing.T) {
-	for _, selectors := range [][]protocol.Selector{
+	for _, selectors := range [][]wire.Selector{
 		{BCAST, SESS},
 		{BCAST, CHUNK},
 		{SESS, CHUNK},

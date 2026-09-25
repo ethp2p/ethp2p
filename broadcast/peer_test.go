@@ -10,7 +10,7 @@ import (
 	"time"
 
 	ethp2p "github.com/ethp2p/ethp2p"
-	"github.com/ethp2p/ethp2p/protocol"
+	"github.com/ethp2p/ethp2p/wire"
 	"github.com/ethp2p/ethp2p/transport"
 )
 
@@ -54,7 +54,7 @@ func TestHandshakeUsesAuthenticatedPeerIDs(t *testing.T) {
 			return
 		}
 		reader := bufio.NewReader(stream)
-		codepoint, err := protocol.ReadSelector(reader)
+		codepoint, err := wire.ReadSelector(reader)
 		if err != nil {
 			routeErr <- err
 			return
@@ -168,7 +168,7 @@ func TestBindContextUnblocksChunkBackpressure(t *testing.T) {
 func TestPeerEnqueueStreamRejectsFullQueuesAsOverloaded(t *testing.T) {
 	for _, test := range []struct {
 		name     string
-		selector protocol.Selector
+		selector wire.Selector
 	}{
 		{name: "session", selector: SESS},
 	} {
@@ -229,7 +229,7 @@ func (s *gateStream) Read([]byte) (int, error) {
 	return 0, io.EOF
 }
 
-func (s *gateStream) CancelRead(protocol.Code) {
+func (s *gateStream) CancelRead(wire.Code) {
 	s.cancelOnce.Do(func() { close(s.canceled) })
 }
 

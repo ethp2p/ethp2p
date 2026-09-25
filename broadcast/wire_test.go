@@ -8,7 +8,7 @@ import (
 	"testing"
 
 	bcastpb "github.com/ethp2p/ethp2p/broadcast/pb"
-	"github.com/ethp2p/ethp2p/protocol"
+	"github.com/ethp2p/ethp2p/wire"
 	"google.golang.org/protobuf/proto"
 )
 
@@ -35,7 +35,7 @@ func TestWriteFrameUsesProtocolFramingInOneWrite(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := protocol.AppendFrame(nil, payload)
+	want := wire.AppendFrame(nil, payload)
 	if !bytes.Equal(writer.Bytes(), want) {
 		t.Fatalf("frame = %x, want %x", writer.Bytes(), want)
 	}
@@ -44,15 +44,15 @@ func TestWriteFrameUsesProtocolFramingInOneWrite(t *testing.T) {
 func TestReadFrameLeavesChunkDataAfterHeader(t *testing.T) {
 	const chunk = "raw chunk bytes"
 	header := &bcastpb.Chunk_Header{Channel: "channel", DataLength: uint32(len(chunk))}
-	var wire bytes.Buffer
-	if err := WriteFrame(&wire, header); err != nil {
+	var raw bytes.Buffer
+	if err := WriteFrame(&raw, header); err != nil {
 		t.Fatalf("WriteFrame: %v", err)
 	}
-	if _, err := wire.WriteString(chunk); err != nil {
+	if _, err := raw.WriteString(chunk); err != nil {
 		t.Fatal(err)
 	}
 
-	reader := bytes.NewReader(wire.Bytes())
+	reader := bytes.NewReader(raw.Bytes())
 	var gotHeader bcastpb.Chunk_Header
 	if err := ReadFrame(reader, &gotHeader); err != nil {
 		t.Fatalf("ReadFrame: %v", err)
@@ -71,7 +71,7 @@ func TestReadFrameLeavesChunkDataAfterHeader(t *testing.T) {
 
 func TestReadFrameUsesProtocolOversizeSentinel(t *testing.T) {
 	prefix := binary.AppendUvarint(nil, uint64(MaxFrameSize+1))
-	if err := ReadFrame(bytes.NewReader(prefix), &bcastpb.Bcast{}); !errors.Is(err, protocol.ErrFrameTooLarge) {
-		t.Fatalf("ReadFrame oversized payload error = %v, want protocol.ErrFrameTooLarge", err)
+	if err := ReadFrame(bytes.NewReader(prefix), &bcastpb.Bcast{}); !errors.Is(err, wire.ErrFrameTooLarge) {
+		t.Fatalf("ReadFrame oversized payload error = %v, want wire.ErrFrameTooLarge", err)
 	}
 }

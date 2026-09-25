@@ -12,7 +12,7 @@ import (
 	ethp2p "github.com/ethp2p/ethp2p"
 	bcastpb "github.com/ethp2p/ethp2p/broadcast/pb"
 	"github.com/ethp2p/ethp2p/internal/ctxutil"
-	"github.com/ethp2p/ethp2p/protocol"
+	"github.com/ethp2p/ethp2p/wire"
 	"github.com/ethp2p/ethp2p/transport"
 )
 
@@ -23,7 +23,7 @@ const (
 )
 
 type uniStreamOpener interface {
-	OpenUniStream(context.Context, protocol.Selector) (ethp2p.SendStream, error)
+	OpenUniStream(context.Context, wire.Selector) (ethp2p.SendStream, error)
 }
 
 // PeerConn holds the broadcast state for one connected remote peer.
@@ -265,12 +265,12 @@ func (p *PeerConn) runChunkAcceptLoop() {
 // enqueueStream transfers an incoming stream from the root Stack adapter to
 // the stream-class loop. Unread CHUNK streams retain QUIC credit, bounding
 // that FIFO. SESS keeps a capacity bound because it depends on CHUNK progress.
-func (p *PeerConn) enqueueStream(selector protocol.Selector, stream ethp2p.ReceiveStream) {
+func (p *PeerConn) enqueueStream(selector wire.Selector, stream ethp2p.ReceiveStream) {
 	if stream == nil {
 		return
 	}
 	if p.ctx.Err() != nil {
-		stream.CancelRead(protocol.Unspecified)
+		stream.CancelRead(wire.Unspecified)
 		return
 	}
 	switch selector {
@@ -282,16 +282,16 @@ func (p *PeerConn) enqueueStream(selector protocol.Selector, stream ethp2p.Recei
 		select {
 		case p.sessionIn <- stream:
 		case <-p.ctx.Done():
-			stream.CancelRead(protocol.Unspecified)
+			stream.CancelRead(wire.Unspecified)
 		default:
-			stream.CancelRead(protocol.Overloaded)
+			stream.CancelRead(wire.Overloaded)
 		}
 	case CHUNK:
 		if !p.chunkIn.push(stream) {
-			stream.CancelRead(protocol.Unspecified)
+			stream.CancelRead(wire.Unspecified)
 		}
 	default:
-		stream.CancelRead(protocol.Refused)
+		stream.CancelRead(wire.Refused)
 	}
 }
 
@@ -300,7 +300,7 @@ func (p *PeerConn) disposeQueuedStreams() {
 	p.cancelHeldChunks()
 	p.lifecycle.close()
 	for _, stream := range p.chunkIn.close() {
-		stream.CancelRead(protocol.Unspecified)
+		stream.CancelRead(wire.Unspecified)
 	}
 	// Engine calls Close on the same actor that enqueues streams. Run only
 	// reports completion; draining here therefore cannot race a final enqueue.
@@ -309,7 +309,7 @@ func (p *PeerConn) disposeQueuedStreams() {
 			select {
 			case stream := <-streams:
 				if stream != nil {
-					stream.CancelRead(protocol.Unspecified)
+					stream.CancelRead(wire.Unspecified)
 				}
 			default:
 				streams = nil
@@ -378,7 +378,7 @@ func (p *PeerConn) handshake(ctx context.Context, ourChannels []ChannelID) (Prot
 	var response bcastpb.Bcast
 	var readErr error
 	var readFrameSucceeded bool
-	rejectionCode := protocol.Unspecified
+	rejectionCode := wire.Unspecified
 	select {
 	case incoming = <-p.bcastIn:
 		stop := ctxutil.OnCancel(ctx, func() { incoming.CancelRead(streamFailureCode(ctx.Err())) })
@@ -388,7 +388,7 @@ func (p *PeerConn) handshake(ctx context.Context, ourChannels []ChannelID) (Prot
 		if readErr != nil {
 			// No effect if the read failed, which already cancelled the stream;
 			// ends it for a malformed frame.
-			incoming.CancelRead(protocol.Unspecified)
+			incoming.CancelRead(wire.Unspecified)
 		}
 		if readErr == nil {
 			readErr = ctx.Err()
@@ -398,7 +398,7 @@ func (p *PeerConn) handshake(ctx context.Context, ourChannels []ChannelID) (Prot
 	}
 	if readErr == nil && response.GetPeerHandshake() == nil {
 		readErr = ErrUnexpectedMsgType
-		rejectionCode = protocol.Refused
+		rejectionCode = wire.Refused
 	}
 	if readErr != nil {
 		cancel()
@@ -409,13 +409,13 @@ func (p *PeerConn) handshake(ctx context.Context, ourChannels []ChannelID) (Prot
 	if err == nil {
 		peerVersion, err = validateProtocolVersion(response.GetPeerHandshake().Version)
 		if err != nil {
-			rejectionCode = protocol.Refused
+			rejectionCode = wire.Refused
 		}
 	}
 	if err != nil {
 		if written.stream != nil && written.err == nil {
 			code := rejectionCode
-			if code == protocol.Unspecified {
+			if code == wire.Unspecified {
 				code = streamFailureCode(readErr)
 				if readErr == nil {
 					code = streamFailureCode(written.err)
@@ -425,7 +425,7 @@ func (p *PeerConn) handshake(ctx context.Context, ourChannels []ChannelID) (Prot
 		}
 		if incoming != nil && readFrameSucceeded {
 			code := rejectionCode
-			if code == protocol.Unspecified {
+			if code == wire.Unspecified {
 				code = streamFailureCode(readErr)
 				if readErr == nil {
 					code = streamFailureCode(written.err)

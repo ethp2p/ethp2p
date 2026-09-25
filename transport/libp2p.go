@@ -5,7 +5,7 @@ import (
 	"crypto/tls"
 	"net"
 
-	"github.com/ethp2p/ethp2p/protocol"
+	"github.com/ethp2p/ethp2p/wire"
 	"github.com/libp2p/go-libp2p/p2p/transport/quicreuse"
 	"github.com/quic-go/quic-go"
 )
@@ -89,7 +89,7 @@ func (l *libp2pListener) Accept(ctx context.Context) (quicreuse.QUICConn, error)
 		closed := t.libDetached || t.ctx.Err() != nil
 		t.libMu.Unlock()
 		if closed {
-			_ = c.CloseWithError(quic.ApplicationErrorCode(protocol.Closing.Wire()), "listener closed")
+			_ = c.CloseWithError(quic.ApplicationErrorCode(wire.Closing.Wire()), "listener closed")
 			return nil, ErrClosed
 		}
 		return c, nil
@@ -128,7 +128,7 @@ func (c *libp2pConn) AcceptStream(ctx context.Context) (*quic.Stream, error) {
 	select {
 	case stream := <-c.libp2pBi:
 		if c.libp2pCtx.Err() != nil {
-			resetBi(stream, protocol.Closing)
+			resetBi(stream, wire.Closing)
 			return nil, context.Cause(c.libp2pCtx)
 		}
 		return stream, nil

@@ -8,7 +8,7 @@ import (
 	ethp2p "github.com/ethp2p/ethp2p"
 	bcastpb "github.com/ethp2p/ethp2p/broadcast/pb"
 	"github.com/ethp2p/ethp2p/internal/ctxutil"
-	"github.com/ethp2p/ethp2p/protocol"
+	"github.com/ethp2p/ethp2p/wire"
 )
 
 const chunkWriteTimeout = 5 * time.Second
@@ -48,7 +48,7 @@ func (p *PeerConn) runCtrlReader() {
 			stop()
 			// No effect if the read failed, which already cancelled the stream;
 			// ends it for a malformed frame.
-			p.ctrlIn.CancelRead(protocol.Unspecified)
+			p.ctrlIn.CancelRead(wire.Unspecified)
 			return
 		}
 		switch {
@@ -61,7 +61,7 @@ func (p *PeerConn) runCtrlReader() {
 			p.engine.onPeerUnsubscribed(p, channelID)
 
 		default:
-			p.ctrlIn.CancelRead(protocol.Refused)
+			p.ctrlIn.CancelRead(wire.Refused)
 			return
 		}
 	}
@@ -75,11 +75,11 @@ func (p *PeerConn) runCtrlLoop(slotCh chan<- slotUpdate) {
 	sessions := make(map[sessionKey]*peerSessionState)
 	defer func() {
 		if !p.ctrlOutEnded.Swap(true) {
-			p.ctrlOut.CancelWrite(protocol.Unspecified)
+			p.ctrlOut.CancelWrite(wire.Unspecified)
 		}
 		for _, session := range sessions {
 			if session.sessOut != nil {
-				session.sessOut.CancelWrite(protocol.Unspecified)
+				session.sessOut.CancelWrite(wire.Unspecified)
 			}
 		}
 	}()
@@ -222,7 +222,7 @@ func (p *PeerConn) handleSessionOpen(e peerOpenSession, sessions map[sessionKey]
 	select {
 	case slotCh <- slotUpdate{key: key, slot: e.chunkOutbox}:
 	case <-p.ctx.Done():
-		s.CancelWrite(protocol.Unspecified)
+		s.CancelWrite(wire.Unspecified)
 		ss.sessOut = nil
 	}
 }

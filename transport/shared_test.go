@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/ethp2p/ethp2p/protocol"
+	"github.com/ethp2p/ethp2p/wire"
 )
 
 // TestBidiReadReportsStreamReset exercises cancellation after classification,
@@ -290,7 +290,7 @@ func TestSimultaneousStreamsOnBothViews(t *testing.T) {
 			roundTrip(s, libWire)
 		})
 		wg.Go(func() {
-			s, err := clientEthConn.OpenStream(ctx, protocol.Selector(i+1))
+			s, err := clientEthConn.OpenStream(ctx, wire.Selector(i+1))
 			if err != nil {
 				fail(err)
 				return
@@ -306,7 +306,7 @@ func TestSimultaneousStreamsOnBothViews(t *testing.T) {
 			roundTrip(s, libWire)
 		})
 		wg.Go(func() {
-			s, err := serverEthConn.OpenStream(ctx, protocol.Selector(i+1))
+			s, err := serverEthConn.OpenStream(ctx, wire.Selector(i+1))
 			if err != nil {
 				fail(err)
 				return

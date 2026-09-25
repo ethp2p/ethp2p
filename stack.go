@@ -12,7 +12,7 @@ import (
 	"time"
 
 	"github.com/ethp2p/ethp2p/enr"
-	"github.com/ethp2p/ethp2p/protocol"
+	"github.com/ethp2p/ethp2p/wire"
 	"github.com/ethp2p/ethp2p/transport"
 )
 
@@ -48,7 +48,7 @@ type Stack struct {
 	serving        bool
 	closed         bool
 	subsystems     map[string]*Subsystem
-	selectors      map[protocol.Selector]*Subsystem
+	selectors      map[wire.Selector]*Subsystem
 	active         map[transport.PeerID]*stackView
 	unreleased     map[transport.Conn]*stackView
 	dials          map[transport.PeerID]*dialAttempt
@@ -61,7 +61,7 @@ type stackView struct {
 	conn     transport.Conn
 	info     ConnInfo
 	record   atomic.Pointer[enr.Record]
-	routes   map[protocol.Selector]*peerDelivery
+	routes   map[wire.Selector]*peerDelivery
 	cancels  []context.CancelFunc
 	peers    []*peerDelivery
 	released chan struct{}
@@ -108,8 +108,8 @@ func (s *Stack) Start() error {
 	return s.transport.Bind(hello, stackSink{s})
 }
 
-func (s *Stack) localSelectors() []protocol.Selector {
-	selectors := make([]protocol.Selector, 0, len(s.selectors))
+func (s *Stack) localSelectors() []wire.Selector {
+	selectors := make([]wire.Selector, 0, len(s.selectors))
 	for sel := range s.selectors {
 		selectors = append(selectors, sel)
 	}
@@ -117,7 +117,7 @@ func (s *Stack) localSelectors() []protocol.Selector {
 	return selectors
 }
 
-func (s *Stack) retire(v *stackView, code protocol.Code) {
+func (s *Stack) retire(v *stackView, code wire.Code) {
 	delete(s.active, v.info.Peer)
 	for _, cancel := range v.cancels {
 		cancel()
@@ -146,14 +146,14 @@ func (s *Stack) Disconnect(id transport.PeerID) error {
 	}
 	v := s.active[id]
 	if v != nil {
-		s.retire(v, protocol.Closing)
+		s.retire(v, wire.Closing)
 	}
 	s.cleanupGeneration(id)
 	s.mu.Unlock()
 	if v == nil {
 		return nil
 	}
-	err := v.conn.CloseWithCode(protocol.Closing)
+	err := v.conn.CloseWithCode(wire.Closing)
 	<-v.released
 	return err
 }
@@ -174,7 +174,7 @@ func (s *Stack) Close() error {
 	var active []*stackView
 	for _, v := range s.active {
 		active = append(active, v)
-		s.retire(v, protocol.Closing)
+		s.retire(v, wire.Closing)
 	}
 	var releases []<-chan struct{}
 	for _, v := range s.unreleased {
@@ -184,7 +184,7 @@ func (s *Stack) Close() error {
 	var wg sync.WaitGroup
 	errs := make([]error, len(active))
 	for i, v := range active {
-		wg.Go(func() { errs[i] = v.conn.CloseWithCode(protocol.Closing) })
+		wg.Go(func() { errs[i] = v.conn.CloseWithCode(wire.Closing) })
 	}
 	wg.Wait()
 	for _, released := range releases {
@@ -338,19 +338,19 @@ func (s *Stack) Connect(ctx context.Context, rec *enr.Record) error {
 
 // streamFailureCode maps failed I/O to Timeout for expired deadlines and to
 // Unspecified for cancellation and other errors.
-func streamFailureCode(ctx context.Context, err error) protocol.Code {
+func streamFailureCode(ctx context.Context, err error) wire.Code {
 	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, os.ErrDeadlineExceeded) ||
 		errors.Is(ctx.Err(), context.DeadlineExceeded) || errors.Is(ctx.Err(), os.ErrDeadlineExceeded) {
-		return protocol.Timeout
+		return wire.Timeout
 	}
 	if timeout, ok := errors.AsType[net.Error](err); ok && timeout.Timeout() {
-		return protocol.Timeout
+		return wire.Timeout
 	}
-	return protocol.Unspecified
+	return wire.Unspecified
 }
 
-func cancelTransportStream(stream transport.Stream, code protocol.Code) {
-	wire := code.Wire()
-	stream.CancelRead(wire)
-	stream.CancelWrite(wire)
+func cancelTransportStream(stream transport.Stream, code wire.Code) {
+	raw := code.Wire()
+	stream.CancelRead(raw)
+	stream.CancelWrite(raw)
 }

@@ -11,7 +11,7 @@ import (
 
 	ethp2p "github.com/ethp2p/ethp2p"
 	bcastpb "github.com/ethp2p/ethp2p/broadcast/pb"
-	"github.com/ethp2p/ethp2p/protocol"
+	"github.com/ethp2p/ethp2p/wire"
 	"github.com/ethp2p/ethp2p/transport"
 )
 
@@ -21,7 +21,7 @@ type fakeReceiveStream struct {
 	*bytes.Reader
 }
 
-func (f *fakeReceiveStream) CancelRead(protocol.Code)        {}
+func (f *fakeReceiveStream) CancelRead(wire.Code)        {}
 func (f *fakeReceiveStream) SetReadDeadline(time.Time) error { return nil }
 
 var _ ethp2p.ReceiveStream = (*fakeReceiveStream)(nil)

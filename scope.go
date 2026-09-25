@@ -10,7 +10,7 @@ import (
 	"sync/atomic"
 
 	"github.com/ethp2p/ethp2p/enr"
-	"github.com/ethp2p/ethp2p/protocol"
+	"github.com/ethp2p/ethp2p/wire"
 	"github.com/ethp2p/ethp2p/transport"
 )
 
@@ -23,7 +23,7 @@ type Peer struct {
 	ctx       context.Context
 	id        transport.PeerID
 	record    *atomic.Pointer[enr.Record]
-	selectors []protocol.Selector
+	selectors []wire.Selector
 	conn      transport.Conn
 }
 
@@ -40,7 +40,7 @@ func (p *Peer) Record() *enr.Record {
 }
 
 // Selectors returns a copy of this subsystem's ascending shared selectors.
-func (p *Peer) Selectors() []protocol.Selector { return slices.Clone(p.selectors) }
+func (p *Peer) Selectors() []wire.Selector { return slices.Clone(p.selectors) }
 
 // Context ends when this peer goes down.
 func (p *Peer) Context() context.Context { return p.ctx }
@@ -48,7 +48,7 @@ func (p *Peer) Context() context.Context { return p.ctx }
 // OpenUniStream opens a unidirectional stream whose selector frame was written
 // by the transport. On success, the caller owns the stream and must close or
 // cancel it. Opening fails when selector was not negotiated for this peer.
-func (p *Peer) OpenUniStream(ctx context.Context, selector protocol.Selector) (SendStream, error) {
+func (p *Peer) OpenUniStream(ctx context.Context, selector wire.Selector) (SendStream, error) {
 	if err := p.checkSelector(selector); err != nil {
 		return nil, err
 	}
@@ -71,7 +71,7 @@ func (p *Peer) OpenUniStream(ctx context.Context, selector protocol.Selector) (S
 // by the transport. On success, the caller owns the stream and must close or
 // cancel each side with a code. Opening fails when selector was not negotiated
 // for this peer.
-func (p *Peer) OpenStream(ctx context.Context, selector protocol.Selector) (Stream, error) {
+func (p *Peer) OpenStream(ctx context.Context, selector wire.Selector) (Stream, error) {
 	if err := p.checkSelector(selector); err != nil {
 		return nil, err
 	}
@@ -90,7 +90,7 @@ func (p *Peer) OpenStream(ctx context.Context, selector protocol.Selector) (Stre
 	return wrapBidirectionalStream(selector, stream), nil
 }
 
-func (p *Peer) checkSelector(selector protocol.Selector) error {
+func (p *Peer) checkSelector(selector wire.Selector) error {
 	if !slices.Contains(p.selectors, selector) {
 		return fmt.Errorf("%w: %d", ErrSelectorNotShared, selector)
 	}
@@ -110,7 +110,7 @@ type EventKind uint8
 const (
 	// PeerUp introduces a peer before any of its streams.
 	PeerUp EventKind = iota + 1
-	// StreamIn transfers ownership of a selected stream to the protocol.
+	// StreamIn transfers ownership of a selected stream to the wire.
 	StreamIn
 	// PeerDown ends a peer's deliveries.
 	PeerDown
@@ -120,13 +120,13 @@ const (
 type Event struct {
 	Kind     EventKind
 	Peer     *Peer
-	Selector protocol.Selector // StreamIn only.
+	Selector wire.Selector // StreamIn only.
 	Stream   ReceiveStream     // StreamIn only; bidirectional streams also implement Stream.
-	Code     protocol.Code     // PeerDown only.
+	Code     wire.Code     // PeerDown only.
 }
 
 // Cancel cancels every applicable side of StreamIn; other events are unchanged.
-func (e Event) Cancel(code protocol.Code) {
+func (e Event) Cancel(code wire.Code) {
 	if e.Kind != StreamIn || e.Stream == nil {
 		return
 	}
@@ -137,7 +137,7 @@ func (e Event) Cancel(code protocol.Code) {
 }
 
 // Reject refuses a StreamIn event. Other events are unchanged.
-func (e Event) Reject() { e.Cancel(protocol.Refused) }
+func (e Event) Reject() { e.Cancel(wire.Refused) }
 
 // SubsystemConfig configures a subsystem at registration.
 type SubsystemConfig struct {
@@ -160,7 +160,7 @@ type Subsystem struct {
 
 // Register assigns selectors exclusively to name. Invalid registrations
 // leave the stack unchanged. All setup must finish before Start.
-func (s *Stack) Register(name string, selectors []protocol.Selector, cfg SubsystemConfig) (*Subsystem, error) {
+func (s *Stack) Register(name string, selectors []wire.Selector, cfg SubsystemConfig) (*Subsystem, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.closed {
@@ -175,15 +175,15 @@ func (s *Stack) Register(name string, selectors []protocol.Selector, cfg Subsyst
 	if _, exists := s.subsystems[name]; exists {
 		return nil, fmt.Errorf("subsystem %q already registered", name)
 	}
-	if len(s.selectors)+len(selectors) > protocol.MaxSelectors {
-		return nil, fmt.Errorf("too many selectors: limit %d", protocol.MaxSelectors)
+	if len(s.selectors)+len(selectors) > wire.MaxSelectors {
+		return nil, fmt.Errorf("too many selectors: limit %d", wire.MaxSelectors)
 	}
-	ordered := protocol.Canonical(selectors)
+	ordered := wire.Canonical(selectors)
 	if len(ordered) != len(selectors) {
 		return nil, errors.New("duplicate selectors in subsystem")
 	}
 	for _, selector := range ordered {
-		if err := protocol.ValidateSelector(selector); err != nil {
+		if err := wire.ValidateSelector(selector); err != nil {
 			return nil, err
 		}
 		if _, exists := s.selectors[selector]; exists {
@@ -192,7 +192,7 @@ func (s *Stack) Register(name string, selectors []protocol.Selector, cfg Subsyst
 	}
 	if s.subsystems == nil {
 		s.subsystems = make(map[string]*Subsystem)
-		s.selectors = make(map[protocol.Selector]*Subsystem)
+		s.selectors = make(map[wire.Selector]*Subsystem)
 	}
 	subsystem := &Subsystem{stack: s, policy: cfg.Policy}
 	s.subsystems[name] = subsystem
@@ -224,7 +224,7 @@ func (s *Subsystem) Notify(wake chan<- struct{}) error {
 }
 
 type pendingStream struct {
-	selector protocol.Selector
+	selector wire.Selector
 	stream   transport.ReceiveStream
 }
 
@@ -235,7 +235,7 @@ type peerDelivery struct {
 	peer    *Peer
 	up      bool
 	down    bool
-	code    protocol.Code
+	code    wire.Code
 	streams []pendingStream
 	ready   *list.Element
 }
@@ -262,7 +262,7 @@ func (s *Subsystem) addPeer(peer *Peer) *peerDelivery {
 	return d
 }
 
-func (d *peerDelivery) push(sel protocol.Selector, stream transport.ReceiveStream) {
+func (d *peerDelivery) push(sel wire.Selector, stream transport.ReceiveStream) {
 	s := d.sub
 	s.mu.Lock()
 	if d.down {
@@ -276,13 +276,13 @@ func (d *peerDelivery) push(sel protocol.Selector, stream transport.ReceiveStrea
 }
 
 func cancelQueuedStream(stream transport.ReceiveStream) {
-	stream.CancelRead(protocol.Closing.Wire())
+	stream.CancelRead(wire.Closing.Wire())
 	if bi, ok := stream.(transport.Stream); ok {
-		bi.CancelWrite(protocol.Closing.Wire())
+		bi.CancelWrite(wire.Closing.Wire())
 	}
 }
 
-func (d *peerDelivery) closePeer(code protocol.Code) {
+func (d *peerDelivery) closePeer(code wire.Code) {
 	s := d.sub
 	s.mu.Lock()
 	if d.down {

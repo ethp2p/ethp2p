@@ -5,30 +5,30 @@ import (
 	"time"
 
 	"github.com/ethp2p/ethp2p/enr"
-	"github.com/ethp2p/ethp2p/protocol"
+	"github.com/ethp2p/ethp2p/wire"
 	"github.com/ethp2p/ethp2p/transport"
 )
 
 type stackSink struct{ stack *Stack }
 
-func (sink stackSink) Admit(conn transport.Conn, hello transport.Hello) (protocol.Code, bool) {
+func (sink stackSink) Admit(conn transport.Conn, hello transport.Hello) (wire.Code, bool) {
 	s := sink.stack
 	var record *enr.Record
 	if len(hello.Record) != 0 {
 		var err error
 		record, err = enr.Decode(hello.Record)
 		if err != nil || record.PeerID() != conn.RemotePeerID() {
-			return protocol.ControlViolation, false
+			return wire.ControlViolation, false
 		}
 	}
 	// Registration is immutable after Start. Policies may inspect the stack,
 	// so no stack lock is held while constructing candidates or calling them.
-	matched := make(map[*Subsystem][]protocol.Selector)
-	for _, sel := range protocol.Intersect(s.localSelectors(), hello.Selectors) {
+	matched := make(map[*Subsystem][]wire.Selector)
+	for _, sel := range wire.Intersect(s.localSelectors(), hello.Selectors) {
 		sub := s.selectors[sel]
 		matched[sub] = append(matched[sub], sel)
 	}
-	v := &stackView{conn: conn, routes: make(map[protocol.Selector]*peerDelivery), released: make(chan struct{})}
+	v := &stackView{conn: conn, routes: make(map[wire.Selector]*peerDelivery), released: make(chan struct{})}
 	v.record.Store(record)
 	type candidate struct {
 		sub  *Subsystem
@@ -48,25 +48,25 @@ func (sink stackSink) Admit(conn transport.Conn, hello transport.Hello) (protoco
 			cancel()
 		}
 	}
-	reject := func(code protocol.Code) (protocol.Code, bool) {
+	reject := func(code wire.Code) (wire.Code, bool) {
 		for _, cancel := range v.cancels {
 			cancel()
 		}
 		return code, false
 	}
 	if len(accepted) == 0 {
-		return reject(protocol.NoSharedProtocols)
+		return reject(wire.NoSharedProtocols)
 	}
 	id := conn.RemotePeerID()
 	s.mu.Lock()
 	if s.closed {
 		s.mu.Unlock()
-		return reject(protocol.Closing)
+		return reject(wire.Closing)
 	}
 	d := s.dials[id]
 	if conn.Outbound() && d != nil && d.gen != s.generations[id] {
 		s.mu.Unlock()
-		return reject(protocol.Closing)
+		return reject(wire.Closing)
 	}
 	old := s.active[id]
 	if old != nil {
@@ -74,10 +74,10 @@ func (sink stackSink) Admit(conn transport.Conn, hello transport.Hello) (protoco
 			wantOutbound := s.transport.PeerID() < id
 			if conn.Outbound() != wantOutbound {
 				s.mu.Unlock()
-				return reject(protocol.Duplicate)
+				return reject(wire.Duplicate)
 			}
 		}
-		s.retire(old, protocol.Duplicate)
+		s.retire(old, wire.Duplicate)
 	}
 	s.nextID++
 	v.info = ConnInfo{ID: s.nextID, Peer: id, Outbound: conn.Outbound(), Since: time.Now()}
@@ -95,12 +95,12 @@ func (sink stackSink) Admit(conn transport.Conn, hello transport.Hello) (protoco
 	}
 	s.mu.Unlock()
 	if old != nil {
-		_ = old.conn.CloseWithCode(protocol.Duplicate)
+		_ = old.conn.CloseWithCode(wire.Duplicate)
 	}
-	return protocol.Unspecified, true
+	return wire.Unspecified, true
 }
 
-func (sink stackSink) Stream(conn transport.Conn, sel protocol.Selector, stream transport.ReceiveStream) {
+func (sink stackSink) Stream(conn transport.Conn, sel wire.Selector, stream transport.ReceiveStream) {
 	s := sink.stack
 	s.mu.Lock()
 	v := s.active[conn.RemotePeerID()]
@@ -112,24 +112,24 @@ func (sink stackSink) Stream(conn transport.Conn, sel protocol.Selector, stream 
 	route, known := v.routes[sel]
 	s.mu.Unlock()
 	if !known {
-		cancelSelectedStream(stream, protocol.UnsupportedSelector)
+		cancelSelectedStream(stream, wire.UnsupportedSelector)
 		return
 	}
 	if route == nil {
-		cancelSelectedStream(stream, protocol.Refused)
+		cancelSelectedStream(stream, wire.Refused)
 		return
 	}
 	route.push(sel, stream)
 }
 
-func cancelSelectedStream(stream transport.ReceiveStream, code protocol.Code) {
+func cancelSelectedStream(stream transport.ReceiveStream, code wire.Code) {
 	stream.CancelRead(code.Wire())
 	if bi, ok := stream.(transport.Stream); ok {
 		bi.CancelWrite(code.Wire())
 	}
 }
 
-func (sink stackSink) Closed(conn transport.Conn, code protocol.Code) {
+func (sink stackSink) Closed(conn transport.Conn, code wire.Code) {
 	s := sink.stack
 	s.mu.Lock()
 	defer s.mu.Unlock()

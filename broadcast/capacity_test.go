@@ -11,7 +11,7 @@ import (
 
 	ethp2p "github.com/ethp2p/ethp2p"
 	bcastpb "github.com/ethp2p/ethp2p/broadcast/pb"
-	"github.com/ethp2p/ethp2p/protocol"
+	"github.com/ethp2p/ethp2p/wire"
 	"github.com/ethp2p/ethp2p/transport"
 )
 
@@ -55,7 +55,7 @@ type stalledSessionOpener struct {
 	once    sync.Once
 }
 
-func (s *stalledSessionOpener) OpenUniStream(ctx context.Context, _ protocol.Selector) (ethp2p.SendStream, error) {
+func (s *stalledSessionOpener) OpenUniStream(ctx context.Context, _ wire.Selector) (ethp2p.SendStream, error) {
 	s.once.Do(func() { close(s.entered) })
 	<-ctx.Done()
 	return nil, ctx.Err()
@@ -158,7 +158,7 @@ func TestChunkFIFOAndHeaderBudgetWait(t *testing.T) {
 				if _, err := io.ReadFull(e.stream, data); err != nil || data[0] != byte(i) {
 					t.Fatalf("payload %d = %x, %v", i, data, err)
 				}
-				e.stream.CancelRead(protocol.Unspecified)
+				e.stream.CancelRead(wire.Unspecified)
 			}
 			p.Close()
 		})

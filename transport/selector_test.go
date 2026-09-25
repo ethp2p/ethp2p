@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/ethp2p/ethp2p/protocol"
+	"github.com/ethp2p/ethp2p/wire"
 	"github.com/quic-go/quic-go"
 )
 
@@ -39,11 +39,11 @@ func assertBiReset(t *testing.T, s *quic.Stream, want uint64) {
 
 func TestDispatcherClassification(t *testing.T) {
 	for n := 1; n <= 10; n++ {
-		sel := protocol.Selector(uint64(1) << (7 * (n - 1)))
+		sel := wire.Selector(uint64(1) << (7 * (n - 1)))
 		t.Run("selector-length-"+string(rune('0'+n)), func(t *testing.T) {
 			ctx := testContext(t)
 			pair := newViewPair(t, 32)
-			head := protocol.AppendFrame(nil, binary.AppendUvarint(nil, uint64(sel)))
+			head := wire.AppendFrame(nil, binary.AppendUvarint(nil, uint64(sel)))
 			out := rawBi(t, ctx, pair.clientEth, append(head, 0xaa))
 			in, got, err := pair.serverEth.AcceptStream(ctx)
 			if err != nil {

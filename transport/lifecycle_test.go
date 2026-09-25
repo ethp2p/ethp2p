@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/ethp2p/ethp2p/protocol"
+	"github.com/ethp2p/ethp2p/wire"
 	"github.com/libp2p/go-libp2p/p2p/transport/quicreuse"
 	"github.com/quic-go/quic-go"
 )
@@ -62,7 +62,7 @@ func waitViewError(t *testing.T, result <-chan error) {
 	}
 }
 
-func waitEthViewError(t *testing.T, result <-chan error, code protocol.Code, remote bool) {
+func waitEthViewError(t *testing.T, result <-chan error, code wire.Code, remote bool) {
 	t.Helper()
 	select {
 	case err := <-result:
@@ -72,7 +72,7 @@ func waitEthViewError(t *testing.T, result <-chan error, code protocol.Code, rem
 	}
 }
 
-func assertEthViewCause(t *testing.T, err error, code protocol.Code, remote bool) {
+func assertEthViewCause(t *testing.T, err error, code wire.Code, remote bool) {
 	t.Helper()
 	closed, ok := errors.AsType[*ViewClosedError](err)
 	if !ok || closed.Code != code || closed.Remote != remote || !errors.Is(err, ErrViewClosed) {
@@ -168,9 +168,9 @@ func TestEthp2pViewCloseStopsPendingOperations(t *testing.T) {
 	if err := pair.clientEth.Close(); err != nil {
 		t.Fatal(err)
 	}
-	waitEthViewError(t, bi, protocol.Closing, false)
-	waitEthViewError(t, uni, protocol.Closing, false)
-	waitEthViewError(t, blocked, protocol.Closing, false)
+	waitEthViewError(t, bi, wire.Closing, false)
+	waitEthViewError(t, uni, wire.Closing, false)
+	waitEthViewError(t, blocked, wire.Closing, false)
 	checkLibp2pRoundTrip(t, ctx, pair.clientLib, pair.serverLib)
 }
 
@@ -181,7 +181,7 @@ func TestClosedEthp2pViewResetsNewUniStream(t *testing.T) {
 		t.Fatal(err)
 	}
 	_, err := pair.serverEth.PeerHello(ctx)
-	assertEthViewCause(t, err, protocol.Closing, false)
+	assertEthViewCause(t, err, wire.Closing, false)
 	client := pair.clientEth.(*ethp2pConn)
 	select {
 	case <-client.ethp2pCtx.Done():
@@ -189,7 +189,7 @@ func TestClosedEthp2pViewResetsNewUniStream(t *testing.T) {
 		t.Fatal(ctx.Err())
 	}
 	_, err = client.PeerHello(ctx)
-	assertEthViewCause(t, err, protocol.Closing, true)
+	assertEthViewCause(t, err, wire.Closing, true)
 	// The public view refuses new streams after GoAway. Use raw QUIC to
 	// exercise a peer that ignores closure and sends a late stream anyway.
 	stream, err := client.conn.OpenUniStreamSync(ctx)
@@ -205,7 +205,7 @@ func TestClosedEthp2pViewResetsNewUniStream(t *testing.T) {
 	select {
 	case <-stream.Context().Done():
 		var reset *quic.StreamError
-		if !errors.As(context.Cause(stream.Context()), &reset) || !reset.Remote || uint64(reset.ErrorCode) != protocol.Closing.Wire() {
+		if !errors.As(context.Cause(stream.Context()), &reset) || !reset.Remote || uint64(reset.ErrorCode) != wire.Closing.Wire() {
 			t.Fatalf("peer stream cause = %v, want remote wire 20", context.Cause(stream.Context()))
 		}
 	case <-time.After(time.Second):
@@ -332,7 +332,7 @@ func TestFullEthp2pQueueKeepsInboundLibp2pView(t *testing.T) {
 	case <-ctx.Done():
 		t.Fatal(ctx.Err())
 	}
-	assertEthViewCause(t, context.Cause(serverContext), protocol.Overloaded, false)
+	assertEthViewCause(t, context.Cause(serverContext), wire.Overloaded, false)
 	clientContext := clientEthConn.(*ethp2pConn).ethp2pCtx
 	select {
 	case <-clientContext.Done():
@@ -340,7 +340,7 @@ func TestFullEthp2pQueueKeepsInboundLibp2pView(t *testing.T) {
 		t.Fatal(ctx.Err())
 	}
 	_, err = clientEthConn.PeerHello(ctx)
-	assertEthViewCause(t, err, protocol.Overloaded, true)
+	assertEthViewCause(t, err, wire.Overloaded, true)
 	stream, err := clientView.OpenStreamSync(ctx)
 	if err != nil {
 		t.Fatal(err)

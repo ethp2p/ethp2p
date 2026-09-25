@@ -5,7 +5,7 @@ import (
 	"sync"
 
 	ethp2p "github.com/ethp2p/ethp2p"
-	"github.com/ethp2p/ethp2p/protocol"
+	"github.com/ethp2p/ethp2p/wire"
 )
 
 // channelDelivery owns inbound streams across the producer/inbox/actor handoff.
@@ -58,6 +58,6 @@ func (d *channelDelivery) close() {
 	d.streams = nil
 	d.mu.Unlock()
 	for s := range streams {
-		s.CancelRead(protocol.Unspecified)
+		s.CancelRead(wire.Unspecified)
 	}
 }

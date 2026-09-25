@@ -1,4 +1,4 @@
-package protocol
+package wire
 
 import (
 	"bytes"
@@ -13,7 +13,8 @@ import (
 func TestSelectorCodeIsScopedAndControlSelectorPanics(t *testing.T) {
 	sess := Selector(2)
 	chunk := Selector(3)
-	if sess.Code(1) != sess.Code(1) {
+	a, b := sess.Code(1), sess.Code(1)
+	if a != b {
 		t.Fatal("same selector code values differ")
 	}
 	if sess.Code(1) == chunk.Code(1) {

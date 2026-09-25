@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/ethp2p/ethp2p/protocol"
+	"github.com/ethp2p/ethp2p/wire"
 	"github.com/ethp2p/ethp2p/transport"
 	"github.com/ethp2p/ethp2p/transport/transporttest"
 	"github.com/quic-go/quic-go"
@@ -34,7 +34,7 @@ func waitPending(t *testing.T, sub *Subsystem, count int) {
 	t.Fatalf("stack did not queue %d streams", count)
 }
 
-func registerTestSub(t *testing.T, stack *Stack, name string, selectors ...protocol.Selector) *Subsystem {
+func registerTestSub(t *testing.T, stack *Stack, name string, selectors ...wire.Selector) *Subsystem {
 	t.Helper()
 	sub, err := stack.Register(name, selectors, SubsystemConfig{})
 	if err != nil {
@@ -98,7 +98,7 @@ func TestDeliveryOrderingAndManyQueued(t *testing.T) {
 	}
 	disconnectTest(t, stack, pair.client.Shared.PeerID())
 	down := awaitEvent(t, sub)
-	if down.Kind != PeerDown || down.Peer != peer || down.Code != protocol.Closing || peer.Context().Err() == nil {
+	if down.Kind != PeerDown || down.Peer != peer || down.Code != wire.Closing || peer.Context().Err() == nil {
 		t.Fatalf("PeerDown = %+v, context = %v", down, peer.Context().Err())
 	}
 	if _, ok := sub.Next(); ok {
@@ -141,7 +141,7 @@ func TestDeliveryQueuedStreamsResetOnDown(t *testing.T) {
 			}
 			if test.takeUp {
 				down := awaitEvent(t, sub)
-				if down.Kind != PeerDown || down.Code != protocol.Closing || down.Peer.Context().Err() == nil {
+				if down.Kind != PeerDown || down.Code != wire.Closing || down.Peer.Context().Err() == nil {
 					t.Fatalf("down = %+v", down)
 				}
 			}
@@ -169,7 +169,7 @@ func TestDeliveryQueuedStreamsResetOnDown(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			payload := protocol.AppendFrame(nil, []byte("/still-live"))
+			payload := wire.AppendFrame(nil, []byte("/still-live"))
 			_, _ = lib.Write(payload)
 			_ = lib.Close()
 			in, err := pair.serverLib.AcceptStream(ctx)
@@ -192,7 +192,7 @@ func TestDeliveryRoundRobin(t *testing.T) {
 	defer disconnectTest(t, stack, pair.client.Shared.PeerID())
 	a := awaitPeer(t, sub)
 	clientB := transporttest.NewEndpoint(t)
-	if err := clientB.Eth.SetHello(transport.Hello{Selectors: []protocol.Selector{selectorAlpha}}); err != nil {
+	if err := clientB.Eth.SetHello(transport.Hello{Selectors: []wire.Selector{selectorAlpha}}); err != nil {
 		t.Fatal(err)
 	}
 	outB, err := clientB.Eth.Dial(t.Context(), pair.server.Shared.Addr(), pair.server.Shared.PeerID())
@@ -240,7 +240,7 @@ func TestDeliverySharedWake(t *testing.T) {
 	}
 	for _, item := range []struct {
 		sub *Subsystem
-		sel protocol.Selector
+		sel wire.Selector
 	}{{a, selectorAlpha}, {b, selectorCommon}} {
 		if _, ok := item.sub.Next(); ok {
 			t.Fatal("queue not empty")
@@ -267,7 +267,7 @@ func TestEventMethods(t *testing.T) {
 	for _, kind := range []EventKind{PeerUp, PeerDown, StreamIn} {
 		raw := new(transporttest.RawReceiveStream)
 		event := Event{Kind: kind, Stream: wrapReceiveStream(selectorAlpha, raw)}
-		event.Cancel(protocol.Overloaded)
+		event.Cancel(wire.Overloaded)
 		codes := raw.CancelReadCodes()
 		if kind == StreamIn {
 			if len(codes) != 1 || codes[0] != 4 {
@@ -302,18 +302,18 @@ func TestDeliveryViewClosureCode(t *testing.T) {
 			}
 			writeSelectorPayload(t, pair.clientConn, selectorAlpha, []byte("queued"))
 			waitPending(t, sub, 1)
-			if err := pair.serverConn.CloseWithCode(protocol.Duplicate); err != nil {
+			if err := pair.serverConn.CloseWithCode(wire.Duplicate); err != nil {
 				t.Fatal(err)
 			}
 			waitFor(t, func() bool { return len(stack.Connections()) == 0 })
 			_, err := pair.serverConn.PeerHello(t.Context())
 			closed, ok := errors.AsType[*transport.ViewClosedError](err)
-			if !ok || closed.Code != protocol.Duplicate || closed.Remote {
+			if !ok || closed.Code != wire.Duplicate || closed.Remote {
 				t.Fatalf("view cause = %v", err)
 			}
 			if takeUp {
 				down := awaitEvent(t, sub)
-				if down.Kind != PeerDown || down.Code != protocol.Duplicate || down.Peer.Context().Err() == nil {
+				if down.Kind != PeerDown || down.Code != wire.Duplicate || down.Peer.Context().Err() == nil {
 					t.Fatalf("view PeerDown = %+v", down)
 				}
 			}

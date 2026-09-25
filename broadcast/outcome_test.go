@@ -12,7 +12,7 @@ import (
 	"time"
 
 	ethp2p "github.com/ethp2p/ethp2p"
-	"github.com/ethp2p/ethp2p/protocol"
+	"github.com/ethp2p/ethp2p/wire"
 	"github.com/ethp2p/ethp2p/transport"
 	"github.com/ethp2p/ethp2p/transport/transporttest"
 )
@@ -39,7 +39,7 @@ func TestStreamEndPolicyUsesWireCodes(t *testing.T) {
 			want:     0,
 			wantRead: true,
 			run: func(t *testing.T, f *outcomeFixture) (*wireReceiveProbe, *wireSendProbe) {
-				payload := protocol.AppendFrame(nil, []byte{0x0f})
+				payload := wire.AppendFrame(nil, []byte{0x0f})
 				raw, stream := f.incoming(t, CHUNK, bytes.NewReader(payload))
 				(&PeerConn{ctx: context.Background()}).processChunk(stream)
 				return raw, nil
@@ -150,7 +150,7 @@ func newOutcomeFixture(t *testing.T) *outcomeFixture {
 	if err != nil {
 		t.Fatal(err)
 	}
-	sub, err := stack.Register("broadcast-test", []protocol.Selector{BCAST, SESS, CHUNK}, ethp2p.SubsystemConfig{})
+	sub, err := stack.Register("broadcast-test", []wire.Selector{BCAST, SESS, CHUNK}, ethp2p.SubsystemConfig{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -162,7 +162,7 @@ func newOutcomeFixture(t *testing.T) *outcomeFixture {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = stack.Close() })
-	if err := client.Eth.SetHello(transport.Hello{Selectors: []protocol.Selector{BCAST, SESS, CHUNK}}); err != nil {
+	if err := client.Eth.SetHello(transport.Hello{Selectors: []wire.Selector{BCAST, SESS, CHUNK}}); err != nil {
 		t.Fatal(err)
 	}
 	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
@@ -182,7 +182,7 @@ func newOutcomeFixture(t *testing.T) *outcomeFixture {
 	return &outcomeFixture{ctx: ctx, conn: conn, peer: up.Peer, sub: sub, wake: wake}
 }
 
-func (f *outcomeFixture) openIncoming(t *testing.T, sel protocol.Selector, payload []byte) *wireReceiveProbe {
+func (f *outcomeFixture) openIncoming(t *testing.T, sel wire.Selector, payload []byte) *wireReceiveProbe {
 	t.Helper()
 	out, err := f.conn.OpenUniStream(f.ctx, sel)
 	if err != nil {
@@ -195,7 +195,7 @@ func (f *outcomeFixture) openIncoming(t *testing.T, sel protocol.Selector, paylo
 	}
 	return &wireReceiveProbe{out: out}
 }
-func (f *outcomeFixture) incoming(t *testing.T, sel protocol.Selector, reader io.Reader) (*wireReceiveProbe, ethp2p.ReceiveStream) {
+func (f *outcomeFixture) incoming(t *testing.T, sel wire.Selector, reader io.Reader) (*wireReceiveProbe, ethp2p.ReceiveStream) {
 	t.Helper()
 	var payload []byte
 	_, deadline := reader.(failReader)
@@ -269,7 +269,7 @@ func nextOutcomeEvent(t *testing.T, sub *ethp2p.Subsystem, wake <-chan struct{})
 	}
 }
 
-func newWrappedRecordingReceiveStream(t *testing.T, selector protocol.Selector, payload []byte) (*wireReceiveProbe, ethp2p.ReceiveStream) {
+func newWrappedRecordingReceiveStream(t *testing.T, selector wire.Selector, payload []byte) (*wireReceiveProbe, ethp2p.ReceiveStream) {
 	t.Helper()
 	return newOutcomeFixture(t).incoming(t, selector, bytes.NewReader(payload))
 }

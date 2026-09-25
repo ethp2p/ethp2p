@@ -5,7 +5,7 @@ import (
 	"testing"
 
 	ethp2p "github.com/ethp2p/ethp2p"
-	"github.com/ethp2p/ethp2p/protocol"
+	"github.com/ethp2p/ethp2p/wire"
 	"github.com/ethp2p/ethp2p/transport"
 	"github.com/ethp2p/ethp2p/transport/transporttest"
 )
@@ -38,7 +38,7 @@ func TestRegisteredDeliveryClosesBindingAndRefusesUnboundStream(t *testing.T) {
 		t.Fatal(err)
 	}
 	client := transporttest.NewEndpoint(t)
-	if err := client.Eth.SetHello(transport.Hello{Selectors: []protocol.Selector{BCAST, SESS, CHUNK}}); err != nil {
+	if err := client.Eth.SetHello(transport.Hello{Selectors: []wire.Selector{BCAST, SESS, CHUNK}}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := client.Eth.Dial(t.Context(), endpoint.Shared.Addr(), endpoint.Shared.PeerID()); err != nil {
@@ -58,7 +58,7 @@ func TestRegisteredDeliveryClosesBindingAndRefusesUnboundStream(t *testing.T) {
 		t.Fatal(err)
 	}
 	down := nextOutcomeEvent(t, sub, e.deliveryWake)
-	if down.Kind != ethp2p.PeerDown || down.Code != protocol.Closing {
+	if down.Kind != ethp2p.PeerDown || down.Code != wire.Closing {
 		t.Fatalf("down = %+v", down)
 	}
 	e.handleDelivery(down)

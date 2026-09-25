@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"io"
 
-	"github.com/ethp2p/ethp2p/protocol"
+	"github.com/ethp2p/ethp2p/wire"
 	"google.golang.org/protobuf/proto"
 )
 
@@ -18,7 +18,7 @@ func WriteFrame(w io.Writer, msg proto.Message) error {
 		return fmt.Errorf("marshal %T: %w", msg, err)
 	}
 
-	frame := protocol.AppendFrame(nil, data)
+	frame := wire.AppendFrame(nil, data)
 	n, err := w.Write(frame)
 	if err == nil && n != len(frame) {
 		return io.ErrShortWrite
@@ -29,7 +29,7 @@ func WriteFrame(w io.Writer, msg proto.Message) error {
 // ReadFrame reads one uvarint-length-prefixed protobuf message from r without
 // consuming bytes after the frame.
 func ReadFrame(r io.Reader, msg proto.Message) error {
-	data, err := protocol.ReadFrame(r, MaxFrameSize)
+	data, err := wire.ReadFrame(r, MaxFrameSize)
 	if err != nil {
 		return err
 	}

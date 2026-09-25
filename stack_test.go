@@ -4,7 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
-	"github.com/ethp2p/ethp2p/protocol"
+	"github.com/ethp2p/ethp2p/wire"
 	"github.com/ethp2p/ethp2p/transport"
 	"github.com/ethp2p/ethp2p/transport/transporttest"
 	"github.com/libp2p/go-libp2p/p2p/transport/quicreuse"
@@ -14,9 +14,9 @@ import (
 )
 
 const (
-	selectorAlpha  protocol.Selector = 3
-	selectorCommon protocol.Selector = 7
-	selectorGamma  protocol.Selector = 11
+	selectorAlpha  wire.Selector = 3
+	selectorCommon wire.Selector = 7
+	selectorGamma  wire.Selector = 11
 	testTimeout                      = 10 * time.Second
 )
 
@@ -82,7 +82,7 @@ func (p *testPair) connect(t *testing.T, client, server *Stack) {
 		if x.stack != nil {
 			err = x.stack.Start()
 		} else {
-			err = x.endpoint.Eth.SetHello(transport.Hello{Selectors: []protocol.Selector{selectorAlpha, selectorCommon, selectorGamma}})
+			err = x.endpoint.Eth.SetHello(transport.Hello{Selectors: []wire.Selector{selectorAlpha, selectorCommon, selectorGamma}})
 		}
 		if err != nil {
 			t.Fatal(err)
@@ -140,7 +140,7 @@ func awaitPeer(t *testing.T, sub *Subsystem) *Peer {
 	return event.Peer
 }
 
-func writeSelectorPayload(t *testing.T, conn transport.Conn, selector protocol.Selector, payload []byte) {
+func writeSelectorPayload(t *testing.T, conn transport.Conn, selector wire.Selector, payload []byte) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(t.Context(), testTimeout)
 	defer cancel()
@@ -174,16 +174,16 @@ func TestStackRegistrationAndLifecycle(t *testing.T) {
 		t.Fatal("wrong local identity accepted")
 	}
 	s := newTestStack(t, p.server)
-	for _, sels := range [][]protocol.Selector{nil, {0}, {1, 1}} {
+	for _, sels := range [][]wire.Selector{nil, {0}, {1, 1}} {
 		if _, err := s.Register("bad", sels, SubsystemConfig{}); err == nil {
 			t.Fatal("invalid registration accepted")
 		}
 	}
 	sub := registerTestSub(t, s, "ok", selectorAlpha)
-	if _, err := s.Register("collision", []protocol.Selector{selectorAlpha}, SubsystemConfig{}); err == nil {
+	if _, err := s.Register("collision", []wire.Selector{selectorAlpha}, SubsystemConfig{}); err == nil {
 		t.Fatal("collision accepted")
 	}
-	if _, err := s.Register("ok", []protocol.Selector{selectorGamma}, SubsystemConfig{}); err == nil {
+	if _, err := s.Register("ok", []wire.Selector{selectorGamma}, SubsystemConfig{}); err == nil {
 		t.Fatal("duplicate name accepted")
 	}
 	registerTestSub(t, s, "gamma", selectorGamma)
@@ -201,7 +201,7 @@ func TestStackRegistrationAndLifecycle(t *testing.T) {
 	if err := s.Start(); err == nil {
 		t.Fatal("second Start succeeded")
 	}
-	if _, err := s.Register("late", []protocol.Selector{5}, SubsystemConfig{}); err == nil {
+	if _, err := s.Register("late", []wire.Selector{5}, SubsystemConfig{}); err == nil {
 		t.Fatal("late Register succeeded")
 	}
 	if err := sub.Notify(make(chan struct{}, 1)); err == nil {

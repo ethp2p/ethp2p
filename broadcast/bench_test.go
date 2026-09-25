@@ -9,7 +9,7 @@ import (
 	"time"
 
 	ethp2p "github.com/ethp2p/ethp2p"
-	"github.com/ethp2p/ethp2p/protocol"
+	"github.com/ethp2p/ethp2p/wire"
 	"github.com/ethp2p/ethp2p/transport"
 )
 
@@ -270,7 +270,7 @@ func spinUntil(cond func() bool) {
 // blackholeOpener discards stream writes to benchmark outbound loop overhead.
 type blackholeOpener struct{}
 
-func (*blackholeOpener) OpenUniStream(_ context.Context, _ protocol.Selector) (ethp2p.SendStream, error) {
+func (*blackholeOpener) OpenUniStream(_ context.Context, _ wire.Selector) (ethp2p.SendStream, error) {
 	return &blackholeStream{}, nil
 }
 
@@ -278,5 +278,5 @@ type blackholeStream struct{}
 
 func (s *blackholeStream) Write(p []byte) (int, error)        { return len(p), nil }
 func (s *blackholeStream) Close() error                       { return nil }
-func (s *blackholeStream) CancelWrite(_ protocol.Code)        {}
+func (s *blackholeStream) CancelWrite(_ wire.Code)        {}
 func (s *blackholeStream) SetWriteDeadline(_ time.Time) error { return nil }

@@ -89,7 +89,7 @@
 // For each incoming bidirectional stream, the dispatcher checks the first byte.
 // Bytes 1 through 10 begin an ethp2p selector frame. Otherwise a second byte
 // of '/' identifies libp2p, and both bytes remain available to libp2p. All
-// other heads are reset with protocol.BadSelector. Unidirectional streams are
+// other heads are reset with wire.BadSelector. Unidirectional streams are
 // always ethp2p because libp2p opens none.
 //
 // The dispatcher validates the complete selector frame under one

@@ -6,7 +6,7 @@ import (
 	"io"
 	"testing"
 
-	"github.com/ethp2p/ethp2p/protocol"
+	"github.com/ethp2p/ethp2p/wire"
 	"github.com/ethp2p/ethp2p/transport"
 	"github.com/ethp2p/ethp2p/transport/transporttest"
 )
@@ -15,15 +15,15 @@ type rawSendStream = transporttest.RawSendStream
 type rawReceiveStream = transporttest.RawReceiveStream
 
 func TestStreamWrappersEncodeCodesAtTransportBoundary(t *testing.T) {
-	selector := protocol.Selector(2)
+	selector := wire.Selector(2)
 	for _, test := range []struct {
 		name string
-		code protocol.Code
+		code wire.Code
 		want uint64
 	}{
 		{name: "protocol namespace", code: selector.Code(1), want: 3},
-		{name: "shared stack code", code: protocol.Overloaded, want: 4},
-		{name: "stack-only code maps to unspecified", code: protocol.BadSelector, want: 0},
+		{name: "shared stack code", code: wire.Overloaded, want: 4},
+		{name: "stack-only code maps to unspecified", code: wire.BadSelector, want: 0},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			raw := new(rawSendStream)
@@ -34,24 +34,24 @@ func TestStreamWrappersEncodeCodesAtTransportBoundary(t *testing.T) {
 
 	badSend := new(rawSendStream)
 	send := wrapSendStream(selector, badSend)
-	assertPanics(t, func() { send.CancelWrite(protocol.Selector(3).Code(1)) })
+	assertPanics(t, func() { send.CancelWrite(wire.Selector(3).Code(1)) })
 
 	rawReceive := new(rawReceiveStream)
 	receive := wrapReceiveStream(selector, rawReceive)
-	receive.CancelRead(protocol.Overloaded)
+	receive.CancelRead(wire.Overloaded)
 	assertCancelCodes(t, rawReceive.CancelReadCodes(), []uint64{4})
-	assertPanics(t, func() { receive.CancelRead(protocol.Selector(3).Code(1)) })
+	assertPanics(t, func() { receive.CancelRead(wire.Selector(3).Code(1)) })
 }
 
 func TestStreamWrappersCancelFailedIO(t *testing.T) {
-	selector := protocol.Selector(2)
+	selector := wire.Selector(2)
 	rawSend := &rawSendStream{WriteErr: context.DeadlineExceeded}
 	send := wrapSendStream(selector, rawSend)
 	if _, err := send.Write([]byte("payload")); !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("Write error = %v, want deadline exceeded", err)
 	}
 	assertCancelCodes(t, rawSend.CancelWriteCodes(), []uint64{6})
-	send.CancelWrite(protocol.Refused)
+	send.CancelWrite(wire.Refused)
 	assertCancelCodes(t, rawSend.CancelWriteCodes(), []uint64{6})
 
 	rawClose := &rawSendStream{CloseErr: errors.New("close failed")}
@@ -69,7 +69,7 @@ func TestStreamWrappersCancelFailedIO(t *testing.T) {
 }
 
 func TestResetErrorDecodesProtocolAndStackCodes(t *testing.T) {
-	selector := protocol.Selector(2)
+	selector := wire.Selector(2)
 	transportErr := &transport.StreamResetError{Code: 3}
 	receive := wrapReceiveStream(selector, &rawReceiveStream{ReadErr: transportErr})
 	_, err := receive.Read(nil)
@@ -87,10 +87,10 @@ func TestResetErrorDecodesProtocolAndStackCodes(t *testing.T) {
 	for _, test := range []struct {
 		name string
 		wire uint64
-		want protocol.Code
+		want wire.Code
 	}{
-		{name: "stack-only preserved", wire: 16, want: protocol.BadSelector},
-		{name: "unknown stack normalized", wire: 28, want: protocol.Unspecified},
+		{name: "stack-only preserved", wire: 16, want: wire.BadSelector},
+		{name: "unknown stack normalized", wire: 28, want: wire.Unspecified},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			_, err := wrapReceiveStream(selector, &rawReceiveStream{
@@ -105,7 +105,7 @@ func TestResetErrorDecodesProtocolAndStackCodes(t *testing.T) {
 }
 
 func TestReceiveWrapperDoesNotEchoPeerReset(t *testing.T) {
-	selector := protocol.Selector(2)
+	selector := wire.Selector(2)
 	raw := &rawReceiveStream{ReadErr: &transport.StreamResetError{Code: 3}}
 	_, err := wrapReceiveStream(selector, raw).Read(nil)
 	reset, ok := errors.AsType[*ResetError](err)
@@ -120,7 +120,7 @@ func TestReceiveWrapperDoesNotEchoPeerReset(t *testing.T) {
 
 func TestReceiveWrapperPreservesOrdinaryReadErrors(t *testing.T) {
 	want := io.EOF
-	_, err := wrapReceiveStream(protocol.Selector(2), &rawReceiveStream{ReadErr: want}).Read(nil)
+	_, err := wrapReceiveStream(wire.Selector(2), &rawReceiveStream{ReadErr: want}).Read(nil)
 	if !errors.Is(err, want) {
 		t.Fatalf("Read error = %v, want %v", err, want)
 	}

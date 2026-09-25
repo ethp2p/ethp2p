@@ -8,7 +8,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/ethp2p/ethp2p/protocol"
+	"github.com/ethp2p/ethp2p/wire"
 	"github.com/ethp2p/ethp2p/transport"
 )
 
@@ -17,7 +17,7 @@ import (
 //   - Cancelling a side is idempotent. The first code is the one sent; later
 //     calls have no effect.
 //   - A failed Read, Write, or Close cancels its side before returning, with
-//     protocol.Timeout if a deadline expired and protocol.Unspecified
+//     wire.Timeout if a deadline expired and wire.Unspecified
 //     otherwise. A caller's later cancel therefore has no effect, so callers
 //     may cancel with their own code after any error: it takes effect only
 //     when no I/O failed, for example on a malformed frame.
@@ -34,7 +34,7 @@ type SendStream interface {
 	// Close sends FIN after all data written to the stream.
 	Close() error
 	// CancelWrite aborts the write side with a selector-scoped outcome.
-	CancelWrite(protocol.Code)
+	CancelWrite(wire.Code)
 	// SetWriteDeadline sets or clears the write deadline.
 	SetWriteDeadline(time.Time) error
 }
@@ -45,7 +45,7 @@ type ReceiveStream interface {
 	// Read reads protocol data. A remote reset is returned as a [ResetError].
 	Read([]byte) (int, error)
 	// CancelRead stops reading with a selector-scoped outcome.
-	CancelRead(protocol.Code)
+	CancelRead(wire.Code)
 	// SetReadDeadline sets or clears the read deadline.
 	SetReadDeadline(time.Time) error
 }
@@ -60,9 +60,9 @@ type Stream interface {
 	// Close sends FIN after all data written to the stream.
 	Close() error
 	// CancelRead stops reading with a selector-scoped outcome.
-	CancelRead(protocol.Code)
+	CancelRead(wire.Code)
 	// CancelWrite aborts the write side with a selector-scoped outcome.
-	CancelWrite(protocol.Code)
+	CancelWrite(wire.Code)
 	// SetDeadline sets or clears both the read and write deadlines.
 	SetDeadline(time.Time) error
 	// SetReadDeadline sets or clears the read deadline.
@@ -74,7 +74,7 @@ type Stream interface {
 // ResetError reports the code received when a peer reset a stream's read side.
 type ResetError struct {
 	// Code is the decoded stack or protocol outcome.
-	Code  protocol.Code
+	Code  wire.Code
 	cause error
 }
 
@@ -90,7 +90,7 @@ func (e *ResetError) Error() string {
 func (e *ResetError) Unwrap() error { return e.cause }
 
 type sendStream struct {
-	selector    protocol.Selector
+	selector    wire.Selector
 	stream      transport.SendStream
 	cancelWrite sync.Once
 }
@@ -114,9 +114,9 @@ func (s *sendStream) Close() error {
 	return err
 }
 
-func (s *sendStream) CancelWrite(code protocol.Code) {
-	wire := code.WireFor(s.selector)
-	s.cancelWrite.Do(func() { s.stream.CancelWrite(wire) })
+func (s *sendStream) CancelWrite(code wire.Code) {
+	raw := code.WireFor(s.selector)
+	s.cancelWrite.Do(func() { s.stream.CancelWrite(raw) })
 }
 
 func (s *sendStream) SetWriteDeadline(deadline time.Time) error {
@@ -124,7 +124,7 @@ func (s *sendStream) SetWriteDeadline(deadline time.Time) error {
 }
 
 type receiveStream struct {
-	selector   protocol.Selector
+	selector   wire.Selector
 	stream     transport.ReceiveStream
 	cancelRead sync.Once
 }
@@ -139,9 +139,9 @@ func (s *receiveStream) Read(p []byte) (int, error) {
 	return n, resetError(err, s.selector)
 }
 
-func (s *receiveStream) CancelRead(code protocol.Code) {
-	wire := code.WireFor(s.selector)
-	s.cancelRead.Do(func() { s.stream.CancelRead(wire) })
+func (s *receiveStream) CancelRead(code wire.Code) {
+	raw := code.WireFor(s.selector)
+	s.cancelRead.Do(func() { s.stream.CancelRead(raw) })
 }
 
 func (s *receiveStream) SetReadDeadline(deadline time.Time) error {
@@ -149,7 +149,7 @@ func (s *receiveStream) SetReadDeadline(deadline time.Time) error {
 }
 
 type bidirectionalStream struct {
-	selector    protocol.Selector
+	selector    wire.Selector
 	stream      transport.Stream
 	cancelRead  sync.Once
 	cancelWrite sync.Once
@@ -184,14 +184,14 @@ func (s *bidirectionalStream) Close() error {
 	return err
 }
 
-func (s *bidirectionalStream) CancelRead(code protocol.Code) {
-	wire := code.WireFor(s.selector)
-	s.cancelRead.Do(func() { s.stream.CancelRead(wire) })
+func (s *bidirectionalStream) CancelRead(code wire.Code) {
+	raw := code.WireFor(s.selector)
+	s.cancelRead.Do(func() { s.stream.CancelRead(raw) })
 }
 
-func (s *bidirectionalStream) CancelWrite(code protocol.Code) {
-	wire := code.WireFor(s.selector)
-	s.cancelWrite.Do(func() { s.stream.CancelWrite(wire) })
+func (s *bidirectionalStream) CancelWrite(code wire.Code) {
+	raw := code.WireFor(s.selector)
+	s.cancelWrite.Do(func() { s.stream.CancelWrite(raw) })
 }
 
 func (s *bidirectionalStream) SetDeadline(deadline time.Time) error {
@@ -206,27 +206,27 @@ func (s *bidirectionalStream) SetWriteDeadline(deadline time.Time) error {
 	return s.stream.SetWriteDeadline(deadline)
 }
 
-func wrapSendStream(selector protocol.Selector, stream transport.SendStream) SendStream {
+func wrapSendStream(selector wire.Selector, stream transport.SendStream) SendStream {
 	return &sendStream{selector: selector, stream: stream}
 }
 
-func wrapBidirectionalStream(selector protocol.Selector, stream transport.Stream) Stream {
+func wrapBidirectionalStream(selector wire.Selector, stream transport.Stream) Stream {
 	return &bidirectionalStream{selector: selector, stream: stream}
 }
 
-func wrapReceiveStream(selector protocol.Selector, stream transport.ReceiveStream) ReceiveStream {
+func wrapReceiveStream(selector wire.Selector, stream transport.ReceiveStream) ReceiveStream {
 	if bidirectional, ok := stream.(transport.Stream); ok {
 		return wrapBidirectionalStream(selector, bidirectional)
 	}
 	return &receiveStream{selector: selector, stream: stream}
 }
 
-func resetError(err error, selector protocol.Selector) error {
+func resetError(err error, selector wire.Selector) error {
 	reset, ok := errors.AsType[*transport.StreamResetError](err)
 	if !ok {
 		return err
 	}
-	return &ResetError{Code: protocol.ParseCode(selector, reset.Code), cause: err}
+	return &ResetError{Code: wire.ParseCode(selector, reset.Code), cause: err}
 }
 
 var (

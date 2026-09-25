@@ -8,16 +8,16 @@ import (
 	"slices"
 
 	ethp2p "github.com/ethp2p/ethp2p"
-	"github.com/ethp2p/ethp2p/protocol"
+	"github.com/ethp2p/ethp2p/wire"
 )
 
 // These selectors are the broadcast wire contract. Stack owns selector
 // Hello exchange and routing; broadcast only declares the selectors it
 // consumes and handles the streams delivered by Stack.
 const (
-	BCAST protocol.Selector = 1
-	SESS  protocol.Selector = 2
-	CHUNK protocol.Selector = 3
+	BCAST wire.Selector = 1
+	SESS  wire.Selector = 2
+	CHUNK wire.Selector = 3
 )
 
 var (
@@ -32,27 +32,27 @@ var (
 	errStreamRefused  = errors.New("stream will not be processed")
 )
 
-func streamFailureCode(err error) protocol.Code {
+func streamFailureCode(err error) wire.Code {
 	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, os.ErrDeadlineExceeded) {
-		return protocol.Timeout
+		return wire.Timeout
 	}
 	if timeout, ok := errors.AsType[net.Error](err); ok && timeout.Timeout() {
-		return protocol.Timeout
+		return wire.Timeout
 	}
-	return protocol.Unspecified
+	return wire.Unspecified
 }
 
-func streamCancellationCode(cause error) protocol.Code {
-	if streamFailureCode(cause) == protocol.Timeout {
-		return protocol.Timeout
+func streamCancellationCode(cause error) wire.Code {
+	if streamFailureCode(cause) == wire.Timeout {
+		return wire.Timeout
 	}
 	if errors.Is(cause, errChunkRedundant) {
 		return Redundant
 	}
 	if errors.Is(cause, errStreamRefused) {
-		return protocol.Refused
+		return wire.Refused
 	}
-	return protocol.Unspecified
+	return wire.Unspecified
 }
 
 // Register attaches broadcast to stack before Start. The engine drains its
@@ -69,7 +69,7 @@ func (e *Engine) Register(stack *ethp2p.Stack) error {
 	if e.ctx.Err() != nil {
 		return errors.New("broadcast engine closed")
 	}
-	sub, err := stack.Register("broadcast", []protocol.Selector{BCAST, SESS, CHUNK}, ethp2p.SubsystemConfig{
+	sub, err := stack.Register("broadcast", []wire.Selector{BCAST, SESS, CHUNK}, ethp2p.SubsystemConfig{
 		Policy: func(p *ethp2p.Peer) bool { return supportsBroadcastSelectors(p.Selectors()) },
 	})
 	if err != nil {
@@ -89,10 +89,10 @@ func supportsBroadcast(peer *ethp2p.Peer) bool {
 	return supportsBroadcastSelectors(peer.Selectors())
 }
 
-func supportsBroadcastSelectors(selectors []protocol.Selector) bool {
+func supportsBroadcastSelectors(selectors []wire.Selector) bool {
 	return slices.Contains(selectors, BCAST) && slices.Contains(selectors, SESS) && slices.Contains(selectors, CHUNK)
 }
 
-func isBroadcastSelector(selector protocol.Selector) bool {
+func isBroadcastSelector(selector wire.Selector) bool {
 	return selector == BCAST || selector == SESS || selector == CHUNK
 }

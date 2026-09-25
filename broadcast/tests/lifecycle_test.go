@@ -11,7 +11,7 @@ import (
 
 	ethp2p "github.com/ethp2p/ethp2p"
 	"github.com/ethp2p/ethp2p/broadcast"
-	"github.com/ethp2p/ethp2p/protocol"
+	"github.com/ethp2p/ethp2p/wire"
 )
 
 // TestSessionDone verifies that Session.Done() is closed after the
@@ -55,13 +55,13 @@ func TestEngineCloseCleanup(t *testing.T) {
 			a := newTestNode(t)
 			b := newTestNode(t)
 			channelID := broadcast.ChannelID("close-channel")
-			const probeSelector protocol.Selector = 17
+			const probeSelector wire.Selector = 17
 
-			localProbe, err := a.stack.Register("probe", []protocol.Selector{probeSelector}, ethp2p.SubsystemConfig{})
+			localProbe, err := a.stack.Register("probe", []wire.Selector{probeSelector}, ethp2p.SubsystemConfig{})
 			if err != nil {
 				t.Fatal(err)
 			}
-			probe, err := b.stack.Register("probe", []protocol.Selector{probeSelector}, ethp2p.SubsystemConfig{})
+			probe, err := b.stack.Register("probe", []wire.Selector{probeSelector}, ethp2p.SubsystemConfig{})
 			if err != nil {
 				t.Fatal(err)
 			}

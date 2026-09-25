@@ -8,7 +8,7 @@ import (
 	ethp2p "github.com/ethp2p/ethp2p"
 	bcastpb "github.com/ethp2p/ethp2p/broadcast/pb"
 	"github.com/ethp2p/ethp2p/internal/ctxutil"
-	"github.com/ethp2p/ethp2p/protocol"
+	"github.com/ethp2p/ethp2p/wire"
 )
 
 const (
@@ -21,13 +21,13 @@ func (p *PeerConn) acceptBcast(stream ethp2p.ReceiveStream) {
 		return
 	}
 	if p.ctx != nil && p.ctx.Err() != nil {
-		stream.CancelRead(protocol.Unspecified)
+		stream.CancelRead(wire.Unspecified)
 		return
 	}
 	// Each side opens exactly one outbound BCAST stream per connection, so a
 	// second inbound one is a protocol violation, not a simultaneous open.
 	if !p.bcastAccepted.CompareAndSwap(false, true) {
-		stream.CancelRead(protocol.Refused)
+		stream.CancelRead(wire.Refused)
 		return
 	}
 	// The sole successful admission owns the one-element handoff slot, so
@@ -36,7 +36,7 @@ func (p *PeerConn) acceptBcast(stream ethp2p.ReceiveStream) {
 	select {
 	case p.bcastIn <- stream:
 	case <-p.ctx.Done():
-		stream.CancelRead(protocol.Unspecified)
+		stream.CancelRead(wire.Unspecified)
 	}
 }
 
@@ -48,9 +48,9 @@ func (p *PeerConn) acceptSession(stream ethp2p.ReceiveStream) {
 	defer p.handlersMu.Unlock()
 	if !p.ready {
 		if p.ctx.Err() != nil {
-			stream.CancelRead(protocol.Unspecified)
+			stream.CancelRead(wire.Unspecified)
 		} else {
-			stream.CancelRead(protocol.Refused)
+			stream.CancelRead(wire.Refused)
 		}
 		return
 	}
@@ -61,11 +61,11 @@ func (p *PeerConn) acceptSession(stream ethp2p.ReceiveStream) {
 			p.runInboundSession(stream)
 		})
 	case <-p.ctx.Done():
-		stream.CancelRead(protocol.Unspecified)
+		stream.CancelRead(wire.Unspecified)
 	default:
 		// SESS needs other streams to finish; waiting here could exhaust the
 		// uni credit needed by CHUNK, so session capacity remains a refusal.
-		stream.CancelRead(protocol.Overloaded)
+		stream.CancelRead(wire.Overloaded)
 	}
 }
 
@@ -77,7 +77,7 @@ func (p *PeerConn) acceptChunk(stream ethp2p.ReceiveStream) {
 	select {
 	case p.chunkSem <- struct{}{}:
 	case <-p.ctx.Done():
-		stream.CancelRead(protocol.Unspecified)
+		stream.CancelRead(wire.Unspecified)
 		return
 	}
 	p.handlersMu.Lock()
@@ -85,9 +85,9 @@ func (p *PeerConn) acceptChunk(stream ethp2p.ReceiveStream) {
 	if !p.ready {
 		<-p.chunkSem
 		if p.ctx.Err() != nil {
-			stream.CancelRead(protocol.Unspecified)
+			stream.CancelRead(wire.Unspecified)
 		} else {
-			stream.CancelRead(protocol.Refused)
+			stream.CancelRead(wire.Refused)
 		}
 		return
 	}
@@ -106,9 +106,9 @@ func (p *PeerConn) awaitHandshake(stream ethp2p.ReceiveStream) bool {
 	case <-p.ctx.Done():
 	}
 	if p.ctx.Err() != nil {
-		stream.CancelRead(protocol.Unspecified)
+		stream.CancelRead(wire.Unspecified)
 	} else {
-		stream.CancelRead(protocol.Refused)
+		stream.CancelRead(wire.Refused)
 	}
 	return false
 }
@@ -127,12 +127,12 @@ func (p *PeerConn) runInboundSession(s ethp2p.ReceiveStream) {
 		stop()
 		// No effect if the read failed, which already cancelled the stream;
 		// ends it for a malformed frame.
-		s.CancelRead(protocol.Unspecified)
+		s.CancelRead(wire.Unspecified)
 		return
 	}
 	so := frame.GetSessionOpen()
 	if so == nil {
-		s.CancelRead(protocol.Refused)
+		s.CancelRead(wire.Refused)
 		return
 	}
 
@@ -143,15 +143,15 @@ func (p *PeerConn) runInboundSession(s ethp2p.ReceiveStream) {
 
 	ch := p.channelInboxFor(channelID)
 	if ch == nil {
-		s.CancelRead(protocol.Refused)
+		s.CancelRead(wire.Refused)
 		return
 	}
 	if !ch.add(s) {
-		s.CancelRead(protocol.Unspecified)
+		s.CancelRead(wire.Unspecified)
 		return
 	}
 	defer ch.release(s)
-	stopChannel := ctxutil.OnCancel(ch.ctx, func() { s.CancelRead(protocol.Unspecified) })
+	stopChannel := ctxutil.OnCancel(ch.ctx, func() { s.CancelRead(wire.Unspecified) })
 	defer stopChannel()
 
 	// Deliver SessionOpen to channel (with initial routing if present).
@@ -163,7 +163,7 @@ func (p *PeerConn) runInboundSession(s ethp2p.ReceiveStream) {
 		stream: s,
 	}:
 	case <-ch.done:
-		s.CancelRead(protocol.Unspecified)
+		s.CancelRead(wire.Unspecified)
 		return
 	case <-p.ctx.Done():
 		s.CancelRead(streamFailureCode(p.ctx.Err()))
@@ -188,18 +188,18 @@ func (p *PeerConn) runInboundSession(s ethp2p.ReceiveStream) {
 				}
 				return
 			}
-			s.CancelRead(protocol.Unspecified)
+			s.CancelRead(wire.Unspecified)
 			return
 		}
 		ru := frame.GetRoutingUpdate()
 		if ru == nil {
-			s.CancelRead(protocol.Refused)
+			s.CancelRead(wire.Refused)
 			return
 		}
 		select {
 		case ch.inbox <- channelRoutingUpdate{peerID: p.id, messageID: messageID, msg: ru}:
 		case <-ch.done:
-			s.CancelRead(protocol.Unspecified)
+			s.CancelRead(wire.Unspecified)
 			return
 		case <-p.ctx.Done():
 			s.CancelRead(streamFailureCode(p.ctx.Err()))
@@ -216,7 +216,7 @@ func (p *PeerConn) processChunk(s ethp2p.ReceiveStream) {
 	err := ReadFrame(s, &frame)
 	stop()
 	if err != nil {
-		s.CancelRead(protocol.Unspecified)
+		s.CancelRead(wire.Unspecified)
 		return
 	}
 	if p.ctx.Err() != nil {
@@ -230,17 +230,17 @@ func (p *PeerConn) processChunk(s ethp2p.ReceiveStream) {
 
 	ch := p.channelInboxFor(ChannelID(frame.Channel))
 	if ch == nil {
-		s.CancelRead(protocol.Refused)
+		s.CancelRead(wire.Refused)
 		return
 	}
 
 	held := p.holdChunk(s, ch)
 	if !ch.add(held) {
-		held.CancelRead(protocol.Unspecified)
+		held.CancelRead(wire.Unspecified)
 		return
 	}
 	if p.ctx.Err() != nil {
-		held.CancelRead(protocol.Unspecified)
+		held.CancelRead(wire.Unspecified)
 		return
 	}
 	chnk := channelChunkStream{
@@ -251,7 +251,7 @@ func (p *PeerConn) processChunk(s ethp2p.ReceiveStream) {
 	select {
 	case ch.inbox <- chnk:
 	case <-ch.done:
-		chnk.stream.CancelRead(protocol.Unspecified)
+		chnk.stream.CancelRead(wire.Unspecified)
 	case <-p.ctx.Done():
 		chnk.stream.CancelRead(streamFailureCode(p.ctx.Err()))
 	}

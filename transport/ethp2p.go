@@ -6,7 +6,7 @@ import (
 	"net"
 	"os"
 
-	"github.com/ethp2p/ethp2p/protocol"
+	"github.com/ethp2p/ethp2p/wire"
 )
 
 var _ Conn = (*ethp2pConn)(nil)
@@ -121,14 +121,14 @@ type ethp2pConn struct {
 	*sharedConn
 }
 
-func openFailureCode(ctx context.Context, err error) protocol.Code {
+func openFailureCode(ctx context.Context, err error) wire.Code {
 	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, os.ErrDeadlineExceeded) || errors.Is(ctx.Err(), context.DeadlineExceeded) {
-		return protocol.Timeout
+		return wire.Timeout
 	}
 	if timeout, ok := errors.AsType[net.Error](err); ok && timeout.Timeout() {
-		return protocol.Timeout
+		return wire.Timeout
 	}
-	return protocol.Unspecified
+	return wire.Unspecified
 }
 
 // RemotePeerID returns the identity authenticated for the remote endpoint.
@@ -136,7 +136,7 @@ func (c *ethp2pConn) RemotePeerID() PeerID { return c.remotePeerID() }
 
 func (c *ethp2pConn) Outbound() bool { return c.outbound }
 
-func (c *ethp2pConn) OpenStream(ctx context.Context, selector protocol.Selector) (Stream, error) {
+func (c *ethp2pConn) OpenStream(ctx context.Context, selector wire.Selector) (Stream, error) {
 	if c.ethp2pCtx.Err() != nil {
 		return nil, ethp2pError(context.Cause(c.ethp2pCtx))
 	}
@@ -150,7 +150,7 @@ func (c *ethp2pConn) OpenStream(ctx context.Context, selector protocol.Selector)
 		return nil, ethp2pError(err)
 	}
 	stop := context.AfterFunc(bound, func() { s.CancelWrite(quicCode(openFailureCode(bound, bound.Err()))) })
-	err = protocol.WriteSelector(s, selector)
+	err = wire.WriteSelector(s, selector)
 	stop()
 	if err = errors.Join(err, bound.Err()); err != nil {
 		code := openFailureCode(bound, err)
@@ -160,7 +160,7 @@ func (c *ethp2pConn) OpenStream(ctx context.Context, selector protocol.Selector)
 	return stream{s}, nil
 }
 
-func (c *ethp2pConn) OpenUniStream(ctx context.Context, selector protocol.Selector) (SendStream, error) {
+func (c *ethp2pConn) OpenUniStream(ctx context.Context, selector wire.Selector) (SendStream, error) {
 	if c.ethp2pCtx.Err() != nil {
 		return nil, ethp2pError(context.Cause(c.ethp2pCtx))
 	}
@@ -174,7 +174,7 @@ func (c *ethp2pConn) OpenUniStream(ctx context.Context, selector protocol.Select
 		return nil, ethp2pError(err)
 	}
 	stop := context.AfterFunc(bound, func() { s.CancelWrite(quicCode(openFailureCode(bound, bound.Err()))) })
-	err = protocol.WriteSelector(s, selector)
+	err = wire.WriteSelector(s, selector)
 	stop()
 	if err = errors.Join(err, bound.Err()); err != nil {
 		s.CancelWrite(quicCode(openFailureCode(bound, err)))
@@ -183,7 +183,7 @@ func (c *ethp2pConn) OpenUniStream(ctx context.Context, selector protocol.Select
 	return sendStream{s}, nil
 }
 
-func (c *ethp2pConn) AcceptStream(ctx context.Context) (Stream, protocol.Selector, error) {
+func (c *ethp2pConn) AcceptStream(ctx context.Context) (Stream, wire.Selector, error) {
 	if _, err := c.PeerHello(ctx); err != nil {
 		return nil, 0, ethp2pError(err)
 	}
@@ -192,13 +192,13 @@ func (c *ethp2pConn) AcceptStream(ctx context.Context) (Stream, protocol.Selecto
 		return nil, 0, ethp2pError(err)
 	}
 	if c.ethp2pCtx.Err() != nil {
-		resetBi(s.stream, protocol.Closing)
+		resetBi(s.stream, wire.Closing)
 		return nil, 0, ethp2pError(context.Cause(c.ethp2pCtx))
 	}
 	return stream{s.stream}, s.selector, nil
 }
 
-func (c *ethp2pConn) AcceptUniStream(ctx context.Context) (ReceiveStream, protocol.Selector, error) {
+func (c *ethp2pConn) AcceptUniStream(ctx context.Context) (ReceiveStream, wire.Selector, error) {
 	if _, err := c.PeerHello(ctx); err != nil {
 		return nil, 0, ethp2pError(err)
 	}
@@ -207,7 +207,7 @@ func (c *ethp2pConn) AcceptUniStream(ctx context.Context) (ReceiveStream, protoc
 		return nil, 0, ethp2pError(err)
 	}
 	if c.ethp2pCtx.Err() != nil {
-		s.stream.CancelRead(quicCode(protocol.Closing))
+		s.stream.CancelRead(quicCode(wire.Closing))
 		return nil, 0, ethp2pError(context.Cause(c.ethp2pCtx))
 	}
 	return &receiveStream{ReceiveStream: s.stream, skip: s.frameLen}, s.selector, nil
@@ -234,16 +234,16 @@ func (c *ethp2pConn) RecvDatagram(ctx context.Context) ([]byte, error) {
 }
 
 func (c *ethp2pConn) Close() error {
-	return c.CloseWithCode(protocol.Closing)
+	return c.CloseWithCode(wire.Closing)
 }
 
 // CloseWithCode sends GoAway and FIN before releasing the view. The first
 // closure cause wins; subsequent calls are no-ops.
-func (c *ethp2pConn) CloseWithCode(code protocol.Code) error {
+func (c *ethp2pConn) CloseWithCode(code wire.Code) error {
 	if code.Wire()&1 != 0 {
 		return errors.New("CloseWithCode requires a stack code")
 	}
-	c.closeControl(code, false, true, protocol.Closing)
+	c.closeControl(code, false, true, wire.Closing)
 	return nil
 }
 

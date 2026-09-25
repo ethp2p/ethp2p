@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/ethp2p/ethp2p/protocol"
+	"github.com/ethp2p/ethp2p/wire"
 	"github.com/quic-go/quic-go"
 )
 
@@ -107,7 +107,7 @@ func TestQueuedStreamsResetOnViewClose(t *testing.T) {
 		t.Fatal(err)
 	}
 	_, err = pair.serverEth.PeerHello(ctx)
-	assertEthViewCause(t, err, protocol.Closing, false)
+	assertEthViewCause(t, err, wire.Closing, false)
 	var one [1]byte
 	_, err = bi.Read(one[:])
 	reset, ok := errors.AsType[*StreamResetError](err)

@@ -8,7 +8,7 @@ import (
 	"sync/atomic"
 
 	ethp2p "github.com/ethp2p/ethp2p"
-	"github.com/ethp2p/ethp2p/protocol"
+	"github.com/ethp2p/ethp2p/wire"
 	"github.com/ethp2p/ethp2p/transport"
 )
 
@@ -301,7 +301,7 @@ func (e *Engine) handleStreamEvent(event ethp2p.Event) {
 		return
 	}
 	if e.ctx.Err() != nil {
-		event.Cancel(protocol.Unspecified)
+		event.Cancel(wire.Unspecified)
 		return
 	}
 	if _, ok := event.Stream.(ethp2p.Stream); ok {
@@ -431,7 +431,7 @@ func (e *Engine) enrolPeerToChannel(p *PeerConn, channelID ChannelID) {
 func (e *Engine) shutdown() {
 	if sub := e.subsystem.Load(); sub != nil {
 		for event, ok := sub.Next(); ok; event, ok = sub.Next() {
-			event.Cancel(protocol.Unspecified)
+			event.Cancel(wire.Unspecified)
 		}
 	}
 

@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/ethp2p/ethp2p/protocol"
+	"github.com/ethp2p/ethp2p/wire"
 	"github.com/ethp2p/ethp2p/transport"
 	"github.com/ethp2p/ethp2p/transport/transporttest"
 	"github.com/quic-go/quic-go"
@@ -20,32 +20,32 @@ type sinkAdmission struct {
 }
 type sinkStream struct {
 	conn   transport.Conn
-	sel    protocol.Selector
+	sel    wire.Selector
 	stream transport.ReceiveStream
 }
 type recordingSink struct {
 	admissions chan sinkAdmission
 	streams    chan sinkStream
-	closed     chan protocol.Code
-	admit      func(transport.Conn, transport.Hello) (protocol.Code, bool)
+	closed     chan wire.Code
+	admit      func(transport.Conn, transport.Hello) (wire.Code, bool)
 	count      atomic.Int32
 }
 
 func newRecordingSink() *recordingSink {
-	return &recordingSink{admissions: make(chan sinkAdmission, 4), streams: make(chan sinkStream, 8), closed: make(chan protocol.Code, 4)}
+	return &recordingSink{admissions: make(chan sinkAdmission, 4), streams: make(chan sinkStream, 8), closed: make(chan wire.Code, 4)}
 }
-func (s *recordingSink) Admit(c transport.Conn, h transport.Hello) (protocol.Code, bool) {
+func (s *recordingSink) Admit(c transport.Conn, h transport.Hello) (wire.Code, bool) {
 	s.count.Add(1)
 	s.admissions <- sinkAdmission{c, h}
 	if s.admit != nil {
 		return s.admit(c, h)
 	}
-	return protocol.Unspecified, true
+	return wire.Unspecified, true
 }
-func (s *recordingSink) Stream(c transport.Conn, sel protocol.Selector, in transport.ReceiveStream) {
+func (s *recordingSink) Stream(c transport.Conn, sel wire.Selector, in transport.ReceiveStream) {
 	s.streams <- sinkStream{c, sel, in}
 }
-func (s *recordingSink) Closed(_ transport.Conn, c protocol.Code) { s.closed <- c }
+func (s *recordingSink) Closed(_ transport.Conn, c wire.Code) { s.closed <- c }
 func sinkTake[T any](t *testing.T, ch <-chan T) T {
 	t.Helper()
 	select {
@@ -61,7 +61,7 @@ func sinkTake[T any](t *testing.T, ch <-chan T) T {
 func TestSinkBind(t *testing.T) {
 	e := transporttest.NewEndpoint(t)
 	sink := newRecordingSink()
-	if err := e.Eth.Bind(transport.Hello{Selectors: []protocol.Selector{0}}, sink); err == nil {
+	if err := e.Eth.Bind(transport.Hello{Selectors: []wire.Selector{0}}, sink); err == nil {
 		t.Fatal("invalid Hello accepted")
 	}
 	if err := e.Eth.Bind(transport.Hello{}, sink); err != nil {
@@ -87,10 +87,10 @@ func TestSinkCloseDuringDialAdmission(t *testing.T) {
 	client, server := transporttest.NewEndpoint(t), transporttest.NewEndpoint(t)
 	sink := newRecordingSink()
 	entered, release := make(chan struct{}), make(chan struct{})
-	sink.admit = func(transport.Conn, transport.Hello) (protocol.Code, bool) {
+	sink.admit = func(transport.Conn, transport.Hello) (wire.Code, bool) {
 		close(entered)
 		<-release
-		return protocol.Unspecified, true
+		return wire.Unspecified, true
 	}
 	if err := client.Eth.Bind(transport.Hello{}, sink); err != nil {
 		t.Fatal(err)
@@ -132,7 +132,7 @@ func TestSinkCloseDuringDialAdmission(t *testing.T) {
 	// waiting here: waiting could hide a callback from a late-started pump.
 	select {
 	case code := <-sink.closed:
-		if code != protocol.Closing {
+		if code != wire.Closing {
 			t.Errorf("Closed = %v", code)
 		}
 	default:
@@ -160,11 +160,11 @@ func TestSinkInboundPump(t *testing.T) {
 			}
 			sink := newRecordingSink()
 			gate := make(chan struct{})
-			sink.admit = func(transport.Conn, transport.Hello) (protocol.Code, bool) { <-gate; return protocol.Unspecified, true }
+			sink.admit = func(transport.Conn, transport.Hello) (wire.Code, bool) { <-gate; return wire.Unspecified, true }
 			if err := server.Eth.Bind(transport.Hello{}, sink); err != nil {
 				t.Fatal(err)
 			}
-			want := transport.Hello{Selectors: []protocol.Selector{7}, Record: []byte("opaque")}
+			want := transport.Hello{Selectors: []wire.Selector{7}, Record: []byte("opaque")}
 			if err := client.Eth.SetHello(want); err != nil {
 				t.Fatal(err)
 			}
@@ -221,9 +221,9 @@ func TestSinkInboundPump(t *testing.T) {
 			send(false, 2)
 			send(true, 2)
 			check(2)
-			code := protocol.Closing
+			code := wire.Closing
 			if remote {
-				code = protocol.Refused
+				code = wire.Refused
 				_ = out.CloseWithCode(code)
 			} else {
 				_ = admitted.conn.Close()
@@ -255,7 +255,7 @@ func TestSinkRejectedView(t *testing.T) {
 	}
 	sink := newRecordingSink()
 	gate := make(chan struct{})
-	sink.admit = func(transport.Conn, transport.Hello) (protocol.Code, bool) { <-gate; return protocol.Refused, false }
+	sink.admit = func(transport.Conn, transport.Hello) (wire.Code, bool) { <-gate; return wire.Refused, false }
 	if err := server.Eth.Bind(transport.Hello{}, sink); err != nil {
 		t.Fatal(err)
 	}
@@ -278,7 +278,7 @@ func TestSinkRejectedView(t *testing.T) {
 	close(gate)
 	_, _, err = out.AcceptUniStream(ctx)
 	closed, ok := errors.AsType[*transport.ViewClosedError](err)
-	if !ok || closed.Code != protocol.Refused || !closed.Remote {
+	if !ok || closed.Code != wire.Refused || !closed.Remote {
 		t.Fatalf("rejection = %v", err)
 	}
 	_ = stream.SetWriteDeadline(time.Now().Add(5 * time.Second))
@@ -301,8 +301,8 @@ func TestSinkDialAdmission(t *testing.T) {
 		t.Run(map[bool]string{false: "accept", true: "reject"}[reject], func(t *testing.T) {
 			client, server := transporttest.NewEndpoint(t), transporttest.NewEndpoint(t)
 			sink := newRecordingSink()
-			sink.admit = func(transport.Conn, transport.Hello) (protocol.Code, bool) {
-				return protocol.NoSharedProtocols, !reject
+			sink.admit = func(transport.Conn, transport.Hello) (wire.Code, bool) {
+				return wire.NoSharedProtocols, !reject
 			}
 			if err := client.Eth.Bind(transport.Hello{}, sink); err != nil {
 				t.Fatal(err)
@@ -317,7 +317,7 @@ func TestSinkDialAdmission(t *testing.T) {
 			}
 			if reject {
 				closed, ok := errors.AsType[*transport.ViewClosedError](err)
-				if !ok || closed.Code != protocol.NoSharedProtocols || closed.Remote {
+				if !ok || closed.Code != wire.NoSharedProtocols || closed.Remote {
 					t.Fatalf("Dial = %v", err)
 				}
 			} else {

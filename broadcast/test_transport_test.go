@@ -7,7 +7,7 @@ import (
 	"time"
 
 	ethp2p "github.com/ethp2p/ethp2p"
-	"github.com/ethp2p/ethp2p/protocol"
+	"github.com/ethp2p/ethp2p/wire"
 	"github.com/ethp2p/ethp2p/transport"
 )
 
@@ -44,13 +44,13 @@ func newHighCapTransport(ctx context.Context) *testTransport {
 	}
 }
 
-func (t *testTransport) OpenUniStream(ctx context.Context, selector protocol.Selector) (ethp2p.SendStream, error) {
+func (t *testTransport) OpenUniStream(ctx context.Context, selector wire.Selector) (ethp2p.SendStream, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
 	stream := &testStream{send: t.streamSend, recv: t.streamRecv, ctx: t.ctx}
-	if err := protocol.WriteSelector(stream, selector); err != nil {
-		stream.CancelWrite(protocol.Unspecified)
+	if err := wire.WriteSelector(stream, selector); err != nil {
+		stream.CancelWrite(wire.Unspecified)
 		return nil, err
 	}
 	return stream, nil
@@ -108,8 +108,8 @@ func (s *testStream) Close() error {
 	return nil
 }
 
-func (s *testStream) CancelRead(protocol.Code)           {}
-func (s *testStream) CancelWrite(protocol.Code)          {}
+func (s *testStream) CancelRead(wire.Code)           {}
+func (s *testStream) CancelWrite(wire.Code)          {}
 func (s *testStream) SetDeadline(t time.Time) error      { return nil }
 func (s *testStream) SetReadDeadline(t time.Time) error  { return nil }
 func (s *testStream) SetWriteDeadline(t time.Time) error { return nil }

@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/ethp2p/ethp2p/protocol"
+	"github.com/ethp2p/ethp2p/wire"
 	"github.com/libp2p/go-libp2p/p2p/transport/quicreuse"
 	"github.com/quic-go/quic-go"
 )
@@ -51,7 +51,7 @@ func PendingLibp2p(t *SharedTransport) int { return len(t.libQ) }
 // AssertEthp2pViewClosed checks the released ethp2p sibling of a libp2p view.
 // An overloaded view is never delivered through Ethp2pTransport.Accept, so
 // external tests inspect its cause through the surviving sibling here.
-func AssertEthp2pViewClosed(t *testing.T, conn quicreuse.QUICConn, code protocol.Code, remote bool) {
+func AssertEthp2pViewClosed(t *testing.T, conn quicreuse.QUICConn, code wire.Code, remote bool) {
 	t.Helper()
 	ctx := (*sharedConn)(conn.(*libp2pConn)).ethp2pCtx
 	select {

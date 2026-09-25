@@ -8,7 +8,7 @@ import (
 	"time"
 
 	ethp2p "github.com/ethp2p/ethp2p"
-	"github.com/ethp2p/ethp2p/protocol"
+	"github.com/ethp2p/ethp2p/wire"
 	"github.com/ethp2p/ethp2p/transport"
 )
 
@@ -120,18 +120,18 @@ type session[CI ChunkIdent, R Wire] struct {
 // Cancels all outbound sends and inbound reads, waits for background
 // goroutines to finish, closes strategy, notifies peers, closes the done channel.
 func (s *session[CI, R]) Close() error {
-	return s.closeWithCode(protocol.Unspecified)
+	return s.closeWithCode(wire.Unspecified)
 }
 
 // closeWithCode propagates the reason for session disposal to active stream
 // readers before waiting for their cancellation to complete.
-func (s *session[CI, R]) closeWithCode(code protocol.Code) error {
+func (s *session[CI, R]) closeWithCode(code wire.Code) error {
 	s.notifyPeersSessionDone()
 	cause := error(context.Canceled)
 	switch code {
 	case Redundant:
 		cause = errChunkRedundant
-	case protocol.Refused:
+	case wire.Refused:
 		cause = errStreamRefused
 	}
 	s.sessCancel(cause)
@@ -197,7 +197,7 @@ func (s *session[CI, R]) handleChunkStream(peer transport.PeerID, chunkID []byte
 			MessageID: s.messageID,
 			Err:       fmt.Errorf("unmarshal chunk id: %w", err),
 		})
-		stream.CancelRead(protocol.Unspecified)
+		stream.CancelRead(wire.Unspecified)
 		return
 	}
 	if dataLen > maxChunkDataSize {
@@ -207,7 +207,7 @@ func (s *session[CI, R]) handleChunkStream(peer transport.PeerID, chunkID []byte
 			MessageID: s.messageID,
 			Err:       fmt.Errorf("chunk data length %d exceeds max %d", dataLen, maxChunkDataSize),
 		})
-		stream.CancelRead(protocol.Unspecified)
+		stream.CancelRead(wire.Unspecified)
 		return
 	}
 	if s.stage >= stageDecoding || s.strategy.HaveChunk(chunk) {
@@ -285,7 +285,7 @@ func (s *session[CI, R]) handleChunkStream(peer transport.PeerID, chunkID []byte
 			close(done)
 			// A failed read was already cancelled by the stream; this only
 			// takes effect for a payload truncated by FIN.
-			stream.CancelRead(protocol.Unspecified)
+			stream.CancelRead(wire.Unspecified)
 			return
 		}
 
@@ -302,7 +302,7 @@ func (s *session[CI, R]) handleChunkStream(peer transport.PeerID, chunkID []byte
 			stream.CancelRead(streamCancellationCode(context.Cause(readCtx)))
 		case <-s.channelDone:
 			close(done)
-			stream.CancelRead(protocol.Unspecified)
+			stream.CancelRead(wire.Unspecified)
 		}
 	})
 }
@@ -532,7 +532,7 @@ func (s *session[CI, R]) handlePeerDropped(peer transport.PeerID) {
 	kept := s.readQueue[:0]
 	for _, pending := range s.readQueue {
 		if pending.peer == peer {
-			pending.stream.CancelRead(protocol.Unspecified)
+			pending.stream.CancelRead(wire.Unspecified)
 		} else {
 			kept = append(kept, pending)
 		}

@@ -1,6 +1,6 @@
 package broadcast
 
-import "github.com/ethp2p/ethp2p/protocol"
+import "github.com/ethp2p/ethp2p/wire"
 
 // sessionLease charges the first opener until disposal, independently of SESS
 // reader lifetime. Only session disposal releases the charge. The target is
@@ -10,21 +10,21 @@ type sessionLease struct {
 	target *channelDelivery
 }
 
-func (p *PeerConn) reserveSession(target *channelDelivery) (*sessionLease, protocol.Code) {
+func (p *PeerConn) reserveSession(target *channelDelivery) (*sessionLease, wire.Code) {
 	p.chunkMu.Lock()
 	defer p.chunkMu.Unlock()
 	if p.ctx.Err() != nil {
-		return nil, protocol.Unspecified
+		return nil, wire.Unspecified
 	}
 	if len(p.liveSessions) >= p.engine.config.maxLiveSessionsPerPeer() {
-		return nil, protocol.Overloaded
+		return nil, wire.Overloaded
 	}
 	if p.liveSessions == nil {
 		p.liveSessions = make(map[*sessionLease]struct{})
 	}
 	l := &sessionLease{peer: p, target: target}
 	p.liveSessions[l] = struct{}{}
-	return l, protocol.Unspecified
+	return l, wire.Unspecified
 }
 
 func (p *PeerConn) notifyCreatorDeparture() {
