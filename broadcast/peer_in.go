@@ -1,6 +1,7 @@
 package broadcast
 
 import (
+	"context"
 	"errors"
 	"io"
 	"time"
@@ -130,9 +131,8 @@ func (p *PeerConn) runInboundSession(s ethp2p.ReceiveStream) {
 	var frame bcastpb.Sess
 	if err := ReadFrame(s, &frame); err != nil {
 		stop()
-		// No effect if the read failed, which already cancelled the stream;
-		// ends it for a malformed frame.
-		s.CancelRead(wire.Unspecified)
+		// Reads never cancel a side, so end it here with the read error's code.
+		s.CancelRead(streamCancellationCode(errors.Join(err, context.Cause(p.ctx))))
 		return
 	}
 	so := frame.GetSessionOpen()
@@ -196,7 +196,7 @@ func (p *PeerConn) runInboundSession(s ethp2p.ReceiveStream) {
 				}
 				return
 			}
-			s.CancelRead(wire.Unspecified)
+			s.CancelRead(streamCancellationCode(errors.Join(err, context.Cause(p.ctx))))
 			return
 		}
 		ru := frame.GetRoutingUpdate()
@@ -227,7 +227,8 @@ func (p *PeerConn) processChunk(s ethp2p.ReceiveStream) {
 	err := ReadFrame(s, &frame)
 	stop()
 	if err != nil {
-		s.CancelRead(wire.Unspecified)
+		// Reads never cancel a side, so end it here with the read error's code.
+		s.CancelRead(streamCancellationCode(errors.Join(err, context.Cause(p.ctx))))
 		return
 	}
 	if p.ctx.Err() != nil {

@@ -27,10 +27,9 @@ var (
 // Selector identifies an ethp2p stream protocol on the wire.
 type Selector uint64
 
-// Code is a stream outcome, scoped to a selector when it is protocol-defined.
-// It is comparable; its zero value is [Unspecified].
+// Code is a stream outcome, stack or protocol. It is comparable; its
+// zero value is [Unspecified].
 type Code struct {
-	selector Selector
 	value    uint64
 	protocol bool
 }
@@ -60,32 +59,15 @@ var (
 	Duplicate = Code{value: 13}
 )
 
-// Code constructs a protocol-namespace outcome for s. Selector zero cannot
-// have protocol-specific outcomes.
-func (s Selector) Code(value uint16) Code {
-	if s == 0 {
-		panic("protocol: selector zero has no protocol outcome codes")
-	}
-	return Code{selector: s, value: uint64(value), protocol: true}
+// ProtocolCode returns a protocol-namespace outcome code for value. It
+// carries no selector binding; the stream it is sent on determines where it
+// applies.
+func ProtocolCode(value uint16) Code {
+	return Code{value: uint64(value), protocol: true}
 }
 
-// WireFor returns the QUIC application error code for c on a stream with
-// selector sel. A protocol code for another selector panics. Stack-only codes
-// are encoded as [Unspecified]; only stack-owned paths may send them.
-func (c Code) WireFor(sel Selector) uint64 {
-	if c.protocol && c.selector != sel {
-		panic(fmt.Sprintf("protocol: code for selector %d sent on selector %d", c.selector, sel))
-	}
-	if !c.protocol && c.value > 3 {
-		return Unspecified.Wire()
-	}
-	return c.Wire()
-}
-
-// Wire returns the QUIC application error code for c, value<<1 | namespace,
-// without the checks WireFor applies. It is for the stack's own send paths,
-// which may send stack-only codes. Protocols never hold streams that take a
-// raw code, so they cannot use it to bypass WireFor.
+// Wire returns the QUIC application error code for c, value<<1 | namespace.
+// It is the only encoding.
 func (c Code) Wire() uint64 {
 	if c.protocol {
 		return c.value<<1 | 1
@@ -93,13 +75,13 @@ func (c Code) Wire() uint64 {
 	return c.value << 1
 }
 
-// ParseCode decodes a received QUIC application error code on a stream with
-// selector sel. Protocol-namespace values remain bound to sel. Unknown stack
-// values decode as [Unspecified].
-func ParseCode(sel Selector, raw uint64) Code {
+// ParseCode decodes a received QUIC application error code.
+// Protocol-namespace values are preserved. Unknown stack values decode as
+// [Unspecified].
+func ParseCode(raw uint64) Code {
 	value := raw >> 1
 	if raw&1 != 0 {
-		return Code{selector: sel, value: value, protocol: true}
+		return Code{value: value, protocol: true}
 	}
 	switch value {
 	case 0, 1, 2, 3, 8, 9, 10, 11, 12, 13:
@@ -112,7 +94,7 @@ func ParseCode(sel Selector, raw uint64) Code {
 // String formats the outcome for errors and logs.
 func (c Code) String() string {
 	if c.protocol {
-		return fmt.Sprintf("protocol selector %d value %d", c.selector, c.value)
+		return fmt.Sprintf("protocol value %d", c.value)
 	}
 	switch c.value {
 	case 0:

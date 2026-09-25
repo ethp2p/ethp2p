@@ -52,7 +52,7 @@ func ethp2pError(err error) error {
 		return err
 	}
 	raw := uint64(app.ErrorCode)
-	code := wire.ParseCode(0, raw)
+	code := wire.ParseCode(raw)
 	if code.Wire() != raw {
 		return err
 	}

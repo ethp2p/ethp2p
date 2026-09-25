@@ -266,7 +266,7 @@ func TestDeliverySharedWake(t *testing.T) {
 func TestEventMethods(t *testing.T) {
 	for _, kind := range []EventKind{PeerUp, PeerDown, StreamIn} {
 		raw := new(transporttest.RawReceiveStream)
-		event := Event{Kind: kind, Stream: wrapReceiveStream(selectorAlpha, raw)}
+		event := Event{Kind: kind, Stream: wrapReceiveStream(raw)}
 		event.Cancel(wire.Overloaded)
 		codes := raw.CancelReadCodes()
 		if kind == StreamIn {
@@ -277,7 +277,7 @@ func TestEventMethods(t *testing.T) {
 			t.Fatalf("kind %d cancelled stream: %v", kind, codes)
 		}
 		raw = new(transporttest.RawReceiveStream)
-		event.Stream = wrapReceiveStream(selectorAlpha, raw)
+		event.Stream = wrapReceiveStream(raw)
 		event.Reject()
 		codes = raw.CancelReadCodes()
 		if kind == StreamIn {

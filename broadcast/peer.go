@@ -391,9 +391,8 @@ func (p *PeerConn) handshake(ctx context.Context, ourChannels []ChannelID) (Prot
 		stop()
 		readFrameSucceeded = readErr == nil
 		if readErr != nil {
-			// No effect if the read failed, which already cancelled the stream;
-			// ends it for a malformed frame.
-			incoming.CancelRead(wire.Unspecified)
+			// Reads never cancel a side, so end it here with the read error's code.
+			incoming.CancelRead(streamCancellationCode(errors.Join(readErr, context.Cause(ctx))))
 		}
 		if readErr == nil {
 			readErr = ctx.Err()

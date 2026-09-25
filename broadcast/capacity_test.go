@@ -221,7 +221,7 @@ func TestSessionQueueBoundAndDisposal(t *testing.T) {
 				e := capacityTake(t, inbox).(channelChunkStream)
 				s.handleChunkStream(p.id, e.frame.ChunkId, e.frame.DataLength, e.stream)
 				if i == 2 {
-					requireWireCancelCode(t, raw, 5)
+					requireWireCancelCode(t, raw, 0)
 				}
 			}
 			if p.queuedChunks != 2 {

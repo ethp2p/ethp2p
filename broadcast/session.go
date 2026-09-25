@@ -2,6 +2,7 @@ package broadcast
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"sync"
@@ -252,8 +253,8 @@ func (s *session[CI, R]) handleChunkStream(peer transport.PeerID, chunkID []byte
 		if held, ok := stream.(*heldChunk); ok && !held.move(chunkQueued) {
 			// After EOF, CancelRead cannot reclaim credit or signal a wire reset;
 			// rejection still releases local ownership. Unfinished excess streams
-			// receive InvalidChunk (wire 5).
-			stream.CancelRead(InvalidChunk)
+			// receive Unspecified.
+			stream.CancelRead(wire.Unspecified)
 			return
 		}
 		s.readQueue = append(s.readQueue, pendingChunkRead{peer, chunkID, dataLen, stream})
@@ -315,9 +316,9 @@ func (s *session[CI, R]) handleChunkStream(peer transport.PeerID, chunkID []byte
 		if _, err := io.ReadFull(stream, buf); err != nil {
 			close(done)
 			s.emitDedupReadCancelled(peer, readCtx, dedupKey)
-			// A failed read was already cancelled by the stream; this only
-			// takes effect for a payload truncated by FIN.
-			stream.CancelRead(wire.Unspecified)
+			// Reads never cancel a side, so end it here with the read error's
+			// code; a payload truncated by FIN maps to Unspecified.
+			stream.CancelRead(streamCancellationCode(errors.Join(err, context.Cause(readCtx))))
 			return
 		}
 

@@ -202,7 +202,7 @@ func (c *sharedConn) readControl(created time.Time) {
 			value := message.GetGoAway().Code
 			code := wire.Unspecified
 			if value <= math.MaxUint64>>1 {
-				code = wire.ParseCode(0, value<<1)
+				code = wire.ParseCode(value << 1)
 			}
 			c.closeControl(code, true, false, wire.Closing)
 			return
@@ -241,7 +241,7 @@ func (c *sharedConn) controlReadError(err error, first bool) {
 		if raw&1 != 0 {
 			c.controlViolation()
 		} else {
-			c.closeControl(wire.ParseCode(0, raw), true, false, wire.Closing)
+			c.closeControl(wire.ParseCode(raw), true, false, wire.Closing)
 		}
 		return
 	}

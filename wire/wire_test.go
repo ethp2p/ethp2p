@@ -10,30 +10,16 @@ import (
 	"testing"
 )
 
-func TestSelectorCodeIsScopedAndControlSelectorPanics(t *testing.T) {
-	sess := Selector(2)
-	chunk := Selector(3)
-	a, b := sess.Code(1), sess.Code(1)
-	if a != b {
-		t.Fatal("same selector code values differ")
+func TestProtocolCodeWire(t *testing.T) {
+	if got := ProtocolCode(0).Wire(); got != 1 {
+		t.Fatalf("ProtocolCode(0).Wire() = %d, want 1", got)
 	}
-	if sess.Code(1) == chunk.Code(1) {
-		t.Fatal("equal values from different selectors compare equal")
+	if got := ProtocolCode(1).Wire(); got != 3 {
+		t.Fatalf("ProtocolCode(1).Wire() = %d, want 3", got)
 	}
-	if sess.Code(0) == sess.Code(1) {
-		t.Fatal("different values for one selector compare equal")
+	if got, want := ProtocolCode(^uint16(0)).Wire(), uint64(^uint16(0))<<1|1; got != want {
+		t.Fatalf("ProtocolCode(max).Wire() = %d, want %d", got, want)
 	}
-	defer func() {
-		if recover() == nil {
-			t.Fatal("Selector(0).Code did not panic")
-		}
-	}()
-	Selector(0).Code(1)
-}
-
-func TestCodeWireFor(t *testing.T) {
-	selector := Selector(2)
-	other := Selector(3)
 	for _, test := range []struct {
 		name string
 		code Code
@@ -43,33 +29,25 @@ func TestCodeWireFor(t *testing.T) {
 		{name: "Refused", code: Refused, want: 2},
 		{name: "Overloaded", code: Overloaded, want: 4},
 		{name: "Timeout", code: Timeout, want: 6},
-		{name: "protocol value zero", code: selector.Code(0), want: 1},
-		{name: "protocol value one", code: selector.Code(1), want: 3},
-		{name: "protocol max uint16", code: selector.Code(^uint16(0)), want: uint64(^uint16(0))<<1 | 1},
-		{name: "BadSelector sent as Unspecified", code: BadSelector, want: 0},
-		{name: "UnsupportedSelector sent as Unspecified", code: UnsupportedSelector, want: 0},
-		{name: "Closing sent as Unspecified", code: Closing, want: 0},
-		{name: "ControlViolation sent as Unspecified", code: ControlViolation, want: 0},
-		{name: "NoSharedProtocols sent as Unspecified", code: NoSharedProtocols, want: 0},
-		{name: "Duplicate sent as Unspecified", code: Duplicate, want: 0},
-		{name: "unassigned stack value 4", code: Code{value: 4}, want: 0},
-		{name: "unassigned stack value 5", code: Code{value: 5}, want: 0},
-		{name: "unassigned stack value 6", code: Code{value: 6}, want: 0},
-		{name: "unassigned stack value 7", code: Code{value: 7}, want: 0},
-		{name: "unassigned stack value 14", code: Code{value: 14}, want: 0},
-		{name: "unassigned large stack value", code: Code{value: 1 << 20}, want: 0},
+		{name: "BadSelector", code: BadSelector, want: 16},
+		{name: "UnsupportedSelector", code: UnsupportedSelector, want: 18},
+		{name: "Closing", code: Closing, want: 20},
+		{name: "ControlViolation", code: ControlViolation, want: 22},
+		{name: "NoSharedProtocols", code: NoSharedProtocols, want: 24},
+		{name: "Duplicate", code: Duplicate, want: 26},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			if got := test.code.WireFor(selector); got != test.want {
-				t.Fatalf("WireFor(%s) = %d, want %d", test.code, got, test.want)
+			if got := test.code.Wire(); got != test.want {
+				t.Fatalf("Wire(%s) = %d, want %d", test.code, got, test.want)
 			}
 		})
 	}
-	assertCodePanics(t, func() { _ = selector.Code(1).WireFor(other) })
+	if got, want := ProtocolCode(1).String(), "protocol value 1"; got != want {
+		t.Fatalf("ProtocolCode(1).String() = %q, want %q", got, want)
+	}
 }
 
 func TestParseCode(t *testing.T) {
-	selector := Selector(7)
 	for _, test := range []struct {
 		name string
 		wire uint64
@@ -91,26 +69,16 @@ func TestParseCode(t *testing.T) {
 		{name: "gap 7", wire: 14, want: Unspecified},
 		{name: "gap 14", wire: 28, want: Unspecified},
 		{name: "large unknown stack value", wire: 1 << 20, want: Unspecified},
-		{name: "protocol value zero", wire: 1, want: selector.Code(0)},
-		{name: "protocol value one", wire: 3, want: selector.Code(1)},
-		{name: "unknown protocol value preserved", wire: 199, want: selector.Code(99)},
+		{name: "protocol value zero", wire: 1, want: ProtocolCode(0)},
+		{name: "protocol value one", wire: 3, want: ProtocolCode(1)},
+		{name: "unknown protocol value preserved", wire: 199, want: ProtocolCode(99)},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			if got := ParseCode(selector, test.wire); got != test.want {
+			if got := ParseCode(test.wire); got != test.want {
 				t.Fatalf("ParseCode(%d) = %s, want %s", test.wire, got, test.want)
 			}
 		})
 	}
-}
-
-func assertCodePanics(t *testing.T, fn func()) {
-	t.Helper()
-	defer func() {
-		if recover() == nil {
-			t.Fatal("operation did not panic")
-		}
-	}()
-	fn()
 }
 
 func TestFrameRoundTrips(t *testing.T) {

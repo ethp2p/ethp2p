@@ -716,7 +716,7 @@ func TestSession_HandleInboundStream_HaveChunkRejects(t *testing.T) {
 
 	raw, stream := newWrappedRecordingReceiveStream(t, CHUNK, []byte("data"))
 	s.handleChunkStream("p1", []byte("data"), 4, stream)
-	requireWireCancelCode(t, raw, 3)
+	requireWireCancelCode(t, raw, 5)
 
 	select {
 	case <-inbox:

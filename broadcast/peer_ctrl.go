@@ -47,9 +47,8 @@ func (p *PeerConn) runCtrlReader() {
 		msg.Reset()
 		if err := ReadFrame(p.ctrlIn, &msg); err != nil {
 			stop()
-			// No effect if the read failed, which already cancelled the stream;
-			// ends it for a malformed frame.
-			p.ctrlIn.CancelRead(wire.Unspecified)
+			// Reads never cancel a side, so end it here with the read error's code.
+			p.ctrlIn.CancelRead(streamCancellationCode(errors.Join(err, context.Cause(p.ctx))))
 			return
 		}
 		switch {
@@ -202,6 +201,8 @@ func (p *PeerConn) handleSessionOpen(e peerOpenSession, sessions map[sessionKey]
 	}}}
 	if err := WriteFrame(s, frame); err != nil {
 		stop()
+		// Writes never cancel a side, so end it here before abandoning the stream.
+		s.CancelWrite(streamFailureCode(err))
 		p.cancel()
 		return
 	}
@@ -216,7 +217,9 @@ func (p *PeerConn) handleSessionOpen(e peerOpenSession, sessions map[sessionKey]
 	// A duplicate open is an internal lifecycle bug. Never abandon its stream
 	// even if a future caller violates the idempotent attachment contract.
 	if ss.sessOut != nil {
-		_ = ss.sessOut.Close()
+		if err := ss.sessOut.Close(); err != nil {
+			ss.sessOut.CancelWrite(streamFailureCode(err))
+		}
 	}
 	ss.sessOut = s
 
@@ -235,6 +238,9 @@ func (p *PeerConn) writeCtrl(msg *bcastpb.Bcast) error {
 	defer stop()
 	if err := WriteFrame(p.ctrlOut, msg); err != nil {
 		p.ctrlOutEnded.Store(true)
+		// Writes never cancel a side; record the specific code here so the
+		// runCtrlLoop shutdown does not overwrite it with Unspecified.
+		p.ctrlOut.CancelWrite(streamFailureCode(err))
 		stop()
 		p.cancel()
 		return err
@@ -255,6 +261,8 @@ func (p *PeerConn) handleSendRoutingUpdate(e peerSendRouting, sessions map[sessi
 		Data: e.update,
 	}}}
 	if err := WriteFrame(ss.sessOut, frame); err != nil {
+		// Writes never cancel a side, so end it here before dropping the stream.
+		stream.CancelWrite(streamFailureCode(err))
 		ss.sessOut = nil
 	}
 }
@@ -280,7 +288,9 @@ func (p *PeerConn) handleUnsubscribe(e peerUnsubscribe) {
 func (p *PeerConn) handleSessionDone(e peerCloseSession, sessions map[sessionKey]*peerSessionState, slotCh chan<- slotUpdate) {
 	key := sessionKey(e)
 	if ss := sessions[key]; ss != nil && ss.sessOut != nil {
-		_ = ss.sessOut.Close()
+		if err := ss.sessOut.Close(); err != nil {
+			ss.sessOut.CancelWrite(streamFailureCode(err))
+		}
 	}
 	delete(sessions, key)
 
@@ -345,12 +355,16 @@ func (p *PeerConn) doSendChunk(e peerSendChunk) (int, error) {
 			DataLength: uint32(len(payload)),
 		}
 		if err := WriteFrame(s, frame); err != nil {
+			// Writes never cancel a side, so end it here before abandoning the stream.
+			s.CancelWrite(streamFailureCode(err))
 			return 0, ErrChunkWriteFail
 		}
 		if _, err := s.Write(payload); err != nil {
+			s.CancelWrite(streamFailureCode(err))
 			return 0, ErrChunkWriteFail
 		}
 		if err := s.Close(); err != nil {
+			s.CancelWrite(streamFailureCode(err))
 			return 0, ErrChunkWriteFail
 		}
 	}

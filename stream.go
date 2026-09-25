@@ -1,7 +1,6 @@
 package ethp2p
 
 import (
-	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -14,17 +13,14 @@ import (
 
 // Protocol streams end with a code, under these rules:
 //
-//   - Cancelling a side is idempotent. The first code is the one sent; later
-//     calls have no effect.
-//   - A failed Read, Write, or Close cancels its side before returning, with
-//     wire.Timeout if a deadline expired and wire.Unspecified
-//     otherwise. A caller's later cancel therefore has no effect, so callers
-//     may cancel with their own code after any error: it takes effect only
-//     when no I/O failed, for example on a malformed frame.
-//   - Deadline expiry is terminal, unlike Go's usual deadlines, which can be
-//     extended to resume I/O.
-//   - A peer reset ends the read side. Read returns it as a [ResetError], and
-//     the stream sends nothing in reply.
+//   - Read, Write, Close return their error and never cancel a side. Write
+//     still returns io.ErrShortWrite for a short write.
+//   - Deadlines pass straight through; a timed-out stream can have its
+//     deadline extended and be used again.
+//   - CancelRead/CancelWrite send code.Wire() for any code, stack or
+//     protocol, without rewriting. First call wins; later calls do nothing.
+//   - A peer reset is returned as a *ResetError holding wire.ParseCode(raw)
+//     with the transport error as its cause.
 
 // SendStream is the writable side of a protocol's unidirectional QUIC stream.
 // See the rules above for how it ends.
@@ -33,7 +29,7 @@ type SendStream interface {
 	Write([]byte) (int, error)
 	// Close sends FIN after all data written to the stream.
 	Close() error
-	// CancelWrite aborts the write side with a selector-scoped outcome.
+	// CancelWrite aborts the write side with an outcome code.
 	CancelWrite(wire.Code)
 	// SetWriteDeadline sets or clears the write deadline.
 	SetWriteDeadline(time.Time) error
@@ -44,7 +40,7 @@ type SendStream interface {
 type ReceiveStream interface {
 	// Read reads protocol data. A remote reset is returned as a [ResetError].
 	Read([]byte) (int, error)
-	// CancelRead stops reading with a selector-scoped outcome.
+	// CancelRead stops reading with an outcome code.
 	CancelRead(wire.Code)
 	// SetReadDeadline sets or clears the read deadline.
 	SetReadDeadline(time.Time) error
@@ -59,9 +55,9 @@ type Stream interface {
 	Write([]byte) (int, error)
 	// Close sends FIN after all data written to the stream.
 	Close() error
-	// CancelRead stops reading with a selector-scoped outcome.
+	// CancelRead stops reading with an outcome code.
 	CancelRead(wire.Code)
-	// CancelWrite aborts the write side with a selector-scoped outcome.
+	// CancelWrite aborts the write side with an outcome code.
 	CancelWrite(wire.Code)
 	// SetDeadline sets or clears both the read and write deadlines.
 	SetDeadline(time.Time) error
@@ -90,7 +86,6 @@ func (e *ResetError) Error() string {
 func (e *ResetError) Unwrap() error { return e.cause }
 
 type sendStream struct {
-	selector    wire.Selector
 	stream      transport.SendStream
 	cancelWrite sync.Once
 }
@@ -100,23 +95,15 @@ func (s *sendStream) Write(p []byte) (int, error) {
 	if err == nil && n != len(p) {
 		err = io.ErrShortWrite
 	}
-	if err != nil {
-		s.CancelWrite(streamFailureCode(context.Background(), err))
-	}
 	return n, err
 }
 
 func (s *sendStream) Close() error {
-	err := s.stream.Close()
-	if err != nil {
-		s.CancelWrite(streamFailureCode(context.Background(), err))
-	}
-	return err
+	return s.stream.Close()
 }
 
 func (s *sendStream) CancelWrite(code wire.Code) {
-	raw := code.WireFor(s.selector)
-	s.cancelWrite.Do(func() { s.stream.CancelWrite(raw) })
+	s.cancelWrite.Do(func() { s.stream.CancelWrite(code.Wire()) })
 }
 
 func (s *sendStream) SetWriteDeadline(deadline time.Time) error {
@@ -124,24 +111,17 @@ func (s *sendStream) SetWriteDeadline(deadline time.Time) error {
 }
 
 type receiveStream struct {
-	selector   wire.Selector
 	stream     transport.ReceiveStream
 	cancelRead sync.Once
 }
 
 func (s *receiveStream) Read(p []byte) (int, error) {
 	n, err := s.stream.Read(p)
-	if err != nil && !errors.Is(err, io.EOF) {
-		if _, reset := errors.AsType[*transport.StreamResetError](err); !reset {
-			s.CancelRead(streamFailureCode(context.Background(), err))
-		}
-	}
-	return n, resetError(err, s.selector)
+	return n, resetError(err)
 }
 
 func (s *receiveStream) CancelRead(code wire.Code) {
-	raw := code.WireFor(s.selector)
-	s.cancelRead.Do(func() { s.stream.CancelRead(raw) })
+	s.cancelRead.Do(func() { s.stream.CancelRead(code.Wire()) })
 }
 
 func (s *receiveStream) SetReadDeadline(deadline time.Time) error {
@@ -149,7 +129,6 @@ func (s *receiveStream) SetReadDeadline(deadline time.Time) error {
 }
 
 type bidirectionalStream struct {
-	selector    wire.Selector
 	stream      transport.Stream
 	cancelRead  sync.Once
 	cancelWrite sync.Once
@@ -157,12 +136,7 @@ type bidirectionalStream struct {
 
 func (s *bidirectionalStream) Read(p []byte) (int, error) {
 	n, err := s.stream.Read(p)
-	if err != nil && !errors.Is(err, io.EOF) {
-		if _, reset := errors.AsType[*transport.StreamResetError](err); !reset {
-			s.CancelRead(streamFailureCode(context.Background(), err))
-		}
-	}
-	return n, resetError(err, s.selector)
+	return n, resetError(err)
 }
 
 func (s *bidirectionalStream) Write(p []byte) (int, error) {
@@ -170,28 +144,19 @@ func (s *bidirectionalStream) Write(p []byte) (int, error) {
 	if err == nil && n != len(p) {
 		err = io.ErrShortWrite
 	}
-	if err != nil {
-		s.CancelWrite(streamFailureCode(context.Background(), err))
-	}
 	return n, err
 }
 
 func (s *bidirectionalStream) Close() error {
-	err := s.stream.Close()
-	if err != nil {
-		s.CancelWrite(streamFailureCode(context.Background(), err))
-	}
-	return err
+	return s.stream.Close()
 }
 
 func (s *bidirectionalStream) CancelRead(code wire.Code) {
-	raw := code.WireFor(s.selector)
-	s.cancelRead.Do(func() { s.stream.CancelRead(raw) })
+	s.cancelRead.Do(func() { s.stream.CancelRead(code.Wire()) })
 }
 
 func (s *bidirectionalStream) CancelWrite(code wire.Code) {
-	raw := code.WireFor(s.selector)
-	s.cancelWrite.Do(func() { s.stream.CancelWrite(raw) })
+	s.cancelWrite.Do(func() { s.stream.CancelWrite(code.Wire()) })
 }
 
 func (s *bidirectionalStream) SetDeadline(deadline time.Time) error {
@@ -206,27 +171,27 @@ func (s *bidirectionalStream) SetWriteDeadline(deadline time.Time) error {
 	return s.stream.SetWriteDeadline(deadline)
 }
 
-func wrapSendStream(selector wire.Selector, stream transport.SendStream) SendStream {
-	return &sendStream{selector: selector, stream: stream}
+func wrapSendStream(stream transport.SendStream) SendStream {
+	return &sendStream{stream: stream}
 }
 
-func wrapBidirectionalStream(selector wire.Selector, stream transport.Stream) Stream {
-	return &bidirectionalStream{selector: selector, stream: stream}
+func wrapBidirectionalStream(stream transport.Stream) Stream {
+	return &bidirectionalStream{stream: stream}
 }
 
-func wrapReceiveStream(selector wire.Selector, stream transport.ReceiveStream) ReceiveStream {
+func wrapReceiveStream(stream transport.ReceiveStream) ReceiveStream {
 	if bidirectional, ok := stream.(transport.Stream); ok {
-		return wrapBidirectionalStream(selector, bidirectional)
+		return wrapBidirectionalStream(bidirectional)
 	}
-	return &receiveStream{selector: selector, stream: stream}
+	return &receiveStream{stream: stream}
 }
 
-func resetError(err error, selector wire.Selector) error {
+func resetError(err error) error {
 	reset, ok := errors.AsType[*transport.StreamResetError](err)
 	if !ok {
 		return err
 	}
-	return &ResetError{Code: wire.ParseCode(selector, reset.Code), cause: err}
+	return &ResetError{Code: wire.ParseCode(reset.Code), cause: err}
 }
 
 var (

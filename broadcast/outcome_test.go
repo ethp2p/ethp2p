@@ -108,7 +108,7 @@ func TestStreamEndPolicyUsesWireCodes(t *testing.T) {
 		},
 		{
 			name:     "receiver no longer needs the chunk",
-			want:     3,
+			want:     5, // Redundant is protocol value 2, wire code 0x05.
 			wantRead: true,
 			run: func(t *testing.T, f *outcomeFixture) (*wireReceiveProbe, *wireSendProbe) {
 				strat := newMockStrategy()

@@ -64,7 +64,7 @@ func (p *Peer) OpenUniStream(ctx context.Context, selector wire.Selector) (SendS
 		return nil, err
 	}
 
-	return wrapSendStream(selector, stream), nil
+	return wrapSendStream(stream), nil
 }
 
 // OpenStream opens a bidirectional stream whose selector frame was written
@@ -87,7 +87,7 @@ func (p *Peer) OpenStream(ctx context.Context, selector wire.Selector) (Stream, 
 		return nil, err
 	}
 
-	return wrapBidirectionalStream(selector, stream), nil
+	return wrapBidirectionalStream(stream), nil
 }
 
 func (p *Peer) checkSelector(selector wire.Selector) error {
@@ -332,7 +332,7 @@ func (s *Subsystem) Next() (Event, bool) {
 			d.streams = nil
 		}
 		event.Kind, event.Selector = StreamIn, pending.selector
-		event.Stream = wrapReceiveStream(pending.selector, pending.stream)
+		event.Stream = wrapReceiveStream(pending.stream)
 	default:
 		event.Kind, event.Code = PeerDown, d.code
 		return event, true
