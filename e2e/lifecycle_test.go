@@ -31,25 +31,19 @@ func TestSessionDone(t *testing.T) {
 func TestEngineCloseCleanup(t *testing.T) {
 	nettest.Run(t, func(t *testing.T, n *nettest.Net) {
 		const probeSelector wire.Selector = 17
-		var probeA, probeB *ethp2p.Subsystem
+		var probeA, probeB *ethp2p.Family
 		wakeA, wakeB := make(chan struct{}, 1), make(chan struct{}, 1)
 		a := n.Node("a", nettest.BeforeStart(func(s *ethp2p.Stack) {
 			var err error
-			probeA, err = s.Register("probe", []wire.Selector{probeSelector}, ethp2p.SubsystemConfig{})
+			probeA, err = s.Register([]ethp2p.ProtocolSpec{{Selector: probeSelector, MaxQueued: 16}}, wakeA)
 			if err != nil {
-				t.Fatal(err)
-			}
-			if err := probeA.Notify(wakeA); err != nil {
 				t.Fatal(err)
 			}
 		}))
 		b := n.Node("b", nettest.BeforeStart(func(s *ethp2p.Stack) {
 			var err error
-			probeB, err = s.Register("probe", []wire.Selector{probeSelector}, ethp2p.SubsystemConfig{})
+			probeB, err = s.Register([]ethp2p.ProtocolSpec{{Selector: probeSelector, MaxQueued: 16}}, wakeB)
 			if err != nil {
-				t.Fatal(err)
-			}
-			if err := probeB.Notify(wakeB); err != nil {
 				t.Fatal(err)
 			}
 		}))

@@ -78,7 +78,7 @@ type Engine struct {
 	// replacement.
 	peers map[transport.PeerID]*PeerConn
 
-	// bindings routes streams by the stable subsystem peer handle. Only PeerUp
+	// bindings routes streams by the stable family peer handle. Only PeerUp
 	// creates a binding; PeerDown removes it.
 	bindings map[*ethp2p.Peer]*PeerConn
 
@@ -94,7 +94,7 @@ type Engine struct {
 	cancel context.CancelFunc
 
 	registerMu   sync.Mutex
-	subsystem    atomic.Pointer[ethp2p.Subsystem]
+	family       atomic.Pointer[ethp2p.Family]
 	deliveryWake chan struct{}
 }
 
@@ -197,8 +197,8 @@ func (e *Engine) run() {
 			e.shutdown()
 			return
 		case <-e.deliveryWake:
-			if sub := e.subsystem.Load(); sub != nil {
-				for event, ok := sub.Next(); ok; event, ok = sub.Next() {
+			if family := e.family.Load(); family != nil {
+				for event, ok := family.Next(); ok; event, ok = family.Next() {
 					e.handleDelivery(event)
 				}
 			}
@@ -287,7 +287,7 @@ func (e *Engine) handle(ev engineEvent) {
 }
 
 func (e *Engine) bindPeer(peer *ethp2p.Peer) *PeerConn {
-	if !supportsBroadcast(peer) {
+	if peer.Context().Err() != nil {
 		return nil
 	}
 	if p := e.bindings[peer]; p != nil {
@@ -436,8 +436,8 @@ func (e *Engine) enrolPeerToChannel(p *PeerConn, channelID ChannelID) {
 }
 
 func (e *Engine) shutdown() {
-	if sub := e.subsystem.Load(); sub != nil {
-		for event, ok := sub.Next(); ok; event, ok = sub.Next() {
+	if family := e.family.Load(); family != nil {
+		for event, ok := family.Next(); ok; event, ok = family.Next() {
 			event.Cancel(wire.Unspecified)
 		}
 	}

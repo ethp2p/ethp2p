@@ -5,7 +5,6 @@ import (
 	"errors"
 	"net"
 	"os"
-	"slices"
 
 	ethp2p "github.com/ethp2p/ethp2p"
 	"github.com/ethp2p/ethp2p/wire"
@@ -53,12 +52,12 @@ func streamCancellationCode(cause error) wire.Code {
 	return wire.Unspecified
 }
 
-// Register attaches broadcast to stack before Start. The engine drains its
-// subsystem in its own event loop. Register may succeed only once.
+// Register adds broadcast's Family to stack before Start. The engine drains
+// its family in its own event loop. Register may succeed only once.
 func (e *Engine) Register(stack *ethp2p.Stack) error {
 	e.registerMu.Lock()
 	defer e.registerMu.Unlock()
-	if e.subsystem.Load() != nil {
+	if e.family.Load() != nil {
 		return errors.New("broadcast already registered")
 	}
 	if stack == nil {
@@ -67,28 +66,16 @@ func (e *Engine) Register(stack *ethp2p.Stack) error {
 	if e.ctx.Err() != nil {
 		return errors.New("broadcast engine closed")
 	}
-	sub, err := stack.Register("broadcast", []wire.Selector{BCAST, SESS, CHUNK}, ethp2p.SubsystemConfig{
-		Policy: func(p *ethp2p.Peer) bool { return supportsBroadcastSelectors(p.Selectors()) },
-	})
+	family, err := stack.Register([]ethp2p.ProtocolSpec{
+		{Selector: BCAST, MaxQueued: 1},
+		{Selector: SESS, MaxQueued: 64},
+		{Selector: CHUNK, MaxQueued: 128},
+	}, e.deliveryWake)
 	if err != nil {
 		return err
 	}
-	if err := sub.Notify(e.deliveryWake); err != nil {
-		return err
-	}
-	e.subsystem.Store(sub)
+	e.family.Store(family)
 	return nil
-}
-
-func supportsBroadcast(peer *ethp2p.Peer) bool {
-	if peer == nil || peer.ID() == "" || peer.Context() == nil || peer.Context().Err() != nil {
-		return false
-	}
-	return supportsBroadcastSelectors(peer.Selectors())
-}
-
-func supportsBroadcastSelectors(selectors []wire.Selector) bool {
-	return slices.Contains(selectors, BCAST) && slices.Contains(selectors, SESS) && slices.Contains(selectors, CHUNK)
 }
 
 func isBroadcastSelector(selector wire.Selector) bool {

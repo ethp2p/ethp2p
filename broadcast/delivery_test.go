@@ -44,7 +44,7 @@ func TestRegisteredDeliveryClosesBindingAndRefusesUnboundStream(t *testing.T) {
 	if _, err := client.Eth.Dial(t.Context(), endpoint.Shared.Addr(), endpoint.Shared.PeerID()); err != nil {
 		t.Fatal(err)
 	}
-	sub := e.subsystem.Load()
+	sub := e.family.Load()
 	up := nextOutcomeEvent(t, sub, e.deliveryWake)
 	if up.Kind != ethp2p.PeerUp {
 		t.Fatalf("first event = %v", up.Kind)
