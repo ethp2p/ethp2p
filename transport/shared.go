@@ -14,6 +14,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/ethp2p/ethp2p/identity"
 	"github.com/ethp2p/ethp2p/wire"
 	"github.com/libp2p/go-libp2p/p2p/transport/quicreuse"
 	"github.com/quic-go/quic-go"
@@ -104,7 +105,10 @@ type SharedTransport struct {
 // profile for connection policy. Listening starts on the first
 // [Libp2pTransport.Listen] or [Ethp2pTransport.Accept].
 // The caller remains responsible for closing packetConn.
-func NewShared(key *PrivKey, packetConn net.PacketConn, profile Profile) (*SharedTransport, error) {
+func NewShared(key *identity.PrivKey, packetConn net.PacketConn, profile Profile) (*SharedTransport, error) {
+	if key == nil {
+		return nil, errNilKey
+	}
 	if packetConn == nil {
 		return nil, errNilPacketConn
 	}
@@ -160,7 +164,7 @@ func (t *SharedTransport) Ethp2p() *Ethp2pTransport {
 func (t *SharedTransport) PeerID() PeerID { return t.handshaker.peerID }
 
 // PublicKey returns the local identity key.
-func (t *SharedTransport) PublicKey() *PubKey { return t.handshaker.publicKey }
+func (t *SharedTransport) PublicKey() *identity.PubKey { return t.handshaker.publicKey }
 
 // Addr returns the local packet connection address.
 func (t *SharedTransport) Addr() net.Addr { return t.raw.Conn.LocalAddr() }
@@ -312,7 +316,7 @@ func acceptedPeerID(raw *quic.Conn) PeerID {
 	if slot == nil || slot.key == nil {
 		return ""
 	}
-	return slot.key.PeerID()
+	return PeerIDFromKey(slot.key)
 }
 
 // shutdown cancels transport waits and closes the endpoint before joining

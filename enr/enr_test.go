@@ -2,16 +2,18 @@ package enr
 
 import (
 	"bytes"
+	"cmp"
 	"encoding/base64"
 	"encoding/hex"
 	"fmt"
 	"math/big"
 	"math/rand"
 	"net/netip"
+	"slices"
 	"testing"
 
 	"github.com/decred/dcrd/dcrec/secp256k1/v4"
-	decrecdsa "github.com/decred/dcrd/dcrec/secp256k1/v4/ecdsa"
+	"github.com/ethp2p/ethp2p/identity"
 	"github.com/ethp2p/ethp2p/transport"
 )
 
@@ -44,7 +46,7 @@ func TestEIP778Example(t *testing.T) {
 	}
 
 	privateKey := examplePrivateKey(t)
-	if !bytes.Equal(record.PublicKey().SerializeCompressed(), privateKey.PubKey().SerializeCompressed()) {
+	if !record.PublicKey().Equal(privateKey.Public()) {
 		t.Fatal("decoded public key does not match the EIP-778 example key")
 	}
 	rebuilt, err := Sign(privateKey, 1,
@@ -73,38 +75,8 @@ func TestConsensusLayerQUICRecord(t *testing.T) {
 	if got := record.QUIC(); !equalAddrPorts(got, want) {
 		t.Fatalf("QUIC() = %v, want %v", got, want)
 	}
-	if got, want := record.PeerID(), transport.NewPubKey(record.PublicKey()).PeerID(); got != want {
+	if got, want := record.PeerID(), transport.PeerIDFromKey(record.PublicKey()); got != want {
 		t.Fatalf("PeerID() = %x, transport derivation = %x", got, want)
-	}
-}
-
-func TestPublicKeyReturnsCopy(t *testing.T) {
-	record, err := Parse(eip778Example)
-	if err != nil {
-		t.Fatal(err)
-	}
-	wantPeerID := record.PeerID()
-	wantPublicKey := record.PublicKey().SerializeCompressed()
-	returnedKey := record.PublicKey()
-	otherKey := secp256k1.PrivKeyFromBytes(bytes.Repeat([]byte{0x01}, 32)).PubKey()
-	*returnedKey = *otherKey
-
-	if got := record.PeerID(); got != wantPeerID {
-		t.Fatalf("PeerID changed after mutating returned key: got %x, want %x", got, wantPeerID)
-	}
-	if got := record.PublicKey().SerializeCompressed(); !bytes.Equal(got, wantPublicKey) {
-		t.Fatalf("PublicKey changed after mutating returned key: got %x, want %x", got, wantPublicKey)
-	}
-}
-
-func TestTransportPubKeyCopiesInput(t *testing.T) {
-	callerKey := examplePrivateKey(t).PubKey()
-	transportKey := transport.NewPubKey(callerKey)
-	wantPeerID := transportKey.PeerID()
-	otherKey := secp256k1.PrivKeyFromBytes(bytes.Repeat([]byte{0x02}, 32)).PubKey()
-	*callerKey = *otherKey
-	if got := transportKey.PeerID(); got != wantPeerID {
-		t.Fatalf("transport PeerID changed after mutating input key: got %x, want %x", got, wantPeerID)
 	}
 }
 
@@ -351,7 +323,7 @@ func TestUpdate(t *testing.T) {
 		t.Fatal("Update modified the original record")
 	}
 
-	other, err := secp256k1.GeneratePrivateKey()
+	other, err := identity.GenPrivKey()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -531,13 +503,17 @@ func encodeParsedItem(item rlpItem) []byte {
 	return encodeRLPList(payload)
 }
 
-func examplePrivateKey(t *testing.T) *secp256k1.PrivateKey {
+func examplePrivateKey(t *testing.T) *identity.PrivKey {
 	t.Helper()
 	secret, err := hex.DecodeString("b71c71a67e1177ad4e901695e1b4b9ee17ae16c6668d313eac2f96dbcda3f291")
 	if err != nil {
 		t.Fatal(err)
 	}
-	return secp256k1.PrivKeyFromBytes(secret)
+	key, err := identity.ParsePrivKey(secret)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return key
 }
 
 func mustRawURL(t *testing.T, text string) []byte {
@@ -620,25 +596,18 @@ func mustRLPItem(t *testing.T, raw []byte) rlpItem {
 	return item
 }
 
-func signRawPairs(key *secp256k1.PrivateKey, seq uint64, extra []signedPair) []byte {
+func signRawPairs(key *identity.PrivKey, seq uint64, extra []signedPair) []byte {
 	pairs := append([]signedPair(nil), extra...)
 	pairs = append(pairs,
 		signedPair{key: "id", value: encodeRLPString([]byte("v4"))},
-		signedPair{key: "secp256k1", value: encodeRLPString(key.PubKey().SerializeCompressed())},
+		signedPair{key: "secp256k1", value: encodeRLPString(key.Public().Bytes())},
 	)
 	for i := range pairs {
 		pairs[i].value = append([]byte(nil), pairs[i].value...)
 	}
-	for i := 0; i < len(pairs); i++ {
-		for j := i + 1; j < len(pairs); j++ {
-			if pairs[j].key < pairs[i].key {
-				pairs[i], pairs[j] = pairs[j], pairs[i]
-			}
-		}
-	}
+	slices.SortFunc(pairs, func(a, b signedPair) int { return cmp.Compare(a.key, b.key) })
 	hash := keccak256(encodeRLPList(encodeSignedContent(seq, pairs)))
-	compact := decrecdsa.SignCompact(key, hash, true)
-	signature := compact[1:]
+	signature := key.SignHash(hash)
 	body := encodeRLPString(signature)
 	body = append(body, encodeUint64(seq)...)
 	for _, pair := range pairs {

@@ -1,7 +1,6 @@
 package transport
 
 import (
-	"bytes"
 	"crypto/x509"
 	"errors"
 	"testing"
@@ -19,15 +18,12 @@ func TestAuthenticatePeerReturnsPublicKey(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	publicKey, peerID, err := authenticate([]*x509.Certificate{certificate})
+	publicKey, err := authenticate([]*x509.Certificate{certificate})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !bytes.Equal(publicKey.Bytes(), key.Public().Bytes()) {
+	if !publicKey.Equal(key.Public()) {
 		t.Fatal("authenticated public key differs from certificate identity")
-	}
-	if peerID != key.Public().PeerID() {
-		t.Fatalf("authenticated peer ID = %x, want %x", peerID, key.Public().PeerID())
 	}
 }
 

@@ -8,8 +8,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/decred/dcrd/dcrec/secp256k1/v4"
 	"github.com/ethp2p/ethp2p/enr"
+	"github.com/ethp2p/ethp2p/identity"
 	"github.com/ethp2p/ethp2p/transport"
 )
 
@@ -18,7 +18,7 @@ type Endpoint struct {
 	Shared *transport.SharedTransport
 	Eth    *transport.Ethp2pTransport
 	Packet net.PacketConn
-	Key    *transport.PrivKey
+	Key    *identity.PrivKey
 }
 
 // Record signs this endpoint's identity and bound QUIC address at seq.
@@ -35,7 +35,7 @@ func (e *Endpoint) Record(tb testing.TB, seq uint64) *enr.Record {
 	} else {
 		entries = []enr.Pair{enr.IP6.Set(ip), enr.QUIC6.Set(addr.Port())}
 	}
-	rec, err := enr.Sign(secp256k1.PrivKeyFromBytes(e.Key.Bytes()), seq, entries...)
+	rec, err := enr.Sign(e.Key, seq, entries...)
 	if err != nil {
 		tb.Fatal(err)
 	}
@@ -46,7 +46,7 @@ func (e *Endpoint) Record(tb testing.TB, seq uint64) *enr.Record {
 // It registers ethp2p interest; tests that also need libp2p call Shared.Libp2p().
 func NewEndpoint(tb testing.TB) *Endpoint {
 	tb.Helper()
-	key, err := transport.GenPrivKey()
+	key, err := identity.GenPrivKey()
 	if err != nil {
 		tb.Fatal(err)
 	}

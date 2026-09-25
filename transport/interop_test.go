@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ethp2p/ethp2p/identity"
 	"github.com/ethp2p/ethp2p/transport"
 	"github.com/libp2p/go-libp2p"
 	"github.com/libp2p/go-libp2p/core/crypto"
@@ -70,7 +71,7 @@ func (h *harness) quicAddr(addr net.Addr) ma.Multiaddr {
 
 func (h *harness) ethp2pNode(options ...libp2p.Option) *node {
 	h.t.Helper()
-	key, err := transport.GenPrivKey()
+	key, err := identity.GenPrivKey()
 	if err != nil {
 		h.t.Fatal(err)
 	}
@@ -80,7 +81,7 @@ func (h *harness) ethp2pNode(options ...libp2p.Option) *node {
 		h.t.Fatal(err)
 	}
 	h.t.Cleanup(func() { _ = shared.Close() })
-	identity, err := crypto.UnmarshalSecp256k1PrivateKey(key.Bytes())
+	libp2pKey, err := crypto.UnmarshalSecp256k1PrivateKey(key.Bytes())
 	if err != nil {
 		h.t.Fatal(err)
 	}
@@ -97,7 +98,7 @@ func (h *harness) ethp2pNode(options ...libp2p.Option) *node {
 		h.t.Fatal(err)
 	}
 	opts := []libp2p.Option{
-		libp2p.Identity(identity),
+		libp2p.Identity(libp2pKey),
 		libp2p.NoTransports,
 		libp2p.Transport(libp2pquic.NewTransport),
 		libp2p.QUICReuse(func() *quicreuse.ConnManager { return manager }),

@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/ethp2p/ethp2p/wire"
+	"github.com/ethp2p/ethp2p/identity"
 	"github.com/ethp2p/ethp2p/transport"
 	"github.com/ethp2p/ethp2p/transport/pb"
 	"github.com/ethp2p/ethp2p/transport/transporttest"
@@ -818,9 +819,9 @@ func controlPacket(t *testing.T) net.PacketConn {
 	return p
 }
 
-func controlKey(t *testing.T) *transport.PrivKey {
+func controlKey(t *testing.T) *identity.PrivKey {
 	t.Helper()
-	k, err := transport.GenPrivKey()
+	k, err := identity.GenPrivKey()
 	if err != nil {
 		t.Fatal(err)
 	}

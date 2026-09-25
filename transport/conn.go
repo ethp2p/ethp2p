@@ -3,12 +3,22 @@ package transport
 import (
 	"context"
 
+	"github.com/ethp2p/ethp2p/identity"
 	"github.com/ethp2p/ethp2p/wire"
+	"google.golang.org/protobuf/encoding/protowire"
 )
 
 // PeerID is the binary multihash representation used by libp2p peer.ID. A
 // PeerID is not the human-readable base-encoded form of that multihash.
 type PeerID string
+
+// PeerIDFromKey returns the inline identity-multihash peer ID of key.
+func PeerIDFromKey(key *identity.PubKey) PeerID {
+	raw := key.Marshal()
+	id := []byte{0} // identity multihash code
+	id = protowire.AppendVarint(id, uint64(len(raw)))
+	return PeerID(append(id, raw...))
+}
 
 // Conn is the ethp2p view of an authenticated QUIC connection. A Conn can be
 // used concurrently by multiple goroutines.

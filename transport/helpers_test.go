@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ethp2p/ethp2p/identity"
 	"github.com/libp2p/go-libp2p/p2p/transport/quicreuse"
 	varint "github.com/multiformats/go-varint"
 	"github.com/quic-go/quic-go"
@@ -80,7 +81,7 @@ func newEndpointWith(t *testing.T, profile Profile) (*SharedTransport, quicreuse
 	if err := ethp2p.SetHello(Hello{}); err != nil {
 		t.Fatal(err)
 	}
-	if shared.PublicKey() == nil || shared.PublicKey().PeerID() != shared.PeerID() {
+	if shared.PublicKey() == nil || PeerIDFromKey(shared.PublicKey()) != shared.PeerID() {
 		t.Fatal("transport public key does not match its peer ID")
 	}
 	t.Cleanup(func() { _ = shared.Close() })
@@ -97,9 +98,9 @@ func listen(t *testing.T, libp2p quicreuse.QUICTransport, ethp2p *Ethp2pTranspor
 	return listener
 }
 
-func testKey(t *testing.T) *PrivKey {
+func testKey(t *testing.T) *identity.PrivKey {
 	t.Helper()
-	key, err := GenPrivKey()
+	key, err := identity.GenPrivKey()
 	if err != nil {
 		t.Fatal(err)
 	}

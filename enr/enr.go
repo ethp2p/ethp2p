@@ -13,8 +13,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/decred/dcrd/dcrec/secp256k1/v4"
-	decrecdsa "github.com/decred/dcrd/dcrec/secp256k1/v4/ecdsa"
+	"github.com/ethp2p/ethp2p/identity"
 	"github.com/ethp2p/ethp2p/transport"
 	"golang.org/x/crypto/sha3"
 )
@@ -26,7 +25,7 @@ type Record struct {
 	raw       []byte
 	seq       uint64
 	signature [64]byte
-	pub       *secp256k1.PublicKey
+	pub       *identity.PubKey
 	keys      []string
 	values    map[string][]byte
 }
@@ -117,10 +116,10 @@ func Decode(raw []byte) (*Record, error) {
 		return nil, errors.New("ENR is missing secp256k1 public key")
 	}
 	publicKeyItem, err := decodeSingleRLP(publicKeyRaw)
-	if err != nil || publicKeyItem.kind != rlpString || len(publicKeyItem.payload) != 33 {
-		return nil, errors.New("ENR secp256k1 key must be a 33-byte compressed public key")
+	if err != nil || publicKeyItem.kind != rlpString {
+		return nil, errors.New("ENR secp256k1 key must be an RLP byte string")
 	}
-	publicKey, err := secp256k1.ParsePubKey(publicKeyItem.payload)
+	publicKey, err := identity.ParsePubKey(publicKeyItem.payload)
 	if err != nil {
 		return nil, fmt.Errorf("invalid ENR secp256k1 public key: %w", err)
 	}
@@ -130,8 +129,8 @@ func Decode(raw []byte) (*Record, error) {
 		content = append(content, field.raw...)
 	}
 	hash := keccak256(encodeRLPList(content))
-	if err := verifySignature(signature.payload, hash, publicKey); err != nil {
-		return nil, err
+	if !publicKey.VerifyHash(hash, signature.payload) {
+		return nil, errors.New("invalid ENR signature")
 	}
 	var signatureBytes [64]byte
 	copy(signatureBytes[:], signature.payload)
@@ -169,23 +168,11 @@ func (r *Record) Seq() uint64 {
 	return r.seq
 }
 
-// PublicKey returns a copy of the secp256k1 identity public key verified by
-// Decode or Sign.
-func (r *Record) PublicKey() *secp256k1.PublicKey {
-	if r == nil || r.pub == nil {
-		return nil
-	}
-	pub := *r.pub
-	return &pub
-}
+// PublicKey returns the identity public key verified by Decode or Sign.
+func (r *Record) PublicKey() *identity.PubKey { return r.pub }
 
-// PeerID derives the transport peer ID from the record's secp256k1 identity.
-func (r *Record) PeerID() transport.PeerID {
-	if r == nil || r.pub == nil {
-		return ""
-	}
-	return transport.NewPubKey(r.pub).PeerID()
-}
+// PeerID derives the transport peer ID from the record's identity key.
+func (r *Record) PeerID() transport.PeerID { return transport.PeerIDFromKey(r.pub) }
 
 // QUIC returns valid IPv4 ip/quic and IPv6 ip6/quic6 endpoints in that order.
 // Callers should try each returned endpoint.
@@ -220,11 +207,11 @@ func (r *Record) encodeCanonical() []byte {
 // Update returns a new record signed by key with sequence number Seq()+1. It
 // keeps r's entries and replaces or adds those in pairs. key must be the key
 // that signed r.
-func (r *Record) Update(key *secp256k1.PrivateKey, pairs ...Pair) (*Record, error) {
-	if r == nil {
-		return nil, errors.New("nil ENR")
+func (r *Record) Update(key *identity.PrivKey, pairs ...Pair) (*Record, error) {
+	if key == nil {
+		return nil, errors.New("nil ENR signing key")
 	}
-	if key == nil || !key.PubKey().IsEqual(r.pub) {
+	if !key.Public().Equal(r.pub) {
 		return nil, errors.New("key did not sign this ENR")
 	}
 	if r.seq == math.MaxUint64 {
@@ -247,9 +234,9 @@ func (r *Record) Update(key *secp256k1.PrivateKey, pairs ...Pair) (*Record, erro
 
 // Sign creates and verifies a v4 record, adding the required id and identity
 // pairs and sorting all pairs by key.
-func Sign(key *secp256k1.PrivateKey, seq uint64, pairs ...Pair) (*Record, error) {
-	if key == nil || key.Key.IsZero() {
-		return nil, errors.New("invalid ENR signing key")
+func Sign(key *identity.PrivKey, seq uint64, pairs ...Pair) (*Record, error) {
+	if key == nil {
+		return nil, errors.New("nil ENR signing key")
 	}
 	signed := make([]signedPair, 0, len(pairs)+2)
 	seen := make(map[string]struct{}, len(pairs)+2)
@@ -278,7 +265,7 @@ func Sign(key *secp256k1.PrivateKey, seq uint64, pairs ...Pair) (*Record, error)
 	}
 	signed = append(signed,
 		signedPair{key: "id", value: encodeRLPString([]byte("v4"))},
-		signedPair{key: "secp256k1", value: encodeRLPString(key.PubKey().SerializeCompressed())},
+		signedPair{key: "secp256k1", value: encodeRLPString(key.Public().Bytes())},
 	)
 	sort.Slice(signed, func(i, j int) bool {
 		return signed[i].key < signed[j].key
@@ -286,8 +273,7 @@ func Sign(key *secp256k1.PrivateKey, seq uint64, pairs ...Pair) (*Record, error)
 
 	content := encodeRLPList(encodeSignedContent(seq, signed))
 	hash := keccak256(content)
-	compact := decrecdsa.SignCompact(key, hash, true)
-	signature := compact[1:]
+	signature := key.SignHash(hash)
 
 	body := encodeRLPString(signature)
 	body = append(body, encodeUint64(seq)...)
@@ -309,20 +295,6 @@ func encodeSignedContent(seq uint64, pairs []signedPair) []byte {
 		content = append(content, pair.value...)
 	}
 	return content
-}
-
-func verifySignature(signature, hash []byte, publicKey *secp256k1.PublicKey) error {
-	var r, s secp256k1.ModNScalar
-	if r.SetByteSlice(signature[:32]) || r.IsZero() || s.SetByteSlice(signature[32:]) || s.IsZero() {
-		return errors.New("invalid ENR signature scalar")
-	}
-	if s.IsOverHalfOrder() {
-		return errors.New("high-S ENR signature")
-	}
-	if !decrecdsa.NewSignature(&r, &s).Verify(hash, publicKey) {
-		return errors.New("invalid ENR signature")
-	}
-	return nil
 }
 
 func keccak256(message []byte) []byte {

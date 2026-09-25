@@ -33,7 +33,7 @@ func TestVerifyRecordsRemoteKeyInSlot(t *testing.T) {
 		t.Fatal("slot holds no key after a valid handshake")
 	}
 	// The peer ID must be derivable from the stored key alone.
-	if got := slot.key.PeerID(); got != theirs.peerID {
+	if got := PeerIDFromKey(slot.key); got != theirs.peerID {
 		t.Fatalf("peer ID derived from slot key = %x, want %x", got, theirs.peerID)
 	}
 }
@@ -63,7 +63,7 @@ func TestVerifyLeavesSlotEmptyOnMismatch(t *testing.T) {
 		t.Fatalf("verify error = %v, want ErrPeerMismatch", err)
 	}
 	if slot.key != nil {
-		t.Fatalf("slot holds a key after a failed handshake: %x", slot.key.PeerID())
+		t.Fatalf("slot holds a key after a failed handshake: %x", PeerIDFromKey(slot.key))
 	}
 }
 

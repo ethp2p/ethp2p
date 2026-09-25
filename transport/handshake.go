@@ -7,6 +7,8 @@ import (
 	"encoding/asn1"
 	"fmt"
 	"slices"
+
+	"github.com/ethp2p/ethp2p/identity"
 )
 
 const (
@@ -33,7 +35,7 @@ type signedKey struct {
 // by all dials and accepts for that identity. It produces one handshake per
 // connection.
 type handshaker struct {
-	publicKey *PubKey
+	publicKey *identity.PubKey
 	peerID    PeerID
 	config    tls.Config
 }
@@ -50,25 +52,22 @@ type handshaker struct {
 // The dial path owns its slot as a local variable. The accept path has nothing
 // local that spans both the TLS configuration and the accepted connection, so
 // it carries its slot on the connection context instead.
-type remoteIdentitySlot struct{ key *PubKey }
+type remoteIdentitySlot struct{ key *identity.PubKey }
 
 // remoteIdentityContextKey is the connection-context key under which NewShared's
 // ConnContext hook installs the accept-side slot.
 type remoteIdentityContextKey struct{}
 
 // newHandshaker configures TLS 1.3 for key, preferring ethp2p over libp2p.
-func newHandshaker(key *PrivKey) (*handshaker, error) {
-	if key == nil || key.priv == nil {
-		return nil, errNilSigner
-	}
-	cert, err := key.issueCertificate()
+func newHandshaker(key *identity.PrivKey) (*handshaker, error) {
+	cert, err := issueCertificate(key)
 	if err != nil {
 		return nil, err
 	}
 	pubkey := key.Public()
 	return &handshaker{
 		publicKey: pubkey,
-		peerID:    pubkey.PeerID(),
+		peerID:    PeerIDFromKey(pubkey),
 		config: tls.Config{
 			MinVersion:             tls.VersionTLS13,
 			InsecureSkipVerify:     true,
@@ -109,11 +108,11 @@ func (h *handshaker) connConfig(slot *remoteIdentitySlot, expect PeerID) *tls.Co
 		if err != nil {
 			return err
 		}
-		key, actual, err := authenticate(chain)
+		key, err := authenticate(chain)
 		if err != nil {
 			return err
 		}
-		if expect != "" && expect != actual {
+		if actual := PeerIDFromKey(key); expect != "" && expect != actual {
 			return ErrPeerMismatch{Expected: expect, Actual: actual}
 		}
 		if slot != nil {
@@ -125,17 +124,17 @@ func (h *handshaker) connConfig(slot *remoteIdentitySlot, expect PeerID) *tls.Co
 }
 
 // authenticate verifies the single self-signed certificate required by
-// the libp2p TLS spec and returns its authenticated identity key and peer ID.
-func authenticate(chain []*x509.Certificate) (*PubKey, PeerID, error) {
+// the libp2p TLS spec and returns its authenticated identity key.
+func authenticate(chain []*x509.Certificate) (*identity.PubKey, error) {
 	if len(chain) != 1 {
-		return nil, "", errCertChain
+		return nil, errCertChain
 	}
 	cert := chain[0]
 	i := slices.IndexFunc(cert.Extensions, func(ext pkix.Extension) bool {
 		return ext.Id.Equal(extensionID)
 	})
 	if i < 0 {
-		return nil, "", errNoKeyExtension
+		return nil, errNoKeyExtension
 	}
 	keyExt := cert.Extensions[i]
 	verifying := *cert
@@ -145,24 +144,24 @@ func authenticate(chain []*x509.Certificate) (*PubKey, PeerID, error) {
 	pool := x509.NewCertPool()
 	pool.AddCert(cert)
 	if _, err := verifying.Verify(x509.VerifyOptions{Roots: pool}); err != nil {
-		return nil, "", fmt.Errorf("certificate verification failed: %s", err)
+		return nil, fmt.Errorf("certificate verification failed: %w", err)
 	}
 	var binding signedKey
 	if _, err := asn1.Unmarshal(keyExt.Value, &binding); err != nil {
-		return nil, "", fmt.Errorf("unmarshalling signed certificate failed: %s", err)
+		return nil, fmt.Errorf("unmarshalling signed certificate failed: %w", err)
 	}
-	key, err := DecodePubKey(binding.PubKey)
+	key, err := identity.UnmarshalPubKey(binding.PubKey)
 	if err != nil {
-		return nil, "", fmt.Errorf("unmarshalling public key failed: %s", err)
+		return nil, fmt.Errorf("unmarshalling public key failed: %w", err)
 	}
 	certKey, err := x509.MarshalPKIXPublicKey(cert.PublicKey)
 	if err != nil {
-		return nil, "", err
+		return nil, err
 	}
 	if !key.Verify(append([]byte(certificatePrefix), certKey...), binding.Signature) {
-		return nil, "", errInvalidSig
+		return nil, errInvalidSig
 	}
-	return key, key.PeerID(), nil
+	return key, nil
 }
 
 // parseChain parses the raw certificates supplied to VerifyPeerCertificate.

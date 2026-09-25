@@ -26,9 +26,7 @@ var (
 	errNoKeyExtension   = errors.New("expected certificate to contain the key extension")
 	errCertChain        = errors.New("expected one certificate in the chain")
 	errNilPacketConn    = errors.New("nil PacketConn")
-	errNilSigner        = errors.New("nil secp256k1 signer")
-	errInvalidPrivKey   = errors.New("invalid secp256k1 private key")
-	errPubKeyRequired   = errors.New("secp256k1 public key required")
+	errNilKey           = errors.New("nil identity key")
 	errInvalidSig       = errors.New("signature invalid")
 )
 

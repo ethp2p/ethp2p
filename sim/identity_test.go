@@ -2,6 +2,8 @@ package sim
 
 import (
 	"testing"
+
+	"github.com/ethp2p/ethp2p/transport"
 )
 
 // TestBuildTraceHeaderOptionsPeerIDs covers the mapping consumers use to resolve
@@ -79,7 +81,7 @@ func TestNodeIdentityIsDeterministic(t *testing.T) {
 		if id1 != id2 {
 			t.Fatalf("node %d identity is not deterministic", num)
 		}
-		if key1.Public().PeerID() != id1 {
+		if transport.PeerIDFromKey(key1.Public()) != id1 {
 			t.Fatalf("node %d peer ID does not match its key", num)
 		}
 	}

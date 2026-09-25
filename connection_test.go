@@ -8,7 +8,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/decred/dcrd/dcrec/secp256k1/v4"
 	"github.com/ethp2p/ethp2p/enr"
 	"github.com/ethp2p/ethp2p/wire"
 	"github.com/ethp2p/ethp2p/transport"
@@ -163,7 +162,7 @@ func TestConnectValidationAndRejection(t *testing.T) {
 	registerTestSub(t, right, "right", 2)
 	startTestStack(t, left)
 	startTestStack(t, right)
-	rec, err := enr.Sign(secp256k1.PrivKeyFromBytes(b.Key.Bytes()), 1)
+	rec, err := enr.Sign(b.Key, 1)
 	if err != nil {
 		t.Fatal(err)
 	}

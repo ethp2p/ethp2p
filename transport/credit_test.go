@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ethp2p/ethp2p/identity"
 	"github.com/ethp2p/ethp2p/transport"
 	"github.com/ethp2p/ethp2p/transport/transporttest"
 )
@@ -25,7 +26,7 @@ func TestUnidirectionalCreditBackpressure(t *testing.T) {
 
 func testUniCredit(t *testing.T, want []byte) {
 	client := transporttest.NewEndpoint(t)
-	key, err := transport.GenPrivKey()
+	key, err := identity.GenPrivKey()
 	if err != nil {
 		t.Fatal(err)
 	}

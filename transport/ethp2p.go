@@ -81,7 +81,7 @@ func (t *Ethp2pTransport) Dial(ctx context.Context, addr net.Addr, expect PeerID
 
 	// Create the shared connection and its dispatchers, then return the ethp2p
 	// side and feed the libp2p side to libp2p.
-	sc := newSharedConn(raw, &t.shared.wg, slot.key.PeerID())
+	sc := newSharedConn(raw, &t.shared.wg, PeerIDFromKey(slot.key))
 	sc.outbound = true
 	ethp2p := sc.ethp2p()
 	if err := ethp2p.startControl(t.shared.helloSnapshot()); err != nil {
