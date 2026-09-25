@@ -31,3 +31,6 @@ ref/
 
 .rumdl_cache/
 .DS_Store
+
+# bb delegate state
+.bb/delegate/
