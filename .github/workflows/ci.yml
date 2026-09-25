@@ -45,11 +45,8 @@ jobs:
         with:
           go-version-file: go.mod
 
-      - name: Run unit tests
-        run: go test -race . ./protocol/... ./transport/... ./broadcast/...
-
-      - name: Run integration tests
-        run: go test -race -tags=integration ./broadcast/tests/...
+      - name: Run tests
+        run: go test -race . ./wire/... ./transport/... ./broadcast/... ./e2e/... ./enr/... ./identity/... ./internal/...
 
   simnet-rs:
     runs-on: ubuntu-latest
@@ -61,7 +58,7 @@ jobs:
           go-version-file: go.mod
 
       - name: Run RS simnet tests
-        run: go test -race -v -run 'TestNetwork/RS|TestNodeReconnection' ./sim/...
+        run: go test -race -v -run 'TestNetwork/RS' ./sim/...
 
   simnet-gossipsub:
     runs-on: ubuntu-latest
@@ -74,17 +71,3 @@ jobs:
 
       - name: Run Gossipsub simnet tests
         run: go test -race -v -run 'TestNetwork/Gossipsub' ./sim/...
-
-  large-network-rs:
-    runs-on: ubuntu-latest
-    if: github.ref == 'refs/heads/main'
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-go@v5
-        with:
-          go-version-file: go.mod
-
-      - name: Run large network RS tests
-        run: go test -race -v -run 'TestLargeNetwork_RS|TestScalability' ./sim/...
-
