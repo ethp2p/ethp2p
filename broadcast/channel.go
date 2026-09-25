@@ -7,8 +7,9 @@ import (
 	"sync"
 	"time"
 
-	"github.com/ethp2p/ethp2p/wire"
+	"github.com/ethp2p/ethp2p/internal/trace"
 	"github.com/ethp2p/ethp2p/transport"
+	"github.com/ethp2p/ethp2p/wire"
 )
 
 const (
@@ -137,7 +138,8 @@ func (tr *Channel[CI, R, P]) newSession(
 		channelDone:     channelDone,
 		observer:        tr.engine.config.Observer,
 		outboundCancels: make(map[outboundKey]context.CancelFunc),
-		readSem:         make(chan struct{}, maxConcurrentReads),
+		readSem:         make(chan struct{}, tr.engine.config.hooks.ReadLimit(maxConcurrentReads)),
+		hooks:           tr.engine.config.hooks,
 		dedupGroups:     make(map[string]*dedupGroup),
 		pendingVerify:   make(map[string]context.CancelFunc),
 		sessCtx:         sessCtx,
@@ -320,6 +322,9 @@ func (tr *Channel[CI, R, P]) handleChunk(e channelChunkStream) {
 		return
 	}
 	tr.parked[messageID] = append(buf, e)
+	if hooks := tr.engine.config.hooks; hooks.Tracing() {
+		hooks.Trace.Emit(trace.ChunkParked{Peer: string(e.peerID), Channel: string(tr.id), Message: string(messageID)})
+	}
 }
 
 func (tr *Channel[CI, R, P]) handleSessionOpen(e channelSessionOpen) {
@@ -561,6 +566,9 @@ func (tr *Channel[CI, R, P]) cleanup() {
 			// drop the group unconditionally on GC tick.
 			for _, c := range chunks {
 				c.stream.CancelRead(wire.Refused)
+			}
+			if hooks := tr.engine.config.hooks; hooks.Tracing() {
+				hooks.Trace.Emit(trace.ParkedChunksDropped{Channel: string(tr.id), Message: string(mid), Count: len(chunks)})
 			}
 			delete(tr.parked, mid)
 		}

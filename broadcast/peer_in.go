@@ -8,6 +8,8 @@ import (
 	ethp2p "github.com/ethp2p/ethp2p"
 	bcastpb "github.com/ethp2p/ethp2p/broadcast/pb"
 	"github.com/ethp2p/ethp2p/internal/ctxutil"
+	"github.com/ethp2p/ethp2p/internal/devhook"
+	"github.com/ethp2p/ethp2p/internal/trace"
 	"github.com/ethp2p/ethp2p/wire"
 )
 
@@ -77,6 +79,9 @@ func (p *PeerConn) acceptChunk(stream ethp2p.ReceiveStream) {
 	select {
 	case p.chunkSem <- struct{}{}:
 	case <-p.ctx.Done():
+		if hooks := p.engine.config.hooks; hooks.Tracing() {
+			hooks.Trace.Emit(trace.ChunkReadCancelled{Peer: string(p.id), Reason: trace.CancelBindClosed})
+		}
 		stream.CancelRead(wire.Unspecified)
 		return
 	}
@@ -146,6 +151,9 @@ func (p *PeerConn) runInboundSession(s ethp2p.ReceiveStream) {
 		s.CancelRead(wire.Refused)
 		return
 	}
+	if !p.engine.config.hooks.Wait(p.ctx, devhook.Site{Point: devhook.PointSessionOpen, Peer: string(p.id), Channel: string(channelID), Message: string(messageID)}) {
+		return
+	}
 	if !ch.add(s) {
 		s.CancelRead(wire.Unspecified)
 		return
@@ -194,6 +202,9 @@ func (p *PeerConn) runInboundSession(s ethp2p.ReceiveStream) {
 		ru := frame.GetRoutingUpdate()
 		if ru == nil {
 			s.CancelRead(wire.Refused)
+			return
+		}
+		if !p.engine.config.hooks.Wait(p.ctx, devhook.Site{Point: devhook.PointRoutingUpdate, Peer: string(p.id), Channel: string(channelID), Message: string(messageID)}) {
 			return
 		}
 		select {

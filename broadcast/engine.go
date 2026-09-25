@@ -8,8 +8,9 @@ import (
 	"sync/atomic"
 
 	ethp2p "github.com/ethp2p/ethp2p"
-	"github.com/ethp2p/ethp2p/wire"
+	"github.com/ethp2p/ethp2p/internal/devhook"
 	"github.com/ethp2p/ethp2p/transport"
+	"github.com/ethp2p/ethp2p/wire"
 )
 
 const defaultMaxInboundChunkStreams = 5
@@ -17,6 +18,8 @@ const defaultMaxInboundChunkStreams = 5
 // EngineConfig holds configuration for an Engine.
 type EngineConfig struct {
 	Observer Observer
+
+	hooks *devhook.Hooks // test instrumentation; nil in production
 
 	// MaxInboundChunkStreams bounds the number of concurrent inbound
 	// chunk streams per peer. Zero uses the default (5).
@@ -32,6 +35,10 @@ type EngineConfig struct {
 	// (300 + 30 seconds, ~29700 resident), with roughly 10% burst/scheduling
 	// headroom. TTL is not a strict residence bound. Raise this for higher rates.
 	MaxLiveSessionsPerPeer int
+}
+
+func init() {
+	devhook.Register(func(config *EngineConfig, hooks *devhook.Hooks) { config.hooks = hooks })
 }
 
 func (c *EngineConfig) maxLiveSessionsPerPeer() int {

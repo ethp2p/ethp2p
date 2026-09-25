@@ -8,8 +8,10 @@ import (
 	"time"
 
 	ethp2p "github.com/ethp2p/ethp2p"
-	"github.com/ethp2p/ethp2p/wire"
+	"github.com/ethp2p/ethp2p/internal/devhook"
+	"github.com/ethp2p/ethp2p/internal/trace"
 	"github.com/ethp2p/ethp2p/transport"
+	"github.com/ethp2p/ethp2p/wire"
 )
 
 const maxConcurrentReads = 64
@@ -80,6 +82,7 @@ type session[CI ChunkIdent, R Wire] struct {
 	channelInbox chan<- channelEvent
 	channelDone  <-chan struct{}
 	observer     Observer
+	hooks        *devhook.Hooks
 
 	// outboundCancels tracks cancel functions for in-flight chunk sends.
 	// When a routing update reveals the peer already has the chunk, the
@@ -141,6 +144,9 @@ func (s *session[CI, R]) closeWithCode(code wire.Code) error {
 	s.readQueue = nil
 	s.wg.Wait()
 	s.strategy.Close()
+	if s.hooks.Tracing() {
+		s.hooks.Trace.Emit(trace.StrategyClosed{Channel: string(s.channelID), Message: string(s.messageID)})
+	}
 	s.lease.release()
 	close(s.done)
 	return nil
@@ -170,6 +176,9 @@ func (s *session[CI, R]) notifyPeersComplete() {
 // disposal. Called after a successful decode.
 func (s *session[CI, R]) signalReconstructed() {
 	s.stage = stageReconstructed
+	if s.hooks.Tracing() {
+		s.hooks.Trace.Emit(trace.SessionStage{Channel: string(s.channelID), Message: string(s.messageID), Stage: trace.StageReconstructed})
+	}
 	s.maybeDispose()
 }
 
@@ -210,7 +219,20 @@ func (s *session[CI, R]) handleChunkStream(peer transport.PeerID, chunkID []byte
 		stream.CancelRead(wire.Unspecified)
 		return
 	}
-	if s.stage >= stageDecoding || s.strategy.HaveChunk(chunk) {
+	// The strategy is frozen for Decode once the session leaves stageConsuming,
+	// so HaveChunk is consulted only before that.
+	haveChunk := s.stage < stageDecoding && s.strategy.HaveChunk(chunk)
+	if s.stage >= stageDecoding || haveChunk {
+		if s.hooks.Tracing() {
+			reason := trace.RejectComplete
+			switch {
+			case s.stage == stageOrigin:
+				reason = trace.RejectOrigin
+			case haveChunk:
+				reason = trace.RejectHaveChunk
+			}
+			s.hooks.Trace.Emit(trace.InboundStreamRejected{Peer: string(peer), Channel: string(s.channelID), Message: string(s.messageID), Reason: reason})
+		}
 		v := VerdictRedundant
 		if s.stage >= stageReconstructed {
 			v = VerdictSurplus
@@ -272,10 +294,19 @@ func (s *session[CI, R]) handleChunkStream(peer transport.PeerID, chunkID []byte
 		go func() {
 			select {
 			case <-readCtx.Done():
+				if s.sessCtx.Err() != nil && s.hooks.Tracing() {
+					s.hooks.Trace.Emit(trace.ChunkReadCancelled{Peer: string(peer), Channel: string(s.channelID), Message: string(s.messageID), Reason: trace.CancelSessionClosed})
+				}
 				stream.CancelRead(streamCancellationCode(context.Cause(readCtx)))
 			case <-done:
 			}
 		}()
+		if !s.hooks.Wait(readCtx, devhook.Site{Point: devhook.PointChunkRead, Peer: string(peer), Channel: string(s.channelID), Message: string(s.messageID)}) {
+			close(done)
+			s.emitDedupReadCancelled(peer, readCtx, dedupKey)
+			stream.CancelRead(streamCancellationCode(context.Cause(readCtx)))
+			return
+		}
 
 		_ = stream.SetReadDeadline(time.Now().Add(chunkReadTimeout))
 		defer func() { _ = stream.SetReadDeadline(time.Time{}) }()
@@ -283,6 +314,7 @@ func (s *session[CI, R]) handleChunkStream(peer transport.PeerID, chunkID []byte
 		buf := make([]byte, dataLen)
 		if _, err := io.ReadFull(stream, buf); err != nil {
 			close(done)
+			s.emitDedupReadCancelled(peer, readCtx, dedupKey)
 			// A failed read was already cancelled by the stream; this only
 			// takes effect for a payload truncated by FIN.
 			stream.CancelRead(wire.Unspecified)
@@ -299,6 +331,7 @@ func (s *session[CI, R]) handleChunkStream(peer transport.PeerID, chunkID []byte
 			close(done)
 		case <-readCtx.Done():
 			close(done)
+			s.emitDedupReadCancelled(peer, readCtx, dedupKey)
 			stream.CancelRead(streamCancellationCode(context.Cause(readCtx)))
 		case <-s.channelDone:
 			close(done)
@@ -316,6 +349,15 @@ func (s *session[CI, R]) drainReads() {
 			continue
 		}
 		s.handleChunkStream(pending.peer, pending.chunkID, pending.dataLen, pending.stream)
+	}
+}
+
+// emitDedupReadCancelled reports only a reader that stopped before handing
+// off its chunk. The strategy's cancellation call alone is not evidence of a
+// second in-flight read.
+func (s *session[CI, R]) emitDedupReadCancelled(peer transport.PeerID, readCtx context.Context, dedupKey []byte) {
+	if s.hooks.Tracing() && dedupKey != nil && readCtx.Err() != nil && s.sessCtx.Err() == nil {
+		s.hooks.Trace.Emit(trace.ChunkReadCancelled{Peer: string(peer), Channel: string(s.channelID), Message: string(s.messageID), Reason: trace.CancelDedup})
 	}
 }
 
@@ -395,6 +437,9 @@ func (s *session[CI, R]) handleVerifyResult(peer transport.PeerID, chunkID []byt
 func (s *session[CI, R]) acceptChunk(peer transport.PeerID, chunk CI, payload []byte) {
 	dedup := s.buildDedupCancel(chunk)
 	verdict, complete, err := s.strategy.TakeChunk(peer, chunk, payload, dedup)
+	if s.hooks.Tracing() {
+		s.hooks.Trace.Emit(trace.ChunkHandled{Peer: string(peer), Channel: string(s.channelID), Message: string(s.messageID), Chunk: fmt.Sprint(chunk.Handle())})
+	}
 	if err != nil {
 		s.observer.OnChunkError(ChunkProcessError{Peer: peer, ChannelID: s.channelID, MessageID: s.messageID, Err: err})
 	}
@@ -409,6 +454,9 @@ func (s *session[CI, R]) acceptChunk(peer transport.PeerID, chunk CI, payload []
 			// failure is non-recoverable, there is no reason to
 			// keep accepting inbound traffic.
 			s.stage = stageDecoding
+			if s.hooks.Tracing() {
+				s.hooks.Trace.Emit(trace.SessionStage{Channel: string(s.channelID), Message: string(s.messageID), Stage: trace.StageDecoding})
+			}
 			s.notifyPeersComplete()
 			strategy := s.strategy
 			msgID := s.messageID
@@ -480,6 +528,10 @@ func (s *session[CI, R]) handleSendComplete(peer transport.PeerID, handle ChunkH
 		delete(s.outboundCancels, key)
 	}
 	s.strategy.ChunkSent(peer, handle, err)
+	if s.hooks.Tracing() {
+		s.hooks.Trace.Emit(trace.ChunkSendResult{Peer: string(peer), Channel: string(s.channelID), Message: string(s.messageID), Err: err})
+		s.hooks.Trace.Emit(trace.DispatchSlot{Peer: string(peer), Channel: string(s.channelID), Message: string(s.messageID), Acquired: false})
+	}
 	if err == nil {
 		s.observer.OnChunkSent(peer, s.channelID, s.messageID, size)
 	}
@@ -550,6 +602,9 @@ func (s *session[CI, R]) handlePeerCompleted(peer transport.PeerID) {
 		return
 	}
 	sp.completed = true
+	if s.hooks.Tracing() {
+		s.hooks.Trace.Emit(trace.SessionStage{Peer: string(peer), Channel: string(s.channelID), Message: string(s.messageID), Stage: trace.StagePeerCompleted})
+	}
 	for key, cancel := range s.outboundCancels {
 		if key.peer == peer {
 			cancel()
@@ -652,6 +707,9 @@ func (s *session[CI, R]) sendChunk(peer transport.PeerID, chunkID CI, data []byt
 	}
 	select {
 	case sp.chunkOutbox <- chunk:
+		if s.hooks.Tracing() {
+			s.hooks.Trace.Emit(trace.DispatchSlot{Peer: string(peer), Channel: string(s.channelID), Message: string(s.messageID), Acquired: true})
+		}
 		s.outboundCancels[key] = cancel
 		sp.stats.inflight++
 		select {

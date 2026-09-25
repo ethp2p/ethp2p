@@ -8,6 +8,7 @@ import (
 	ethp2p "github.com/ethp2p/ethp2p"
 	bcastpb "github.com/ethp2p/ethp2p/broadcast/pb"
 	"github.com/ethp2p/ethp2p/internal/ctxutil"
+	"github.com/ethp2p/ethp2p/internal/devhook"
 	"github.com/ethp2p/ethp2p/wire"
 )
 
@@ -309,29 +310,49 @@ func (p *PeerConn) doSendChunk(e peerSendChunk) (int, error) {
 	deadline := time.Now().Add(chunkWriteTimeout)
 	ctx, cancel := context.WithDeadline(p.ctx, deadline)
 	defer cancel()
-	s, err := p.streams.OpenUniStream(ctx, CHUNK)
-	if err != nil {
-		return 0, ErrChunkWriteFail
+	if !p.engine.config.hooks.Wait(ctx, devhook.Site{Point: devhook.PointChunkWrite, Peer: string(p.id), Channel: string(e.channelID), Message: string(e.messageID)}) {
+		return 0, ErrChunkCancelled
 	}
+	payload := e.payload
+	copies := 1
+	fault := p.engine.config.hooks.FaultChunk(string(p.id), string(e.channelID), string(e.messageID), e.payload)
+	if fault.Err != nil {
+		return 0, fault.Err
+	}
+	if fault.Data != nil {
+		payload = fault.Data
+	}
+	if fault.Duplicate {
+		copies = 2
+	}
+	for copyIndex := range copies {
+		if copyIndex != 0 && !p.engine.config.hooks.Wait(ctx, devhook.Site{Point: devhook.PointChunkWrite, Peer: string(p.id), Channel: string(e.channelID), Message: string(e.messageID)}) {
+			return 0, ErrChunkCancelled
+		}
+		s, err := p.streams.OpenUniStream(ctx, CHUNK)
+		if err != nil {
+			return 0, ErrChunkWriteFail
+		}
 
-	s.SetWriteDeadline(deadline)
-	stop := ctxutil.OnCancel(ctx, func() { s.CancelWrite(streamFailureCode(errors.Join(ctx.Err(), p.ctx.Err()))) })
-	defer stop()
+		s.SetWriteDeadline(deadline)
+		stop := ctxutil.OnCancel(ctx, func() { s.CancelWrite(streamFailureCode(errors.Join(ctx.Err(), p.ctx.Err()))) })
+		defer stop()
 
-	frame := &bcastpb.Chunk_Header{
-		Channel:    string(e.channelID),
-		MessageId:  string(e.messageID),
-		ChunkId:    e.chunkID,
-		DataLength: uint32(len(e.payload)),
+		frame := &bcastpb.Chunk_Header{
+			Channel:    string(e.channelID),
+			MessageId:  string(e.messageID),
+			ChunkId:    e.chunkID,
+			DataLength: uint32(len(payload)),
+		}
+		if err := WriteFrame(s, frame); err != nil {
+			return 0, ErrChunkWriteFail
+		}
+		if _, err := s.Write(payload); err != nil {
+			return 0, ErrChunkWriteFail
+		}
+		if err := s.Close(); err != nil {
+			return 0, ErrChunkWriteFail
+		}
 	}
-	if err := WriteFrame(s, frame); err != nil {
-		return 0, ErrChunkWriteFail
-	}
-	if _, err := s.Write(e.payload); err != nil {
-		return 0, ErrChunkWriteFail
-	}
-	if err := s.Close(); err != nil {
-		return 0, ErrChunkWriteFail
-	}
-	return len(e.payload), nil
+	return len(payload), nil
 }

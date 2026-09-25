@@ -12,8 +12,9 @@ import (
 	ethp2p "github.com/ethp2p/ethp2p"
 	bcastpb "github.com/ethp2p/ethp2p/broadcast/pb"
 	"github.com/ethp2p/ethp2p/internal/ctxutil"
-	"github.com/ethp2p/ethp2p/wire"
+	"github.com/ethp2p/ethp2p/internal/devhook"
 	"github.com/ethp2p/ethp2p/transport"
+	"github.com/ethp2p/ethp2p/wire"
 )
 
 const (
@@ -210,6 +211,10 @@ func (p *PeerConn) Run(ourChannels []ChannelID) error {
 	}
 
 	p.version = version
+	if !p.engine.config.hooks.Wait(p.ctx, devhook.Site{Point: devhook.PointHandshake, Peer: string(p.id)}) {
+		p.finishHandshake(false, p.ctx.Err())
+		return p.ctx.Err()
+	}
 
 	// Start ctrl and data loops before any session attachment/control
 	// events can arrive via ctrlQ. The slot channel connects them:
