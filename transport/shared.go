@@ -67,16 +67,14 @@ type SharedTransport struct {
 	// Each queue holds views only after its side has registered interest.
 	// Unclaimed or unqueueable views are released immediately.
 	libQ chan quicreuse.QUICConn
-	ethQ chan Conn
+	ethQ chan *Conn
 
 	// interest records, as a bitmap of side values, the sides whose transport
 	// the application requested. Views for other sides are released at once.
-	interest  atomic.Uint32
-	helloMu   sync.RWMutex
-	hello     Hello
-	hasHello  bool
-	sink      Sink // protected by helloMu; immutable after Bind
-	sinkBound chan struct{}
+	interest atomic.Uint32
+	helloMu  sync.RWMutex
+	hello    Hello
+	hasHello bool
 	// libListening is set by the first Libp2pTransport.Listen and never cleared.
 	libListening atomic.Bool
 	// libMu serializes libp2p offers with listener detachment, so no view can
@@ -84,6 +82,11 @@ type SharedTransport struct {
 	libMu       sync.Mutex
 	libDetached bool
 	libDone     chan struct{}
+	// ethMu serializes ethp2p offers with Ethp2pTransport.Close, so no view
+	// can be queued after Close drains ethQ. ethDone closes on detachment.
+	ethMu       sync.Mutex
+	ethDetached bool
+	ethDone     chan struct{}
 
 	// Listener startup is attempted once, including on failure.
 	// lnOnce synchronizes access to lnErr between concurrent attaches.
@@ -96,8 +99,8 @@ type SharedTransport struct {
 	// while shutdown waits, but no external caller may revive a drained wg.
 	lifetimeMu sync.Mutex
 	// wg tracks listener startup, outbound Dial reservations, and all accept,
-	// dispatcher, classifier, control and sink pump goroutines. Dial transfers
-	// its reservation to an admitted pump; shutdown joins them after raw.Close.
+	// dispatcher, classifier and control goroutines. Shutdown joins them after
+	// raw.Close.
 	wg sync.WaitGroup
 }
 
@@ -132,9 +135,9 @@ func NewShared(key *identity.PrivKey, packetConn net.PacketConn, profile Profile
 		ctx:        ctx,
 		cancel:     cancel,
 		libQ:       make(chan quicreuse.QUICConn, maxConnsPendingDelivery),
-		ethQ:       make(chan Conn, maxConnsPendingDelivery),
-		sinkBound:  make(chan struct{}),
+		ethQ:       make(chan *Conn, maxConnsPendingDelivery),
 		libDone:    make(chan struct{}),
+		ethDone:    make(chan struct{}),
 	}
 
 	// ConnContext installs the per-connection identity slot that the verify
@@ -183,10 +186,12 @@ func (t *SharedTransport) start() error {
 	return t.ensureListener()
 }
 
-// offerEthp2p starts a bound sink pump or queues an unbound view in ethQ.
-// Unclaimed views and unbound queue overflow release only the ethp2p view;
-// libp2p delivery is independent.
-func (t *SharedTransport) offerEthp2p(c *ethp2pConn) {
+// offerEthp2p starts the view's control protocol, then waits for the peer's
+// Hello in a transport-owned goroutine. A view whose Hello never arrives is
+// released by the control path. A validated view is queued in ethQ under the
+// same mutex Ethp2pTransport.Close uses; a full queue releases only the
+// ethp2p view with Overloaded. libp2p delivery is independent.
+func (t *SharedTransport) offerEthp2p(c *Conn) {
 	if t.interest.Load()&uint32(sideEthp2p) == 0 {
 		_ = c.Close()
 		return
@@ -195,23 +200,34 @@ func (t *SharedTransport) offerEthp2p(c *ethp2pConn) {
 		_ = c.Close()
 		return
 	}
-	t.helloMu.RLock()
-	sink := t.sink
-	t.helloMu.RUnlock()
-	if sink != nil {
-		t.wg.Go(func() {
-			if err := t.admit(t.ctx, c, sink); err == nil {
-				t.pump(c, sink)
+	t.wg.Go(func() {
+		if _, err := c.waitHello(t.ctx); err != nil {
+			// The control path already released the view.
+			return
+		}
+		t.ethMu.Lock()
+		detached := t.ethDetached || t.interest.Load()&uint32(sideEthp2p) == 0
+		queued, full := false, false
+		if !detached {
+			select {
+			case t.ethQ <- c:
+				queued = true
+			default:
+				full = true
 			}
-		})
-		return
-	}
-	select {
-	case t.ethQ <- c:
-	default:
-		// A blocked Hello must not delay libp2p delivery or the next accept.
-		t.wg.Go(func() { _ = c.CloseWithCode(wire.Overloaded) })
-	}
+		}
+		t.ethMu.Unlock()
+		// Release outside the mutex: closing bounds control writes with a
+		// one-second deadline and must not stall delivery detachment.
+		switch {
+		case queued:
+		case full:
+			// A blocked Hello must not delay libp2p delivery or the next accept.
+			_ = c.CloseWithCode(wire.Overloaded)
+		default:
+			_ = c.Close()
+		}
+	})
 }
 
 // offerLibp2p hands a libp2p view, or a legacy libp2p-only connection, to
@@ -298,9 +314,12 @@ func (t *SharedTransport) acceptLoop(ln *quic.Listener) {
 			// peer is legacy: the libp2p view is the whole connection
 			t.offerLibp2p(raw)
 		case AlpnEthp2p:
-			sc := newSharedConn(raw, &t.wg, acceptedPeerID(raw))
-			t.offerEthp2p(sc.ethp2p())
+			sc := newSharedConn(raw, &t.wg, acceptedPeerID(raw), t.ctx)
+			// Offer libp2p first: when ethp2p delivery is detached, the
+			// ethp2p release below is the last one, so the raw close carries
+			// Closing and the dialer observes a ViewClosedError with that code.
 			t.offerLibp2p(sc.libp2p())
+			t.offerEthp2p(sc.ethp2p())
 			sc.startDispatchers()
 		default:
 			_ = raw.CloseWithError(appFailure, "unsupported negotiated protocol")
@@ -365,8 +384,7 @@ type sharedConn struct {
 
 	// delivery queues for classified incoming streams
 	libp2pBi       chan *quic.Stream
-	ethp2pBi       *streamQueue[selectedBi]
-	ethp2pUni      *streamQueue[selectedUni]
+	ethp2pStreams  *streamQueue[classifiedStream]
 	controlIn      chan *quic.ReceiveStream
 	controlClaimed atomic.Bool
 	control        controlState
@@ -378,17 +396,18 @@ type sharedConn struct {
 
 	// remote is the identity authenticated for the remote endpoint.
 	remote PeerID
+	// endpoint is the SharedTransport's lifetime. CloseCode reports Closing
+	// while it is done, distinguishing endpoint shutdown from other closures.
+	endpoint context.Context
 }
 
-type selectedBi struct {
-	stream   *quic.Stream
+// classifiedStream is one ethp2p stream waiting in the per-connection queue,
+// in classification completion order across both directions. A bidirectional
+// stream keeps its send side open, so it implements Stream; a unidirectional
+// stream skips its peeked selector frame on its first Read.
+type classifiedStream struct {
+	stream   ReceiveStream // bidi: stream{s}; uni: &receiveStream{ReceiveStream: s, skip: frameLen}
 	selector wire.Selector
-}
-
-type selectedUni struct {
-	stream   *quic.ReceiveStream
-	selector wire.Selector
-	frameLen int
 }
 
 // newSharedConn splits an ethp2p_0 connection into the shared state backing its
@@ -398,24 +417,26 @@ type selectedUni struct {
 // remote is the peer identity the handshake authenticated. An ethp2p_0
 // connection only reaches this point after the verify callback accepted the
 // peer's certificate, so the identity is always established by then.
-func newSharedConn(raw *quic.Conn, wg *sync.WaitGroup, remote PeerID) *sharedConn {
+// endpoint is the owning SharedTransport's lifetime, used only to classify
+// view closures after endpoint shutdown.
+func newSharedConn(raw *quic.Conn, wg *sync.WaitGroup, remote PeerID, endpoint context.Context) *sharedConn {
 	libp2pCtx, cancelLibp2p := context.WithCancelCause(raw.Context())
 	ethp2pCtx, cancelEthp2p := context.WithCancelCause(raw.Context())
 	sc := &sharedConn{
-		conn:         raw,
-		created:      time.Now(),
-		libp2pCtx:    libp2pCtx,
-		cancelLibp2p: cancelLibp2p,
-		ethp2pCtx:    ethp2pCtx,
-		cancelEthp2p: cancelEthp2p,
-		wg:           wg,
-		remote:       remote,
-		biSem:        make(chan struct{}, maxStreamsPendingClassify),
-		uniSem:       make(chan struct{}, maxStreamsPendingClassify),
-		libp2pBi:     make(chan *quic.Stream, maxLibp2pStreamsPendingDelivery),
-		ethp2pBi:     newStreamQueue[selectedBi](),
-		ethp2pUni:    newStreamQueue[selectedUni](),
-		controlIn:    make(chan *quic.ReceiveStream, 1),
+		conn:          raw,
+		created:       time.Now(),
+		libp2pCtx:     libp2pCtx,
+		cancelLibp2p:  cancelLibp2p,
+		ethp2pCtx:     ethp2pCtx,
+		cancelEthp2p:  cancelEthp2p,
+		wg:            wg,
+		remote:        remote,
+		biSem:         make(chan struct{}, maxStreamsPendingClassify),
+		uniSem:        make(chan struct{}, maxStreamsPendingClassify),
+		libp2pBi:      make(chan *quic.Stream, maxLibp2pStreamsPendingDelivery),
+		ethp2pStreams: newStreamQueue[classifiedStream](),
+		controlIn:     make(chan *quic.ReceiveStream, 1),
+		endpoint:      endpoint,
 	}
 	sc.control.helloReady = make(chan struct{})
 	for range maxStreamsPendingClassify {
@@ -479,17 +500,17 @@ func (c *sharedConn) drainLibp2pQueue() {
 }
 
 func (c *sharedConn) drainEthp2pQueues() {
-	for _, s := range c.ethp2pBi.close() {
-		resetBi(s.stream, wire.Closing)
-	}
-	for _, s := range c.ethp2pUni.close() {
-		s.stream.CancelRead(quicCode(wire.Closing))
+	for _, s := range c.ethp2pStreams.close() {
+		s.stream.CancelRead(wire.Closing.Wire())
+		if bi, ok := s.stream.(Stream); ok {
+			bi.CancelWrite(wire.Closing.Wire())
+		}
 	}
 }
 
 // ethp2p returns the ethp2p view of the shared connection.
-func (c *sharedConn) ethp2p() *ethp2pConn {
-	return &ethp2pConn{sharedConn: c}
+func (c *sharedConn) ethp2p() *Conn {
+	return &Conn{c}
 }
 
 // libp2p returns the libp2p view of the shared connection.
@@ -507,7 +528,7 @@ func (c *sharedConn) drainBidi() {
 		case <-ctx.Done():
 			return
 		}
-		stream, err := c.conn.AcceptStream(ctx)
+		accepted, err := c.conn.AcceptStream(ctx)
 		if err != nil {
 			c.biSem <- struct{}{}
 			if ctx.Err() == nil {
@@ -517,45 +538,45 @@ func (c *sharedConn) drainBidi() {
 		}
 		c.wg.Go(func() {
 			defer func() { c.biSem <- struct{}{} }()
-			isEthp2p, selector, err := classifyBi(stream)
+			isEthp2p, selector, err := classifyBi(accepted)
 			if err != nil {
 				if ctx.Err() == nil {
 					if peerReset(err) {
-						stream.CancelWrite(quicCode(wire.Unspecified))
+						accepted.CancelWrite(quicCode(wire.Unspecified))
 					} else {
-						resetBi(stream, classificationCode(err))
+						resetBi(accepted, classificationCode(err))
 					}
 				}
 				return
 			}
 			if isEthp2p {
 				if c.ethp2pCtx.Err() != nil {
-					resetBi(stream, wire.Closing)
+					resetBi(accepted, wire.Closing)
 					return
 				}
 				if selector == wire.ControlSelector {
-					resetBi(stream, wire.ControlViolation)
+					resetBi(accepted, wire.ControlViolation)
 					c.controlViolation()
 					return
 				}
 				// The send side stays open until the protocol ends it, so a
 				// queued bidi stream holds credit even after receiving FIN.
-				if !c.ethp2pBi.push(selectedBi{stream, selector}) {
-					resetBi(stream, wire.Closing)
+				if !c.ethp2pStreams.push(classifiedStream{stream: stream{accepted}, selector: selector}) {
+					resetBi(accepted, wire.Closing)
 				}
 				return
 			}
 			if c.libp2pCtx.Err() != nil {
-				resetBi(stream, wire.Closing)
+				resetBi(accepted, wire.Closing)
 				return
 			}
 			select {
-			case c.libp2pBi <- stream:
+			case c.libp2pBi <- accepted:
 				if c.libp2pCtx.Err() != nil {
 					c.drainLibp2pQueue()
 				}
 			default:
-				resetBi(stream, wire.Overloaded)
+				resetBi(accepted, wire.Overloaded)
 			}
 		})
 	}
@@ -689,7 +710,7 @@ func (c *sharedConn) drainUni() {
 				c.control.mu.Unlock()
 				return
 			}
-			if !c.ethp2pUni.push(selectedUni{stream, selector, frameLen}) {
+			if !c.ethp2pStreams.push(classifiedStream{&receiveStream{ReceiveStream: stream, skip: frameLen}, selector}) {
 				stream.CancelRead(quicCode(wire.Closing))
 			}
 		})

@@ -19,13 +19,13 @@ func ProfileWithIncomingUniStreams(limit int64) Profile {
 }
 
 // RawOpenStream bypasses the ethp2p view to exercise malformed stream heads.
-func RawOpenStream(ctx context.Context, conn Conn) (*quic.Stream, error) {
-	return conn.(*ethp2pConn).conn.OpenStreamSync(ctx)
+func RawOpenStream(ctx context.Context, conn *Conn) (*quic.Stream, error) {
+	return conn.conn.OpenStreamSync(ctx)
 }
 
 // RawOpenUniStream bypasses the ethp2p view to exercise malformed stream heads.
-func RawOpenUniStream(ctx context.Context, conn Conn) (*quic.SendStream, error) {
-	return conn.(*ethp2pConn).conn.OpenUniStreamSync(ctx)
+func RawOpenUniStream(ctx context.Context, conn *Conn) (*quic.SendStream, error) {
+	return conn.conn.OpenUniStreamSync(ctx)
 }
 
 // ShortenClassifyTimeout applies a test-only timeout until cleanup.

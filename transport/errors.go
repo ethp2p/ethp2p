@@ -9,8 +9,6 @@ import (
 )
 
 var (
-	// ErrSinkBound reports an operation reserved for unbound transport mode.
-	ErrSinkBound = errors.New("ethp2p transport is bound to a sink")
 	// ErrDialLegacyPeer reports that [Ethp2pTransport.Dial] authenticated the
 	// peer but negotiated libp2p instead of ethp2p_0.
 	ErrDialLegacyPeer = errors.New("peer dialed by ethp2p is legacy")

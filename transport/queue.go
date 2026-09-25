@@ -1,7 +1,6 @@
 package transport
 
 import (
-	"context"
 	"sync"
 )
 
@@ -36,37 +35,25 @@ func (q *streamQueue[T]) push(item T) bool {
 	return true
 }
 
-func (q *streamQueue[T]) pop(ctx, view context.Context) (T, error) {
+// tryPop returns the oldest queued item. It never blocks; it reports false
+// when the queue is empty. A non-empty queue stays signaled so a consumer
+// waiting on the wake channel observes every item.
+func (q *streamQueue[T]) tryPop() (T, bool) {
 	var zero T
-	for {
-		q.mu.Lock()
-		if view.Err() != nil {
-			q.mu.Unlock()
-			return zero, context.Cause(view)
-		}
-		if ctx.Err() != nil {
-			q.mu.Unlock()
-			return zero, ctx.Err()
-		}
-		if len(q.items) != 0 {
-			item := q.items[0]
-			q.items[0] = zero
-			q.items = q.items[1:]
-			if len(q.items) != 0 {
-				q.signal()
-			} else {
-				q.items = nil
-			}
-			q.mu.Unlock()
-			return item, nil
-		}
-		q.mu.Unlock()
-		select {
-		case <-q.ready:
-		case <-ctx.Done():
-		case <-view.Done():
-		}
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	if len(q.items) == 0 {
+		return zero, false
 	}
+	item := q.items[0]
+	q.items[0] = zero
+	q.items = q.items[1:]
+	if len(q.items) != 0 {
+		q.signal()
+	} else {
+		q.items = nil
+	}
+	return item, true
 }
 
 // close transfers ownership of queued streams to the caller for cancellation.

@@ -13,9 +13,9 @@ import (
 	"github.com/quic-go/quic-go"
 )
 
-func rawBi(t *testing.T, ctx context.Context, conn Conn, head []byte) *quic.Stream {
+func rawBi(t *testing.T, ctx context.Context, conn *Conn, head []byte) *quic.Stream {
 	t.Helper()
-	s, err := conn.(*ethp2pConn).conn.OpenStreamSync(ctx)
+	s, err := conn.conn.OpenStreamSync(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -45,10 +45,7 @@ func TestDispatcherClassification(t *testing.T) {
 			pair := newViewPair(t, 32)
 			head := wire.AppendFrame(nil, binary.AppendUvarint(nil, uint64(sel)))
 			out := rawBi(t, ctx, pair.clientEth, append(head, 0xaa))
-			in, got, err := pair.serverEth.AcceptStream(ctx)
-			if err != nil {
-				t.Fatal(err)
-			}
+			in, got := nextStream(t, pair.serverEth)
 			if got != sel {
 				t.Fatalf("selector = %d, want %d", got, sel)
 			}
@@ -63,10 +60,7 @@ func TestDispatcherClassification(t *testing.T) {
 		ctx := testContext(t)
 		pair := newViewPair(t, 32)
 		out := rawBi(t, ctx, pair.clientEth, []byte{1, 0x2f, 0xaa})
-		in, sel, err := pair.serverEth.AcceptStream(ctx)
-		if err != nil {
-			t.Fatal(err)
-		}
+		in, sel := nextStream(t, pair.serverEth)
 		if sel != 0x2f {
 			t.Fatalf("selector = %d, want 47", sel)
 		}
@@ -155,7 +149,7 @@ func TestUnidirectionalSelectorErrors(t *testing.T) {
 			}
 			ctx := testContext(t)
 			pair := newViewPair(t, 32)
-			out, err := pair.clientEth.(*ethp2pConn).conn.OpenUniStreamSync(ctx)
+			out, err := pair.clientEth.conn.OpenUniStreamSync(ctx)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -170,7 +164,7 @@ func TestUnidirectionalSelectorErrors(t *testing.T) {
 func TestLaterCompletedUnidirectionalStreamCanBeDeliveredFirst(t *testing.T) {
 	ctx := testContext(t)
 	pair := newViewPair(t, 32)
-	first, err := pair.clientEth.(*ethp2pConn).conn.OpenUniStreamSync(ctx)
+	first, err := pair.clientEth.conn.OpenUniStreamSync(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -184,16 +178,16 @@ func TestLaterCompletedUnidirectionalStreamCanBeDeliveredFirst(t *testing.T) {
 	if _, err := second.Write([]byte{0xaa}); err != nil {
 		t.Fatal(err)
 	}
-	_, sel, err := pair.serverEth.AcceptUniStream(ctx)
-	if err != nil || sel != 1 {
-		t.Fatalf("completed selector = %d, %v; want 1", sel, err)
+	_, sel := nextStream(t, pair.serverEth)
+	if sel != 1 {
+		t.Fatalf("completed selector = %d; want 1", sel)
 	}
 	if _, err := first.Write([]byte{2}); err != nil {
 		t.Fatal(err)
 	}
-	_, sel, err = pair.serverEth.AcceptUniStream(ctx)
-	if err != nil || sel != 2 {
-		t.Fatalf("first selector = %d, %v; want 2", sel, err)
+	_, sel = nextStream(t, pair.serverEth)
+	if sel != 2 {
+		t.Fatalf("first selector = %d; want 2", sel)
 	}
 }
 
@@ -216,7 +210,7 @@ func TestDispatcherDirectionsAreIndependent(t *testing.T) {
 			ShortenClassifyTimeout(t, 2*time.Second)
 			ctx := testContext(t)
 			pair := newViewPair(t, 32)
-			server := pair.serverEth.(*ethp2pConn)
+			server := pair.serverEth
 			if stalled == "bidirectional" {
 				for range maxStreamsPendingClassify {
 					rawBi(t, ctx, pair.clientEth, []byte{2})
@@ -231,7 +225,7 @@ func TestDispatcherDirectionsAreIndependent(t *testing.T) {
 				}
 				acceptCtx, cancel := context.WithTimeout(ctx, time.Second)
 				defer cancel()
-				in, sel, err := pair.serverEth.AcceptUniStream(acceptCtx)
+				in, sel, err := waitNextStream(acceptCtx, pair.serverEth)
 				if err != nil || sel != 1 {
 					t.Fatalf("uni acceptance = %d, %v", sel, err)
 				}
@@ -241,7 +235,7 @@ func TestDispatcherDirectionsAreIndependent(t *testing.T) {
 				}
 			} else {
 				for range maxStreamsPendingClassify {
-					s, err := pair.clientEth.(*ethp2pConn).conn.OpenUniStreamSync(ctx)
+					s, err := pair.clientEth.conn.OpenUniStreamSync(ctx)
 					if err != nil {
 						t.Fatal(err)
 					}
@@ -259,7 +253,7 @@ func TestDispatcherDirectionsAreIndependent(t *testing.T) {
 				}
 				acceptCtx, cancel := context.WithTimeout(ctx, time.Second)
 				defer cancel()
-				in, sel, err := pair.serverEth.AcceptStream(acceptCtx)
+				in, sel, err := waitNextStream(acceptCtx, pair.serverEth)
 				if err != nil || sel != 1 {
 					t.Fatalf("bi acceptance = %d, %v", sel, err)
 				}

@@ -67,7 +67,7 @@ func testUniCredit(t *testing.T, want []byte) {
 	}
 	readOne := func() {
 		t.Helper()
-		in, _, err := inConn.AcceptUniStream(ctx)
+		in, _, err := transporttest.NextStream(ctx, inConn)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -112,7 +112,7 @@ func TestUniSelectorSkip(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			in, gotSelector, err := inConn.AcceptUniStream(ctx)
+			in, gotSelector, err := transporttest.NextStream(ctx, inConn)
 			if err != nil || gotSelector != selector {
 				t.Fatalf("accept = %d, %v", gotSelector, err)
 			}

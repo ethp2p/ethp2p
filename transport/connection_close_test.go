@@ -50,10 +50,9 @@ func TestConnectionCloseCode(t *testing.T) {
 				}
 				closed <- err
 			}()
-			conn, err := eth.Dial(ctx, server.Addr(), server.PeerID())
-			if err == nil {
-				_, err = conn.PeerHello(ctx)
-			}
+			// Dial waits for the peer Hello, so a connection close before any
+			// Hello arrives is already the dial error.
+			_, err = eth.Dial(ctx, server.Addr(), server.PeerID())
 			if test.mapped {
 				view, ok := errors.AsType[*ViewClosedError](err)
 				if !ok || view.Code != test.want || !view.Remote {
@@ -77,14 +76,14 @@ func TestViewCloseConnectionWireCode(t *testing.T) {
 	for _, code := range []wire.Code{wire.Unspecified, wire.Closing, wire.ControlViolation, wire.NoSharedProtocols, wire.Duplicate} {
 		t.Run(code.String(), func(t *testing.T) {
 			p := newViewPair(t, 16)
-			if _, err := p.serverEth.PeerHello(t.Context()); err != nil {
-				t.Fatal(err)
-			}
+			// Accept and Dial return only after Hello, so no wait is needed here.
 			_ = p.clientLib.CloseWithError(appNoError, "release libp2p first")
 			if err := p.clientEth.CloseWithCode(code); err != nil {
 				t.Fatal(err)
 			}
-			raw := p.serverEth.(*ethp2pConn).conn
+			raw := p.serverEth.conn
+			ctx, cancel := context.WithTimeout(t.Context(), 3*time.Second)
+			defer cancel()
 			select {
 			case <-raw.Context().Done():
 			case <-time.After(3 * time.Second):
@@ -94,7 +93,15 @@ func TestViewCloseConnectionWireCode(t *testing.T) {
 			if !ok || !app.Remote || uint64(app.ErrorCode) != code.Wire() {
 				t.Fatalf("wire close = %v", context.Cause(raw.Context()))
 			}
-			_, err := p.serverEth.PeerHello(t.Context())
+			select {
+			case <-p.serverEth.Done():
+			case <-ctx.Done():
+				t.Fatal(ctx.Err())
+			}
+			if got := p.serverEth.CloseCode(); got != code {
+				t.Fatalf("CloseCode = %s, want %s", got, code)
+			}
+			_, err := p.serverEth.OpenStream(ctx, 1)
 			view, ok := errors.AsType[*ViewClosedError](err)
 			if !ok || !view.Remote || view.Code != code {
 				t.Fatalf("view close = %v", err)
@@ -105,21 +112,26 @@ func TestViewCloseConnectionWireCode(t *testing.T) {
 
 func TestLibp2pLastClosePreservesGoAway(t *testing.T) {
 	p := newViewPair(t, 16)
-	if _, err := p.serverEth.PeerHello(t.Context()); err != nil {
-		t.Fatal(err)
-	}
 	if err := p.clientEth.CloseWithCode(wire.Refused); err != nil {
 		t.Fatal(err)
 	}
 	ctx, cancel := context.WithTimeout(t.Context(), 3*time.Second)
 	defer cancel()
-	_, _, err := p.serverEth.AcceptUniStream(ctx)
+	select {
+	case <-p.serverEth.Done():
+	case <-ctx.Done():
+		t.Fatal(ctx.Err())
+	}
+	if got := p.serverEth.CloseCode(); got != wire.Refused {
+		t.Fatalf("CloseCode = %s, want Refused", got)
+	}
+	_, err := p.serverEth.OpenStream(ctx, 1)
 	view, ok := errors.AsType[*ViewClosedError](err)
-	if !ok || view.Code != wire.Refused {
+	if !ok || !view.Remote || view.Code != wire.Refused {
 		t.Fatalf("GoAway = %v", err)
 	}
 	_ = p.clientLib.CloseWithError(appNoError, "release libp2p last")
-	raw := p.serverEth.(*ethp2pConn).conn
+	raw := p.serverEth.conn
 	select {
 	case <-raw.Context().Done():
 	case <-ctx.Done():
@@ -129,9 +141,9 @@ func TestLibp2pLastClosePreservesGoAway(t *testing.T) {
 	if !ok || app.ErrorCode != appNoError {
 		t.Fatalf("libp2p close = %v", context.Cause(raw.Context()))
 	}
-	_, err = p.serverEth.PeerHello(ctx)
+	_, err = p.serverEth.OpenStream(ctx, 1)
 	view, ok = errors.AsType[*ViewClosedError](err)
-	if !ok || view.Code != wire.Refused {
+	if !ok || !view.Remote || view.Code != wire.Refused {
 		t.Fatalf("GoAway overwritten: %v", err)
 	}
 }

@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/ethp2p/ethp2p/identity"
+	"github.com/ethp2p/ethp2p/wire"
 	"github.com/libp2p/go-libp2p/p2p/transport/quicreuse"
 	varint "github.com/multiformats/go-varint"
 	"github.com/quic-go/quic-go"
@@ -41,11 +42,43 @@ func assertRawALPN(t *testing.T, conn quicreuse.QUICConn, want string) {
 // identity belongs to the endpoint rather than the connection, and the remote
 // peer ID is derived from the authenticated certificate, so there is no
 // separate public-key assertion left to make here.
-func assertPeer(t *testing.T, conn Conn, remote PeerID) {
+func assertPeer(t *testing.T, conn *Conn, remote PeerID) {
 	t.Helper()
 	if got := conn.RemotePeerID(); got != remote {
 		t.Fatalf("remote peer ID = %x, want %x", got, remote)
 	}
+}
+
+// waitNextStream pulls the next classified stream, waiting on the view's wake
+// channel. It returns the view closure cause or ctx's error when no stream
+// arrives first. Unlike nextStream it reports errors, so goroutines other than
+// the test goroutine can use it.
+func waitNextStream(ctx context.Context, c *Conn) (ReceiveStream, wire.Selector, error) {
+	for {
+		if s, sel, ok := c.NextStream(); ok {
+			return s, sel, nil
+		}
+		select {
+		case <-c.Streams():
+		case <-c.Done():
+			return nil, 0, ethp2pError(context.Cause(c.ethp2pCtx))
+		case <-ctx.Done():
+			return nil, 0, ctx.Err()
+		}
+	}
+}
+
+// nextStream pulls the next classified stream, waiting on the view's wake
+// channel up to 10 seconds. It fails tb on timeout or when the view closes.
+func nextStream(tb testing.TB, c *Conn) (ReceiveStream, wire.Selector) {
+	tb.Helper()
+	ctx, cancel := context.WithTimeout(tb.Context(), 10*time.Second)
+	defer cancel()
+	s, sel, err := waitNextStream(ctx, c)
+	if err != nil {
+		tb.Fatal(err)
+	}
+	return s, sel
 }
 
 func newEndpoint(t *testing.T) (*SharedTransport, quicreuse.QUICTransport, *Ethp2pTransport, *net.UDPConn) {

@@ -15,6 +15,8 @@ import (
 
 	"github.com/ethp2p/ethp2p/identity"
 	"github.com/ethp2p/ethp2p/transport"
+	"github.com/ethp2p/ethp2p/transport/transporttest"
+	"github.com/ethp2p/ethp2p/wire"
 	"github.com/libp2p/go-libp2p"
 	"github.com/libp2p/go-libp2p/core/crypto"
 	"github.com/libp2p/go-libp2p/core/host"
@@ -37,7 +39,7 @@ type node struct {
 }
 
 type ethPair struct {
-	dialed, accepted transport.Conn
+	dialed, accepted *transport.Conn
 }
 
 // The harness owns its nodes. Shared sockets bind the wildcard address for
@@ -175,7 +177,7 @@ func (h *harness) connectEthp2p(from, to *node) ethPair {
 	ctx, stop := context.WithCancel(ctx)
 	defer stop()
 	type accepted struct {
-		conn transport.Conn
+		conn *transport.Conn
 		err  error
 	}
 	result := make(chan accepted, 1)
@@ -263,7 +265,7 @@ func (h *harness) exchangeEth(ctx context.Context, pair ethPair, payload []byte)
 	if _, err := out.Write(payload); err != nil {
 		return err
 	}
-	in, selector, err := pair.accepted.AcceptStream(ctx)
+	in, selector, err := transporttest.NextStream(ctx, pair.accepted)
 	if err != nil {
 		return err
 	}
@@ -591,7 +593,7 @@ func TestInteropUnconsumedEthp2pKeepsLibp2p(t *testing.T) {
 	server := h.ethp2pNode()
 	h.serveEcho(server, echoProtocol)
 	const clients = 20
-	var dialed []transport.Conn
+	var dialed []*transport.Conn
 	t.Cleanup(func() {
 		for _, conn := range dialed {
 			_ = conn.Close()
@@ -603,14 +605,27 @@ func TestInteropUnconsumedEthp2pKeepsLibp2p(t *testing.T) {
 		conn, err := client.shared.Ethp2p().Dial(ctx, h.ethp2pAddr(server), server.shared.PeerID())
 		cancel()
 		if err != nil {
-			t.Fatalf("client %d ethp2p dial: %v", i, err)
+			// Dial returns after Hello, so a view released for a full
+			// delivery queue reports its Overloaded rejection here.
+			if closed, ok := errors.AsType[*transport.ViewClosedError](err); !ok || !closed.Remote || closed.Code != wire.Overloaded {
+				t.Fatalf("client %d ethp2p dial: %v", i, err)
+			}
+		} else {
+			dialed = append(dialed, conn)
 		}
-		dialed = append(dialed, conn)
 		h.waitConnected(client, server)
 		h.echo(client, server, echoProtocol, []byte(fmt.Sprintf("client %d", i)))
 	}
-	if got := transport.PendingEthp2p(server.shared); got != 16 {
-		t.Fatalf("pending ethp2p connections = %d, want 16", got)
+	// Delivery to ethQ follows Hello asynchronously, so wait for the queue to
+	// fill.
+	waitPending := time.After(5 * time.Second)
+	for transport.PendingEthp2p(server.shared) != 16 {
+		select {
+		case <-waitPending:
+			t.Fatalf("pending ethp2p connections = %d, want 16", transport.PendingEthp2p(server.shared))
+		default:
+			time.Sleep(time.Millisecond)
+		}
 	}
 }
 

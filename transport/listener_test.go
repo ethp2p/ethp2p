@@ -47,7 +47,7 @@ func TestEthp2pAcceptStartsSharedListener(t *testing.T) {
 	_, serverLib, serverEth, serverPC := newEndpoint(t)
 
 	type dialResult struct {
-		conn Conn
+		conn *Conn
 		err  error
 	}
 	dialed := make(chan dialResult, 1)
@@ -109,7 +109,7 @@ func TestListenerCloseDetachesLibp2p(t *testing.T) {
 		t.Fatal(err)
 	}
 	assertPeer(t, serverEthConn, clientEth.shared.PeerID())
-	raw := clientConn.(*ethp2pConn).conn
+	raw := clientConn.conn
 	if err := clientConn.Close(); err != nil {
 		t.Fatal(err)
 	}

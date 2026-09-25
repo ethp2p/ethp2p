@@ -11,8 +11,8 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/ethp2p/ethp2p/wire"
 	"github.com/ethp2p/ethp2p/transport/pb"
+	"github.com/ethp2p/ethp2p/wire"
 	"github.com/quic-go/quic-go"
 	"google.golang.org/protobuf/proto"
 )
@@ -46,9 +46,6 @@ func (t *Ethp2pTransport) SetHello(h Hello) error {
 	}
 	t.shared.helloMu.Lock()
 	defer t.shared.helloMu.Unlock()
-	if t.shared.sink != nil {
-		return ErrSinkBound
-	}
 	t.shared.hello = cloneHello(h)
 	t.shared.hasHello = true
 	t.shared.interest.Or(uint32(sideEthp2p))
@@ -107,7 +104,7 @@ type controlState struct {
 
 // startControl reserves the first outbound unidirectional stream before the
 // view becomes visible. The writer and reader both belong to the transport wg.
-func (c *ethp2pConn) startControl(h Hello) error {
+func (c *sharedConn) startControl(h Hello) error {
 	if c.ethp2pCtx.Err() != nil {
 		return ethp2pError(context.Cause(c.ethp2pCtx))
 	}
@@ -124,6 +121,29 @@ func (c *ethp2pConn) startControl(h Hello) error {
 	c.wg.Go(func() { c.writeHello(h) })
 	c.wg.Go(func() { c.readControl(c.created) })
 	return nil
+}
+
+// waitHello waits for the peer's validated Hello and returns a fresh copy.
+// It may be called repeatedly and returns the closure cause if the view
+// closes. Its result owns its slices.
+func (c *sharedConn) waitHello(ctx context.Context) (Hello, error) {
+	if c.ethp2pCtx.Err() != nil {
+		return Hello{}, ethp2pError(context.Cause(c.ethp2pCtx))
+	}
+	select {
+	case <-c.control.helloReady:
+		if c.ethp2pCtx.Err() != nil {
+			return Hello{}, ethp2pError(context.Cause(c.ethp2pCtx))
+		}
+		c.control.mu.Lock()
+		h := cloneHello(c.control.peerHello)
+		c.control.mu.Unlock()
+		return h, nil
+	case <-c.ethp2pCtx.Done():
+		return Hello{}, ethp2pError(context.Cause(c.ethp2pCtx))
+	case <-ctx.Done():
+		return Hello{}, ctx.Err()
+	}
 }
 
 func (c *sharedConn) writeHello(h Hello) {

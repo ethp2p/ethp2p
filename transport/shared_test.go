@@ -19,13 +19,13 @@ func TestBidiReadReportsStreamReset(t *testing.T) {
 	_, _, clientEth, _ := newEndpoint(t)
 	_, _, serverEth, serverPC := newEndpoint(t)
 	accepted := make(chan struct {
-		conn Conn
+		conn *Conn
 		err  error
 	}, 1)
 	go func() {
 		conn, err := serverEth.Accept(ctx)
 		accepted <- struct {
-			conn Conn
+			conn *Conn
 			err  error
 		}{conn, err}
 	}()
@@ -43,10 +43,7 @@ func TestBidiReadReportsStreamReset(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	in, selector, err := serverConn.AcceptStream(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
+	in, selector := nextStream(t, serverConn)
 	if selector != 1 {
 		t.Fatalf("selector = %d, want 1", selector)
 	}
@@ -111,10 +108,7 @@ func TestEthp2pNegotiationRoutesBothProtocols(t *testing.T) {
 	if _, err := ethOut.Write(ethWire); err != nil {
 		t.Fatal(err)
 	}
-	ethIn, selector, err := serverEthConn.AcceptStream(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
+	ethIn, selector := nextStream(t, serverEthConn)
 	if selector != 1 {
 		t.Fatalf("selector = %d, want 1", selector)
 	}
@@ -137,10 +131,7 @@ func TestEthp2pNegotiationRoutesBothProtocols(t *testing.T) {
 	if err := uniOut.Close(); err != nil {
 		t.Fatal(err)
 	}
-	uniIn, selector, err := serverEthConn.AcceptUniStream(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
+	uniIn, selector := nextStream(t, serverEthConn)
 	if selector != 2 {
 		t.Fatalf("uni selector = %d, want 2", selector)
 	}
@@ -240,7 +231,47 @@ func TestSimultaneousStreamsOnBothViews(t *testing.T) {
 	}
 
 	// Receiving side: accept and echo concurrently on both views, from
-	// both ends.
+	// both ends. The merged ethp2p queue interleaves directions, so each
+	// ethp2p receiver routes by type: bidirectional streams echo, and
+	// unidirectional streams are read against the shared payload.
+	uniPayload := bytes.Repeat([]byte{0x55}, payloadLen)
+	wg.Go(func() {
+		for range 2 * streams {
+			rs, _, err := waitNextStream(ctx, serverEthConn)
+			if err != nil {
+				fail(err)
+				return
+			}
+			if s, ok := rs.(Stream); ok {
+				echo(s)
+				continue
+			}
+			fail(rs.SetReadDeadline(deadline))
+			got, err := io.ReadAll(rs)
+			if err != nil {
+				fail(err)
+				continue
+			}
+			if !bytes.Equal(got, uniPayload) {
+				fail(fmt.Errorf("unidirectional echo = %d bytes, want %d", len(got), len(uniPayload)))
+			}
+		}
+	})
+	wg.Go(func() {
+		for range streams {
+			rs, _, err := waitNextStream(ctx, clientEthConn)
+			if err != nil {
+				fail(err)
+				return
+			}
+			s, ok := rs.(Stream)
+			if !ok {
+				fail(fmt.Errorf("ethp2p stream %T does not implement Stream", rs))
+				continue
+			}
+			echo(s)
+		}
+	})
 	for range streams {
 		wg.Go(func() {
 			s, err := serverLibConn.AcceptStream(ctx)
@@ -251,23 +282,7 @@ func TestSimultaneousStreamsOnBothViews(t *testing.T) {
 			echo(s)
 		})
 		wg.Go(func() {
-			s, _, err := serverEthConn.AcceptStream(ctx)
-			if err != nil {
-				fail(err)
-				return
-			}
-			echo(s)
-		})
-		wg.Go(func() {
 			s, err := clientLibConn.AcceptStream(ctx)
-			if err != nil {
-				fail(err)
-				return
-			}
-			echo(s)
-		})
-		wg.Go(func() {
-			s, _, err := clientEthConn.AcceptStream(ctx)
 			if err != nil {
 				fail(err)
 				return
@@ -317,9 +332,8 @@ func TestSimultaneousStreamsOnBothViews(t *testing.T) {
 
 	// Unidirectional streams route to ethp2p on the receiving side only;
 	// exercise open, write, close against receive and read.
-	// Accept order is arbitrary, so every unidirectional stream carries
+	// Delivery order is arbitrary, so every unidirectional stream carries
 	// the same payload.
-	payload := bytes.Repeat([]byte{0x55}, payloadLen)
 	for range streams {
 		wg.Go(func() {
 			s, err := clientEthConn.OpenUniStream(ctx, 3)
@@ -328,27 +342,11 @@ func TestSimultaneousStreamsOnBothViews(t *testing.T) {
 				return
 			}
 			fail(s.SetWriteDeadline(deadline))
-			if _, err := s.Write(payload); err != nil {
+			if _, err := s.Write(uniPayload); err != nil {
 				fail(err)
 				return
 			}
 			fail(s.Close())
-		})
-		wg.Go(func() {
-			s, _, err := serverEthConn.AcceptUniStream(ctx)
-			if err != nil {
-				fail(err)
-				return
-			}
-			fail(s.SetReadDeadline(deadline))
-			got, err := io.ReadAll(s)
-			if err != nil {
-				fail(err)
-				return
-			}
-			if !bytes.Equal(got, payload) {
-				fail(fmt.Errorf("unidirectional echo = %d bytes, want %d", len(got), len(payload)))
-			}
 		})
 	}
 

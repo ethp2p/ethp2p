@@ -1,6 +1,7 @@
 package transport
 
 import (
+	"context"
 	"errors"
 	"io"
 	"testing"
@@ -40,7 +41,7 @@ func waitQueued[T any](t *testing.T, q *streamQueue[T], n int) {
 func TestClassifiedStreamsWaitWithoutOverload(t *testing.T) {
 	ctx := testContext(t)
 	pair := newViewPair(t, 64)
-	server := pair.serverEth.(*ethp2pConn)
+	server := pair.serverEth
 	const count = 20
 	for i := range count {
 		bi, err := pair.clientEth.OpenStream(ctx, 1)
@@ -53,6 +54,10 @@ func TestClassifiedStreamsWaitWithoutOverload(t *testing.T) {
 		if err := bi.Close(); err != nil {
 			t.Fatal(err)
 		}
+		// Finish the bidirectional classification before opening the
+		// unidirectional stream, and that one before the next pair: NextStream
+		// then yields both directions in classification completion order.
+		waitQueued(t, server.ethp2pStreams, 2*i+1)
 		uni, err := pair.clientEth.OpenUniStream(ctx, 2)
 		if err != nil {
 			t.Fatal(err)
@@ -63,25 +68,29 @@ func TestClassifiedStreamsWaitWithoutOverload(t *testing.T) {
 		if err := uni.Close(); err != nil {
 			t.Fatal(err)
 		}
-		// Finish one classification before opening the next: this checks FIFO
-		// delivery independently of the classifier's intentional completion ordering.
-		waitQueued(t, server.ethp2pBi, i+1)
-		waitQueued(t, server.ethp2pUni, i+1)
+		waitQueued(t, server.ethp2pStreams, 2*i+2)
 	}
 	checkLibp2pRoundTrip(t, ctx, pair.clientLib, pair.serverLib)
 	for i := range count {
-		bi, sel, err := pair.serverEth.AcceptStream(ctx)
-		if err != nil || sel != 1 {
-			t.Fatalf("bidi = %d, %v", sel, err)
+		received, sel := nextStream(t, pair.serverEth)
+		if sel != 1 {
+			t.Fatalf("bidi selector = %d, want 1", sel)
+		}
+		bi, ok := received.(Stream)
+		if !ok {
+			t.Fatal("bidirectional stream does not implement Stream")
 		}
 		data, err := io.ReadAll(bi)
 		if err != nil || len(data) != 1 || data[0] != byte(i) {
 			t.Fatalf("bidi payload = %x, %v", data, err)
 		}
 		_ = bi.Close()
-		uni, sel, err := pair.serverEth.AcceptUniStream(ctx)
-		if err != nil || sel != 2 {
-			t.Fatalf("uni = %d, %v", sel, err)
+		uni, sel := nextStream(t, pair.serverEth)
+		if sel != 2 {
+			t.Fatalf("uni selector = %d, want 2", sel)
+		}
+		if _, ok := uni.(Stream); ok {
+			t.Fatal("unidirectional stream implements Stream")
 		}
 		data, err = io.ReadAll(uni)
 		if err != nil || len(data) != 1 || data[0] != byte(i) {
@@ -101,13 +110,16 @@ func TestQueuedStreamsResetOnViewClose(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	waitQueued(t, pair.serverEth.(*ethp2pConn).ethp2pBi, 1)
-	waitQueued(t, pair.serverEth.(*ethp2pConn).ethp2pUni, 1)
+	waitQueued(t, pair.serverEth.ethp2pStreams, 2)
 	if err := pair.serverEth.Close(); err != nil {
 		t.Fatal(err)
 	}
-	_, err = pair.serverEth.PeerHello(ctx)
-	assertEthViewCause(t, err, wire.Closing, false)
+	select {
+	case <-pair.serverEth.Done():
+	case <-ctx.Done():
+		t.Fatal(ctx.Err())
+	}
+	assertEthViewCause(t, context.Cause(pair.serverEth.ethp2pCtx), wire.Closing, false)
 	var one [1]byte
 	_, err = bi.Read(one[:])
 	reset, ok := errors.AsType[*StreamResetError](err)

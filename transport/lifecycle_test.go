@@ -14,7 +14,7 @@ import (
 )
 
 type viewPair struct {
-	clientEth, serverEth Conn
+	clientEth, serverEth *Conn
 	clientLib, serverLib quicreuse.QUICConn
 }
 
@@ -120,7 +120,7 @@ func TestLibp2pViewCloseStopsAccept(t *testing.T) {
 	default:
 		t.Fatal("libp2p view context is still live")
 	}
-	if pair.serverEth.(*ethp2pConn).conn.Context().Err() != nil {
+	if pair.serverEth.conn.Context().Err() != nil {
 		t.Fatal("physical connection closed with one view still live")
 	}
 	out, err := pair.clientEth.OpenStream(ctx, 1)
@@ -131,12 +131,13 @@ func TestLibp2pViewCloseStopsAccept(t *testing.T) {
 	if _, err := out.Write(want); err != nil {
 		t.Fatal(err)
 	}
-	in, selector, err := pair.serverEth.AcceptStream(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
+	received, selector := nextStream(t, pair.serverEth)
 	if selector != 1 {
 		t.Fatalf("selector = %d, want 1", selector)
+	}
+	in, ok := received.(Stream)
+	if !ok {
+		t.Fatal("bidirectional stream does not implement Stream")
 	}
 	got := make([]byte, len(want))
 	if _, err := io.ReadFull(in, got); err != nil || !bytes.Equal(got, want) {
@@ -154,10 +155,8 @@ func TestEthp2pViewCloseStopsPendingOperations(t *testing.T) {
 	ctx := testContext(t)
 	// The control stream consumes the one available outbound uni stream.
 	pair := newViewPair(t, 1)
-	bi := make(chan error, 1)
-	uni := make(chan error, 1)
-	go func() { _, _, err := pair.clientEth.AcceptStream(ctx); bi <- err }()
-	go func() { _, _, err := pair.clientEth.AcceptUniStream(ctx); uni <- err }()
+	queued := make(chan error, 1)
+	go func() { _, _, err := waitNextStream(ctx, pair.clientEth); queued <- err }()
 	blocked := make(chan error, 1)
 	go func() { _, err := pair.clientEth.OpenUniStream(ctx, 1); blocked <- err }()
 	select {
@@ -168,8 +167,7 @@ func TestEthp2pViewCloseStopsPendingOperations(t *testing.T) {
 	if err := pair.clientEth.Close(); err != nil {
 		t.Fatal(err)
 	}
-	waitEthViewError(t, bi, wire.Closing, false)
-	waitEthViewError(t, uni, wire.Closing, false)
+	waitEthViewError(t, queued, wire.Closing, false)
 	waitEthViewError(t, blocked, wire.Closing, false)
 	checkLibp2pRoundTrip(t, ctx, pair.clientLib, pair.serverLib)
 }
@@ -180,16 +178,19 @@ func TestClosedEthp2pViewResetsNewUniStream(t *testing.T) {
 	if err := pair.serverEth.Close(); err != nil {
 		t.Fatal(err)
 	}
-	_, err := pair.serverEth.PeerHello(ctx)
-	assertEthViewCause(t, err, wire.Closing, false)
-	client := pair.clientEth.(*ethp2pConn)
 	select {
-	case <-client.ethp2pCtx.Done():
+	case <-pair.serverEth.Done():
 	case <-ctx.Done():
 		t.Fatal(ctx.Err())
 	}
-	_, err = client.PeerHello(ctx)
-	assertEthViewCause(t, err, wire.Closing, true)
+	assertEthViewCause(t, context.Cause(pair.serverEth.ethp2pCtx), wire.Closing, false)
+	client := pair.clientEth
+	select {
+	case <-client.Done():
+	case <-ctx.Done():
+		t.Fatal(ctx.Err())
+	}
+	assertEthViewCause(t, context.Cause(client.ethp2pCtx), wire.Closing, true)
 	// The public view refuses new streams after GoAway. Use raw QUIC to
 	// exercise a peer that ignores closure and sends a late stream anyway.
 	stream, err := client.conn.OpenUniStreamSync(ctx)
@@ -228,8 +229,8 @@ func TestEthp2pOnlyViewsClosePhysicalConnection(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	clientRaw := clientConn.(*ethp2pConn).conn
-	serverRaw := serverConn.(*ethp2pConn).conn
+	clientRaw := clientConn.conn
+	serverRaw := serverConn.conn
 	if err := clientConn.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -271,7 +272,7 @@ func TestFullLibp2pQueueKeepsDialedEthp2pView(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	view := conn.(*ethp2pConn)
+	view := conn
 	if view.closed.Load()&uint32(sideEthp2p) != 0 {
 		t.Fatal("dial returned a closed ethp2p view")
 	}
@@ -313,9 +314,19 @@ func TestFullEthp2pQueueKeepsInboundLibp2pView(t *testing.T) {
 	}
 	clientEthConn, err := clientEth.Dial(ctx, serverPC.LocalAddr(), serverEth.shared.PeerID())
 	if err != nil {
-		t.Fatal(err)
+		// The server released its view with Overloaded before the dialer's
+		// Hello wait observed the peer Hello; the rejection is the assertion.
+		assertEthViewCause(t, err, wire.Overloaded, true)
+	} else {
+		defer clientEthConn.Close()
+		clientContext := clientEthConn.ethp2pCtx
+		select {
+		case <-clientContext.Done():
+		case <-ctx.Done():
+			t.Fatal(ctx.Err())
+		}
+		assertEthViewCause(t, context.Cause(clientContext), wire.Overloaded, true)
 	}
-	defer clientEthConn.Close()
 	clientView, err := clientListener.Accept(ctx)
 	if err != nil {
 		t.Fatal(err)
@@ -333,14 +344,6 @@ func TestFullEthp2pQueueKeepsInboundLibp2pView(t *testing.T) {
 		t.Fatal(ctx.Err())
 	}
 	assertEthViewCause(t, context.Cause(serverContext), wire.Overloaded, false)
-	clientContext := clientEthConn.(*ethp2pConn).ethp2pCtx
-	select {
-	case <-clientContext.Done():
-	case <-ctx.Done():
-		t.Fatal(ctx.Err())
-	}
-	_, err = clientEthConn.PeerHello(ctx)
-	assertEthViewCause(t, err, wire.Overloaded, true)
 	stream, err := clientView.OpenStreamSync(ctx)
 	if err != nil {
 		t.Fatal(err)

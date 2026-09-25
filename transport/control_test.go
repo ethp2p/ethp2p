@@ -11,11 +11,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/ethp2p/ethp2p/wire"
 	"github.com/ethp2p/ethp2p/identity"
 	"github.com/ethp2p/ethp2p/transport"
 	"github.com/ethp2p/ethp2p/transport/pb"
 	"github.com/ethp2p/ethp2p/transport/transporttest"
+	"github.com/ethp2p/ethp2p/wire"
 	"github.com/libp2p/go-libp2p/core/crypto"
 	"github.com/libp2p/go-libp2p/core/peer"
 	libp2ptls "github.com/libp2p/go-libp2p/p2p/security/tls"
@@ -27,10 +27,16 @@ import (
 // keeps a libp2p view, so releasing its ethp2p view does not close this QUIC
 // connection before the raw peer can read GoAway.
 type rawControlPeer struct {
-	server transport.Conn
+	server *transport.Conn
+	shared *transport.SharedTransport
 	raw    *quic.Conn
 	out    *quic.SendStream
 	in     *quic.ReceiveStream
+}
+
+type rawAccept struct {
+	conn *transport.Conn
+	err  error
 }
 
 func newRawControlPeer(t *testing.T) rawControlPeer {
@@ -41,7 +47,28 @@ func newRawControlPeerWithStream(t *testing.T, openControl bool) rawControlPeer 
 	return newRawControlPeerConfigured(t, openControl, transport.Hello{}, &quic.Config{EnableDatagrams: true}, true)
 }
 
+// newRawControlPeerConfigured opens the raw side without sending Hello, so the
+// server view is never delivered. Tests assert its local cause through the
+// libp2p sibling view with assertSiblingCause.
 func newRawControlPeerConfigured(t *testing.T, openControl bool, hello transport.Hello, config *quic.Config, readHello bool) rawControlPeer {
+	p, _ := startRawControlPeer(t, openControl, hello, config, readHello)
+	return p
+}
+
+// newHelloedRawControlPeer sends a valid Hello during setup and returns after
+// the server accepted the view.
+func newHelloedRawControlPeer(t *testing.T) rawControlPeer {
+	p, accepted := startRawControlPeer(t, true, transport.Hello{}, &quic.Config{EnableDatagrams: true}, true)
+	p.write(t, pbHello(1))
+	result := <-accepted
+	if result.err != nil {
+		t.Fatal(result.err)
+	}
+	p.server = result.conn
+	return p
+}
+
+func startRawControlPeer(t *testing.T, openControl bool, hello transport.Hello, config *quic.Config, readHello bool) (rawControlPeer, <-chan rawAccept) {
 	t.Helper()
 	ctx := controlContext(t)
 	serverShared, _, serverEth, packet := controlEndpoint(t)
@@ -49,19 +76,13 @@ func newRawControlPeerConfigured(t *testing.T, openControl bool, hello transport
 	if err := serverEth.SetHello(hello); err != nil {
 		t.Fatal(err)
 	}
-	accepted := make(chan transport.Conn, 1)
-	acceptErr := make(chan error, 1)
+	accepted := make(chan rawAccept, 1)
 	go func() {
 		conn, err := serverEth.Accept(ctx)
-		accepted <- conn
-		acceptErr <- err
+		accepted <- rawAccept{conn: conn, err: err}
 	}()
 	raw, err := dialRawControl(t, ctx, packet.LocalAddr(), serverShared.PeerID(), config)
 	if err != nil {
-		t.Fatal(err)
-	}
-	server := <-accepted
-	if err := <-acceptErr; err != nil {
 		t.Fatal(err)
 	}
 	in, err := raw.AcceptUniStream(ctx)
@@ -89,7 +110,25 @@ func newRawControlPeerConfigured(t *testing.T, openControl bool, hello transport
 			t.Fatal(err)
 		}
 	}
-	return rawControlPeer{server: server, raw: raw, out: out, in: in}
+	return rawControlPeer{shared: serverShared, raw: raw, out: out, in: in}, accepted
+}
+
+// assertSiblingCause checks the local cause of the server view, which is never
+// delivered to Accept without a valid Hello, through its surviving libp2p
+// sibling.
+func (p rawControlPeer) assertSiblingCause(t *testing.T, code wire.Code, remote bool) {
+	t.Helper()
+	listener, err := p.shared.Libp2p().Listen(nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+	libView, err := listener.Accept(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	transport.AssertEthp2pViewClosed(t, libView, code, remote)
 }
 
 func (p rawControlPeer) write(t *testing.T, message *pb.Control) {
@@ -138,23 +177,21 @@ func assertViewCause(t *testing.T, err error, code wire.Code, remote bool) {
 	}
 }
 
-func waitViewCause(t *testing.T, conn transport.Conn, code wire.Code, remote bool) {
+func waitViewCause(t *testing.T, conn *transport.Conn, code wire.Code, remote bool) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(t.Context(), time.Second)
 	defer cancel()
-	for {
-		_, err := conn.PeerHello(ctx)
-		if err != nil {
-			assertViewCause(t, err, code, remote)
-			return
-		}
-		select {
-		case <-ctx.Done():
-			t.Fatalf("view did not close: %v", ctx.Err())
-		default:
-			time.Sleep(time.Millisecond)
-		}
+	select {
+	case <-conn.Done():
+	case <-ctx.Done():
+		t.Fatalf("view did not close: %v", ctx.Err())
 	}
+	if got := conn.CloseCode(); got != code {
+		t.Fatalf("CloseCode = %s, want %s", got, code)
+	}
+	// OpenStream preserves the closure cause, including its remote origin.
+	_, err := conn.OpenStream(ctx, 1)
+	assertViewCause(t, err, code, remote)
 }
 
 func assertRawGoAway(t *testing.T, in *quic.ReceiveStream, code wire.Code) {
@@ -193,7 +230,7 @@ func TestControlHelloExchangeAndSnapshot(t *testing.T) {
 	clientHello.Selectors[0], clientHello.Record[0] = 99, 99
 	serverHello.Selectors[0], serverHello.Record[0] = 99, 99
 	ctx := controlContext(t)
-	accepted := make(chan transport.Conn, 1)
+	accepted := make(chan *transport.Conn, 1)
 	go func() { conn, _ := serverEth.Accept(ctx); accepted <- conn }()
 	client, err := clientEth.Dial(ctx, serverPC.LocalAddr(), serverShared.PeerID())
 	if err != nil {
@@ -209,22 +246,16 @@ func TestControlHelloExchangeAndSnapshot(t *testing.T) {
 	if err := serverEth.SetHello(transport.Hello{Selectors: []wire.Selector{10}}); err != nil {
 		t.Fatal(err)
 	}
-	gotClient, err := client.PeerHello(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	gotServer, err := server.PeerHello(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
+	gotClient := client.PeerHello()
+	gotServer := server.PeerHello()
 	if !slices.Equal(gotClient.Selectors, []wire.Selector{2, 4}) || !bytes.Equal(gotClient.Record, []byte{4, 5}) ||
 		!slices.Equal(gotServer.Selectors, []wire.Selector{1, 3}) || !bytes.Equal(gotServer.Record, []byte{1, 2, 3}) {
 		t.Fatalf("exchanged transport.Hello = client %+v, server %+v", gotClient, gotServer)
 	}
 	gotClient.Record[0], gotClient.Selectors[0] = 99, 99
-	again, err := client.PeerHello(ctx)
-	if err != nil || !bytes.Equal(again.Record, []byte{4, 5}) || !slices.Equal(again.Selectors, []wire.Selector{2, 4}) {
-		t.Fatalf("PeerHello reused caller slices: %+v, %v", again, err)
+	again := client.PeerHello()
+	if !bytes.Equal(again.Record, []byte{4, 5}) || !slices.Equal(again.Selectors, []wire.Selector{2, 4}) {
+		t.Fatalf("PeerHello reused caller slices: %+v", again)
 	}
 	go func() { conn, _ := serverEth.Accept(ctx); accepted <- conn }()
 	nextClient, err := clientEth.Dial(ctx, serverPC.LocalAddr(), serverShared.PeerID())
@@ -235,13 +266,10 @@ func TestControlHelloExchangeAndSnapshot(t *testing.T) {
 	if nextServer == nil {
 		t.Fatal("server did not accept the next view")
 	}
-	nextFromServer, err := nextClient.PeerHello(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	nextFromClient, err := nextServer.PeerHello(ctx)
-	if err != nil || !slices.Equal(nextFromServer.Selectors, []wire.Selector{10}) || !slices.Equal(nextFromClient.Selectors, []wire.Selector{9}) {
-		t.Fatalf("next view transport.Hello = client %+v, server %+v, err %v", nextFromServer, nextFromClient, err)
+	nextFromServer := nextClient.PeerHello()
+	nextFromClient := nextServer.PeerHello()
+	if !slices.Equal(nextFromServer.Selectors, []wire.Selector{10}) || !slices.Equal(nextFromClient.Selectors, []wire.Selector{9}) {
+		t.Fatalf("next view transport.Hello = client %+v, server %+v", nextFromServer, nextFromClient)
 	}
 	_ = nextClient.Close()
 	_ = nextServer.Close()
@@ -272,16 +300,15 @@ func TestControlViolations(t *testing.T) {
 			p.writeViolation(t, test.wire)
 			assertRawGoAway(t, p.in, wire.ControlViolation)
 			assertRawReadCancel(t, p.out, wire.ControlViolation)
-			waitViewCause(t, p.server, wire.ControlViolation, false)
+			// No valid Hello arrives, so the view is never delivered to
+			// Accept; its local cause is visible through the libp2p sibling.
+			p.assertSiblingCause(t, wire.ControlViolation, false)
 		})
 	}
 	for _, test := range []string{"second transport.Hello", "second control", "bidirectional control"} {
 		t.Run(test, func(t *testing.T) {
-			p := newRawControlPeer(t)
-			p.write(t, pbHello(1))
-			if _, err := p.server.PeerHello(controlContext(t)); err != nil {
-				t.Fatal(err)
-			}
+			// The setup Hello is the first frame; the test sends the violation.
+			p := newHelloedRawControlPeer(t)
 			switch test {
 			case "second transport.Hello":
 				p.write(t, pbHello(1))
@@ -345,7 +372,7 @@ func TestControlTimeoutAndPeerClosure(t *testing.T) {
 			if p.out != nil {
 				assertRawReadCancel(t, p.out, wire.ControlViolation)
 			}
-			waitViewCause(t, p.server, wire.ControlViolation, false)
+			p.assertSiblingCause(t, wire.ControlViolation, false)
 		})
 	}
 	for _, test := range []struct {
@@ -363,11 +390,7 @@ func TestControlTimeoutAndPeerClosure(t *testing.T) {
 		{"protocol reset", func(p rawControlPeer) { p.out.CancelWrite(quic.StreamErrorCode(23)) }, wire.ControlViolation, false},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			p := newRawControlPeer(t)
-			p.write(t, pbHello(1))
-			if _, err := p.server.PeerHello(controlContext(t)); err != nil {
-				t.Fatal(err)
-			}
+			p := newHelloedRawControlPeer(t)
 			test.end(p)
 			if test.remote {
 				_ = p.in.SetReadDeadline(time.Now().Add(time.Second))
@@ -378,10 +401,8 @@ func TestControlTimeoutAndPeerClosure(t *testing.T) {
 				assertRawGoAway(t, p.in, wire.ControlViolation)
 			}
 			waitViewCause(t, p.server, test.want, test.remote)
-			if _, _, err := p.server.AcceptStream(controlContext(t)); err == nil {
-				t.Fatal("AcceptStream succeeded after closure")
-			} else {
-				assertViewCause(t, err, test.want, test.remote)
+			if _, sel, ok := p.server.NextStream(); ok {
+				t.Fatalf("NextStream succeeded after closure: %d", sel)
 			}
 			if _, err := p.server.OpenStream(controlContext(t), 1); err == nil {
 				t.Fatal("OpenStream succeeded after closure")
@@ -393,11 +414,7 @@ func TestControlTimeoutAndPeerClosure(t *testing.T) {
 }
 
 func TestControlUnknownMessagesIgnored(t *testing.T) {
-	p := newRawControlPeer(t)
-	p.write(t, pbHello(1))
-	if _, err := p.server.PeerHello(controlContext(t)); err != nil {
-		t.Fatal(err)
-	}
+	p := newHelloedRawControlPeer(t)
 	p.write(t, &pb.Control{})
 	p.writeBytes(t, wire.AppendFrame(nil, []byte{0x1a, 0}))
 	out, err := p.raw.OpenUniStream()
@@ -407,7 +424,7 @@ func TestControlUnknownMessagesIgnored(t *testing.T) {
 	if err := wire.WriteSelector(out, 1); err != nil {
 		t.Fatal(err)
 	}
-	in, selector, err := p.server.AcceptUniStream(controlContext(t))
+	in, selector, err := transporttest.NextStream(controlContext(t), p.server)
 	if err != nil || selector != 1 {
 		t.Fatalf("stream after unknown control = %d, %v", selector, err)
 	}
@@ -419,11 +436,7 @@ func TestControlUnknownMessagesIgnored(t *testing.T) {
 
 func TestControlRejectsInvalidLaterFrame(t *testing.T) {
 	for _, raw := range [][]byte{wire.AppendFrame(nil, []byte{0xff}), wire.AppendFrame(nil, make([]byte, maxControlFrame+1))} {
-		p := newRawControlPeer(t)
-		p.write(t, pbHello(1))
-		if _, err := p.server.PeerHello(controlContext(t)); err != nil {
-			t.Fatal(err)
-		}
+		p := newHelloedRawControlPeer(t)
 		p.writeViolation(t, raw)
 		assertRawGoAway(t, p.in, wire.ControlViolation)
 		assertRawReadCancel(t, p.out, wire.ControlViolation)
@@ -450,10 +463,9 @@ func TestControlHelloTimeoutWhileOutboundWriteBlocked(t *testing.T) {
 	p := newRawControlPeerConfigured(t, true,
 		transport.Hello{Record: make([]byte, maxControlFrame-32)},
 		&quic.Config{InitialStreamReceiveWindow: 1, MaxStreamReceiveWindow: 1}, false)
-	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
-	defer cancel()
-	_, err := p.server.PeerHello(ctx)
-	assertViewCause(t, err, wire.ControlViolation, false)
+	// No valid Hello arrives, so the view is never delivered to Accept; its
+	// local cause is visible through the libp2p sibling.
+	p.assertSiblingCause(t, wire.ControlViolation, false)
 	assertRawReadCancel(t, p.out, wire.ControlViolation)
 }
 
@@ -462,7 +474,7 @@ func TestControlHelloWriteFailureClosesView(t *testing.T) {
 		transport.Hello{Record: make([]byte, maxControlFrame-32)},
 		&quic.Config{InitialStreamReceiveWindow: 1, MaxStreamReceiveWindow: 1}, false)
 	p.in.CancelRead(quic.StreamErrorCode(wire.Refused.Wire()))
-	waitViewCause(t, p.server, wire.Unspecified, false)
+	p.assertSiblingCause(t, wire.Unspecified, false)
 	assertRawReadCancel(t, p.out, wire.Closing)
 }
 
@@ -515,8 +527,16 @@ func TestControlOverloadDoesNotBlockOtherConnections(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if got := transport.PendingEthp2p(endpoint.Shared); got != 16 {
-		t.Fatalf("queued views = %d, want 16", got)
+	// Delivery to ethQ follows Hello asynchronously, so wait for the queue to
+	// fill before overloading it.
+	waitPending := time.After(5 * time.Second)
+	for transport.PendingEthp2p(endpoint.Shared) != 16 {
+		select {
+		case <-waitPending:
+			t.Fatalf("queued views = %d, want 16", transport.PendingEthp2p(endpoint.Shared))
+		default:
+			time.Sleep(time.Millisecond)
+		}
 	}
 	blocked := dial(&quic.Config{InitialStreamReceiveWindow: 1, MaxStreamReceiveWindow: 1})
 	// The overloaded peer never reads its control stream. Both its libp2p
@@ -572,7 +592,7 @@ func TestControlOverloadDoesNotBlockOtherConnections(t *testing.T) {
 }
 
 func TestControlEarlyStreamWaitsForHello(t *testing.T) {
-	p := newRawControlPeer(t)
+	p, accepted := startRawControlPeer(t, true, transport.Hello{}, &quic.Config{EnableDatagrams: true}, true)
 	bi, err := p.raw.OpenStreamSync(controlContext(t))
 	if err != nil {
 		t.Fatal(err)
@@ -595,32 +615,34 @@ func TestControlEarlyStreamWaitsForHello(t *testing.T) {
 		t.Fatal(err)
 	}
 	_ = out.Close()
+	// The view is not delivered before Hello arrives.
 	short, cancel := context.WithTimeout(t.Context(), 30*time.Millisecond)
 	defer cancel()
-	if _, _, err := p.server.AcceptUniStream(short); !errors.Is(err, context.DeadlineExceeded) {
-		t.Fatalf("pre-transport.Hello stream accepted: %v", err)
-	}
-	biWait, cancelBi := context.WithTimeout(t.Context(), 30*time.Millisecond)
-	defer cancelBi()
-	if _, _, err := p.server.AcceptStream(biWait); !errors.Is(err, context.DeadlineExceeded) {
-		t.Fatalf("pre-Hello bidi accepted: %v", err)
+	if _, err := p.shared.Ethp2p().Accept(short); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("pre-transport.Hello view accepted: %v", err)
 	}
 	p.write(t, pbHello(1))
-	in, selector, err := p.server.AcceptUniStream(controlContext(t))
-	if err != nil || selector != 1 {
-		t.Fatalf("post-transport.Hello stream = %d, %v", selector, err)
+	result := <-accepted
+	if result.err != nil {
+		t.Fatal(result.err)
 	}
-	payload, err := io.ReadAll(in)
-	if err != nil || string(payload) != "before transport.Hello" {
-		t.Fatalf("payload = %q, %v", payload, err)
+	server := result.conn
+	// Both early streams were classified before Hello; their relative order
+	// is completion order, so accept the set.
+	got := make(map[wire.Selector]string)
+	for range 2 {
+		s, sel, err := transporttest.NextStream(controlContext(t), server)
+		if err != nil {
+			t.Fatal(err)
+		}
+		payload, err := io.ReadAll(s)
+		if err != nil {
+			t.Fatal(err)
+		}
+		got[sel] = string(payload)
 	}
-	acceptedBi, selector, err := p.server.AcceptStream(controlContext(t))
-	if err != nil || selector != 2 {
-		t.Fatalf("post-Hello bidi = %d, %v", selector, err)
-	}
-	payload, err = io.ReadAll(acceptedBi)
-	if err != nil || string(payload) != "early bidi" {
-		t.Fatalf("bidi payload = %q, %v", payload, err)
+	if got[1] != "before transport.Hello" || got[2] != "early bidi" {
+		t.Fatalf("early streams = %v", got)
 	}
 }
 
@@ -628,16 +650,14 @@ func TestCloseWithCodeSendsGoAwayAndIsIdempotent(t *testing.T) {
 	for _, test := range []struct {
 		name  string
 		code  wire.Code
-		close func(transport.Conn) error
+		close func(*transport.Conn) error
 	}{
-		{"Close", wire.Closing, func(c transport.Conn) error { return c.Close() }},
-		{"CloseWithCode", wire.Duplicate, func(c transport.Conn) error { return c.CloseWithCode(wire.Duplicate) }},
+		{"Close", wire.Closing, func(c *transport.Conn) error { return c.Close() }},
+		{"CloseWithCode", wire.Duplicate, func(c *transport.Conn) error { return c.CloseWithCode(wire.Duplicate) }},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			pair := controlViewPair(t)
-			if _, err := pair.serverEth.PeerHello(controlContext(t)); err != nil {
-				t.Fatal(err)
-			}
+			// Accept and Dial return only after Hello, so no wait is needed here.
 			if err := test.close(pair.clientEth); err != nil {
 				t.Fatal(err)
 			}
@@ -652,33 +672,23 @@ func TestCloseWithCodeSendsGoAwayAndIsIdempotent(t *testing.T) {
 }
 
 func TestRawConnectionClosureKeepsQuicCause(t *testing.T) {
-	p := newRawControlPeer(t)
-	p.write(t, pbHello(1))
-	if _, err := p.server.PeerHello(controlContext(t)); err != nil {
-		t.Fatal(err)
-	}
+	p := newHelloedRawControlPeer(t)
 	if err := p.raw.CloseWithError(99, "raw close"); err != nil {
 		t.Fatal(err)
 	}
 	ctx, cancel := context.WithTimeout(t.Context(), time.Second)
 	defer cancel()
-	for {
-		_, err := p.server.PeerHello(ctx)
-		if err != nil {
-			if app, ok := errors.AsType[*quic.ApplicationError](err); !ok || app.ErrorCode != 99 || !app.Remote {
-				t.Fatalf("raw connection closure = %v, want quic ApplicationError", err)
-			}
-			if errors.Is(err, transport.ErrViewClosed) {
-				t.Fatalf("raw connection closure mapped to view closure: %v", err)
-			}
-			return
-		}
-		select {
-		case <-ctx.Done():
-			t.Fatal("raw connection closure did not stop view")
-		default:
-			time.Sleep(time.Millisecond)
-		}
+	select {
+	case <-p.server.Done():
+	case <-ctx.Done():
+		t.Fatal("raw connection closure did not stop view")
+	}
+	_, err := p.server.OpenStream(ctx, 1)
+	if app, ok := errors.AsType[*quic.ApplicationError](err); !ok || app.ErrorCode != 99 || !app.Remote {
+		t.Fatalf("raw connection closure = %v, want quic ApplicationError", err)
+	}
+	if errors.Is(err, transport.ErrViewClosed) {
+		t.Fatalf("raw connection closure mapped to view closure: %v", err)
 	}
 }
 
@@ -725,7 +735,7 @@ func TestStatelessResetAfterEndpointRestart(t *testing.T) {
 		t.Fatal(err)
 	}
 	_, _, clientEth, _ := controlEndpoint(t)
-	accepted := make(chan transport.Conn, 1)
+	accepted := make(chan *transport.Conn, 1)
 	go func() { conn, _ := server.Ethp2p().Accept(ctx); accepted <- conn }()
 	client, err := clientEth.Dial(ctx, addr, server.PeerID())
 	if err != nil {
@@ -734,9 +744,8 @@ func TestStatelessResetAfterEndpointRestart(t *testing.T) {
 	if <-accepted == nil {
 		t.Fatal("server did not accept")
 	}
-	if _, err := client.PeerHello(ctx); err != nil {
-		t.Fatal(err)
-	}
+	// Accept and Dial return only after Hello, so no wait is needed here.
+	_ = client.PeerHello()
 	if err := packet.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -762,19 +771,23 @@ func TestStatelessResetAfterEndpointRestart(t *testing.T) {
 	defer deadline.Stop()
 	ticker := time.NewTicker(10 * time.Millisecond)
 	defer ticker.Stop()
-	for {
+	closed := false
+	for !closed {
 		select {
 		case <-ticker.C:
 			_ = client.SendDatagram(ctx, bytes.Repeat([]byte{0x42}, 128))
-			if _, err := client.PeerHello(ctx); err != nil {
-				if _, ok := errors.AsType[*quic.StatelessResetError](err); !ok {
-					t.Fatalf("connection ended with %v, want stateless reset", err)
-				}
-				return
+			select {
+			case <-client.Done():
+				closed = true
+			default:
 			}
 		case <-deadline.C:
 			t.Fatal("stateless reset did not close the connection within 3s")
 		}
+	}
+	_, err = client.OpenStream(ctx, 1)
+	if _, ok := errors.AsType[*quic.StatelessResetError](err); !ok {
+		t.Fatalf("connection ended with %v, want stateless reset", err)
 	}
 }
 
@@ -795,7 +808,7 @@ func controlEndpoint(t *testing.T) (*transport.SharedTransport, *transporttest.E
 }
 
 func controlViewPair(t *testing.T) struct {
-	clientEth, serverEth transport.Conn
+	clientEth, serverEth *transport.Conn
 	serverShared         *transport.SharedTransport
 } {
 	t.Helper()
@@ -804,7 +817,7 @@ func controlViewPair(t *testing.T) struct {
 	server.Shared.Libp2p()
 	dialed, accepted := transporttest.Connect(t, client, server)
 	return struct {
-		clientEth, serverEth transport.Conn
+		clientEth, serverEth *transport.Conn
 		serverShared         *transport.SharedTransport
 	}{dialed, accepted, server.Shared}
 }

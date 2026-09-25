@@ -11,6 +11,7 @@ import (
 	"github.com/ethp2p/ethp2p/enr"
 	"github.com/ethp2p/ethp2p/identity"
 	"github.com/ethp2p/ethp2p/transport"
+	"github.com/ethp2p/ethp2p/wire"
 )
 
 // Endpoint is a shared transport on a loopback UDP socket, closed at test cleanup.
@@ -70,14 +71,32 @@ func NewEndpoint(tb testing.TB) *Endpoint {
 	return endpoint
 }
 
+// NextStream pulls the next classified stream, waiting on the view's wake
+// channel. It returns ctx.Err() when ctx ends first, or a
+// transport.ErrViewClosed-matching error when the view closes first.
+func NextStream(ctx context.Context, c *transport.Conn) (transport.ReceiveStream, wire.Selector, error) {
+	for {
+		if s, sel, ok := c.NextStream(); ok {
+			return s, sel, nil
+		}
+		select {
+		case <-c.Streams():
+		case <-c.Done():
+			return nil, 0, &transport.ViewClosedError{Code: c.CloseCode()}
+		case <-ctx.Done():
+			return nil, 0, ctx.Err()
+		}
+	}
+}
+
 // Connect dials server from client while server accepts, and returns both
 // ethp2p views. It fails tb on error and joins the accept goroutine.
-func Connect(tb testing.TB, client, server *Endpoint) (dialed, accepted transport.Conn) {
+func Connect(tb testing.TB, client, server *Endpoint) (dialed, accepted *transport.Conn) {
 	tb.Helper()
 	ctx, cancel := context.WithTimeout(tb.Context(), 10*time.Second)
 	defer cancel()
 	type acceptResult struct {
-		conn transport.Conn
+		conn *transport.Conn
 		err  error
 	}
 	result := make(chan acceptResult, 1)
