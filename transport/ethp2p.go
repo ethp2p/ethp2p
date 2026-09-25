@@ -33,6 +33,9 @@ func (t *Ethp2pTransport) Accept(ctx context.Context) (*Conn, error) {
 	}
 }
 
+// PeerID returns the local identity, the same one SharedTransport.PeerID reports.
+func (t *Ethp2pTransport) PeerID() PeerID { return t.shared.PeerID() }
+
 // Dial connects to addr and authenticates the peer. A nonempty expect requires
 // that peer identity. It returns [ErrDialLegacyPeer] if the peer selects libp2p.
 // It returns after the peer Hello has arrived and was validated; on failure it
