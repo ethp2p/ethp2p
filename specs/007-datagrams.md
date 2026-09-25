@@ -29,16 +29,18 @@ and discards datagrams.
 It does not define any protocol that uses datagrams.
 Each such protocol specifies its own payloads under its own selector.
 
-The document assumes the ethp2p selector frame and selector advertisement defined by the stack.
-Where this document says "the stack", it means the ethp2p component that owns selector registration,
-advertisement, and routing on a connection.
+The document assumes the ethp2p selector frame and the `Hello` exchange defined by the stack
+([008](008-stack.md)).
+Where this document says "the stack", it means the ethp2p component that owns protocol registration,
+the `Hello` exchange, and routing on a connection.
 
 Sections 3 through 7 use RFC 2119 language such as MUST, SHOULD, and MAY.
 
 ## 2. Terminology
 
 **Selector.**
-The unsigned integer identifying an ethp2p protocol on the wire.
+The unsigned integer identifying one kind of a protocol's streams and datagrams on the wire.
+Each selector belongs to exactly one protocol.
 Selector `0` is reserved for the stack's control stream.
 Selector `0x2f` is an ordinary protocol selector.
 
@@ -50,11 +52,12 @@ which occupies exactly `n` bytes.
 Every ethp2p stream begins with one selector frame.
 
 **Shared selectors.**
-The intersection of the selectors both endpoints advertised on a connection.
+The selectors of the protocols both endpoints announced in `Hello` on a connection
+(008, section 4.3).
 
 **Datagram protocol.**
-A protocol whose specification defines datagram payloads under its selector.
-A protocol MAY use streams, datagrams, or both under a single selector.
+A protocol whose specification defines datagram payloads under one or more of its selectors.
+A protocol MAY use streams, datagrams, or both under each of its selectors.
 
 ## 3. Negotiation
 
@@ -72,9 +75,9 @@ or treat the peer as not supporting the protocol.
 ### 3.2. Selector namespace
 
 Streams and datagrams share one selector namespace.
-There is no separate datagram advertisement.
-Advertising a selector advertises support for every stream and datagram usage
-that the protocol's specification defines under that selector.
+There is no separate datagram announcement.
+Announcing a protocol announces support for every stream and datagram usage
+that its specification defines under its selectors.
 
 A protocol that later adds datagram payloads under an existing selector changes
 that protocol's wire contract.
@@ -121,7 +124,7 @@ that size MUST define how it handles a payload too large to send as a datagram.
 ## 5. Sending
 
 A sender MUST NOT send a datagram for a selector
-before its selector exchange with the peer has completed,
+before its `Hello` exchange with the peer has completed,
 and MUST NOT send a datagram for a selector that is not shared.
 
 Sending is best-effort.
@@ -171,14 +174,13 @@ Implementations SHOULD let each datagram protocol request an additional per-prot
 Datagrams over the limit MUST be discarded.
 How sustained excess affects peer reputation is outside this document.
 
-### 6.4. Datagrams that arrive before the selector exchange
+### 6.4. Datagrams that arrive before the `Hello` exchange
 
-Datagrams are unordered with respect to the streams carrying the selector exchange.
-A peer that has finished reading this endpoint's advertisement may send datagrams
-before this endpoint has read the peer's advertisement.
+Datagrams are unordered with respect to the control streams carrying `Hello`.
+A peer that has finished reading this endpoint's `Hello` may send datagrams
+before this endpoint has read the peer's `Hello`.
 
-A receiver MUST NOT deliver a datagram before its own selector exchange with
-that peer has completed.
+A receiver MUST NOT deliver a datagram before its own `Hello` exchange with that peer has completed.
 It MAY buffer a small, bounded number of such datagrams, counting them against the receive limit,
 and process them when the exchange completes.
 Otherwise it MUST discard them.

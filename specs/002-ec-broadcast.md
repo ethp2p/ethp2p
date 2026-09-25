@@ -126,7 +126,7 @@ For CHUNK streams, the raw chunk data follows the framed `Chunk.Header`.
 **BCAST stream.**
 The per-connection control stream.
 It carries handshake, subscribe, and unsubscribe messages.
-It opens after Stack negotiates the broadcast selectors and remains open
+It opens after the stack delivers `PeerUp` for broadcast and remains open
 while the broadcast binding is active.
 It is implemented as two unidirectional streams, one in each direction,
 each carrying length-prefixed protobuf frames.
@@ -165,41 +165,34 @@ Streams opened through `Peer.OpenUniStream`
 or `Peer.OpenStream` have their selector written by Stack
 before the stream is returned to the subsystem.
 
-Each endpoint's first outgoing unidirectional stream is the selector advertisement stream.
-Its first frame contains the reserved advertisement selector `0`,
-followed by one selector frame for each advertised codepoint, and ends with FIN.
-The shared QUIC dispatcher peeks at the length prefix
-and first payload byte of incoming bidirectional stream frames without consuming bytes.
-A leading `/` routes the stream to libp2p; other nonempty first frames route to ethp2p.
-Incoming unidirectional streams route directly to ethp2p.
+The stack negotiates broadcast as one protocol, with all three selectors,
+in the `Hello` exchange of [008](008-stack.md), section 4.3.
+Its protocol identifier is `1`.
+The broadcast package declares these stable selectors and their stream allowances
+(008, section 4.4):
 
-The broadcast package declares these stable codepoints for Stack registration:
+| Selector | Stream | `MaxInbound` | `MaxOutbound` |
+| -------: | ------ | -----------: | ------------: |
+| `0x01` | `BCAST` | 1 | 1 |
+| `0x02` | `SESS` | 64 | 64 |
+| `0x03` | `CHUNK` | 128 | 128 |
 
-| Codepoint | Protocol |
-| --------: | -------- |
-| `0x01`    | `BCAST`  |
-| `0x02`    | `SESS`   |
-| `0x03`    | `CHUNK`  |
+With the control stream, the allowances total 194 streams,
+within the Interop profile's 256 incoming streams in each direction.
 
-Protocol-specific stream cancellation outcomes use the protocol namespace
-(`value<<1 | 1` on the wire).
-Values are stable per selector.
+Broadcast's stream cancellation outcomes use the protocol namespace
+(`value<<1 | 1` on the wire), in one table for all three selectors.
 Value `0` means no protocol-specific reason.
-The selector code tables are:
 
-| Selector | Value | Name | Meaning |
-| -------- | ----: | ---- | ------- |
-| `SESS` | 1 | `Reconstructed` | The sender has reconstructed the message. |
-| `CHUNK` | 1 | `Redundant` | The receiver no longer needs this chunk. |
-| `CHUNK` | 2 | `InvalidChunk` | The peer exceeded the post-header queued-stream abuse bound. |
+| Value | Name | Meaning |
+| ----: | ---- | ------- |
+| 1 | `Reconstructed` | The sender has reconstructed the message. |
+| 2 | `Redundant` | The receiver no longer needs this chunk. |
 
 The Go values are declared beside the selectors in `broadcast/protocol.go`:
-`Reconstructed = SESS.Code(1)`, `Redundant = CHUNK.Code(1)`, and `InvalidChunk = CHUNK.Code(2)`.
-Shared stack outcomes are referenced from `protocol` directly.
-
-Codepoint `0` is reserved for Stack's selector advertisement stream.
-Codepoint `0x2f` is reserved for libp2p routing because its encoded byte is `/`.
-Streams with unregistered codepoints are cancelled.
+`Reconstructed = wire.ProtocolCode(1)` and `Redundant = wire.ProtocolCode(2)`.
+Shared stack outcomes are referenced from `wire` directly.
+The stack resets streams whose selector broadcast does not own.
 
 ## 4. BCAST: control protocol
 
@@ -233,7 +226,7 @@ message Bcast {
 
 ### 4.1. Handshake
 
-When Stack delivers a peer with the broadcast selectors, both sides perform a symmetric handshake.
+When the stack delivers `PeerUp` for broadcast, both sides perform a symmetric handshake.
 Each side concurrently opens an outbound `BCAST` stream and accepts the peer's inbound stream.
 The handshake is not complete until both sides have sent and received a `Bcast.Handshake` frame.
 
@@ -260,24 +253,30 @@ the application still owns the underlying connection.
 
 After a successful handshake, both sides know the remote identity authenticated by the transport's
 TLS handshake, the protocol version, and the initial channel set.
-Incoming `SESS` streams wait in a bounded queue until the handshake completes.
-Incoming `CHUNK` streams wait unread in a FIFO bounded by QUIC stream credit.
-If it fails, those queued streams are cancelled;
-streams that overflow the SESS queue are cancelled with `Overloaded`.
+Incoming `SESS` and `CHUNK` streams wait unread until the handshake completes,
+bounded by their allowances.
+If it fails, those queued streams are cancelled.
 
 ### 4.1.1. Capacity and progress
 
-A receiver may retain stream credit while waiting only
-if completing the stream does not require another stream from that peer.
+Every unfinished incoming stream counts against its selector's allowance
+(008, section 9.3), so the allowances above bound the streams broadcast holds per peer.
+Broadcast never resets a stream to release credit for another selector: each selector has its own.
+
 CHUNK payloads for an existing session are independent:
 header-reader concurrency and session payload-reader concurrency delay reads instead of resetting
 with `Overloaded`.
 The engine and channel actors enqueue work without waiting for a reader slot.
 A reader completion schedules the next queued payload read.
 
-SESS is long-lived and depends on CHUNK progress.
-Its handoff queue and reader budget remain bounded at 64 each;
-excess streams are reset with `Overloaded` to release credit needed by CHUNK.
+SESS is long-lived and depends on CHUNK progress,
+and a CHUNK with no session depends on a missing SESS.
+Broadcast satisfies 008's rule for streams
+that wait on each other across selectors by keeping parked CHUNK streams below the CHUNK allowance:
+at most 32 per message and 64 per peer across channels and messages.
+Excess parked chunks are reset with `Overloaded`.
+The existing 30-second cleanup tick cancels all remaining parked groups with `Refused`.
+
 Ending SESS does not release the live session itself.
 `EngineConfig.MaxLiveSessionsPerPeer`
 therefore separately bounds relay sessions first opened by a peer, across channels.
@@ -288,24 +287,7 @@ Excess SessionOpen requests are refused with `Overloaded` on SESS.
 Creator departure disposes that binding's creator sessions in every channel,
 including channels it unsubscribed from; the count is released on disposal, including TTL expiry.
 Local publishes are not charged.
-BCAST permits exactly one inbound stream, with a one-element handoff;
-additional BCAST streams are refused.
-
-A CHUNK with no session depends on a missing SESS.
-Parked chunks therefore retain a limit of 32 per message
-and add a limit of 64 per peer across channels and messages.
-Excess parked chunks are reset with `Overloaded`.
-The per-peer bound leaves uni credit available under the Interop profile alongside the SESS bounds,
-rather than allowing distinct message IDs to evade the parking limit.
-The existing 30-second cleanup tick cancels all remaining parked groups with `Refused`.
-
-Completed header-only streams can return QUIC credit before a session reads payload.
-To bound retained references, `EngineConfig.MaxQueuedChunkStreams` limits streams waiting in session
-payload-read queues per peer across channels and messages.
-It defaults to 16384, the Shadow incoming uni-stream limit.
-Applications MUST configure it at least as high as their endpoint's incoming uni-stream limit.
-Exceeding it is abuse (`InvalidChunk`, wire 5), not capacity overload.
-Counts are released on dispatch, cancellation, peer closure and session disposal.
+BCAST's allowance of 1 admits exactly one inbound stream per connection.
 
 Session lifecycle commands use a per-peer FIFO so a channel actor never waits
 for the peer's control loop to open or write SESS.
@@ -418,7 +400,7 @@ that need to drain cleanly, but a departed peer can be removed immediately.
 The signaling mechanism reflects that distinction.
 
 When a node's strategy reports that it has enough chunks to decode,
-it cancels its outbound `SESS` write side for that session with `SESS.Code(1)` (`Reconstructed`),
+it cancels its outbound `SESS` write side for that session with `Reconstructed`,
 encoded as application error code `0x03`.
 This happens before decoding completes and tells the remote peer
 that further chunk sends are unnecessary.
