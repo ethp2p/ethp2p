@@ -3,7 +3,6 @@ package enr
 import (
 	"encoding/binary"
 	"errors"
-	"fmt"
 )
 
 type rlpKind uint8
@@ -200,8 +199,4 @@ func encodeUint64(value uint64) []byte {
 		encoded = encoded[1:]
 	}
 	return encodeRLPString(encoded)
-}
-
-func describeRLPError(err error) error {
-	return fmt.Errorf("invalid RLP: %w", err)
 }

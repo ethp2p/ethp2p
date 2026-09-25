@@ -628,3 +628,13 @@ func equalAddrPorts(got, want []netip.AddrPort) bool {
 	}
 	return true
 }
+
+func (r *Record) encodeCanonical() []byte {
+	body := encodeRLPString(r.signature[:])
+	body = append(body, encodeUint64(r.seq)...)
+	for _, key := range r.keys {
+		body = append(body, encodeRLPString([]byte(key))...)
+		body = append(body, r.values[key]...)
+	}
+	return encodeRLPList(body)
+}

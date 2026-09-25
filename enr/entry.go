@@ -17,9 +17,9 @@ type Entry[T any] struct {
 
 // Pair is a key/value pair created with Entry.Set, for Sign and Update.
 type Pair struct {
-	key    string
-	encode func() ([]byte, error)
-	err    error
+	key   string
+	value []byte
+	err   error
 }
 
 // BytesEntry describes an entry under key whose value is an RLP byte string.
@@ -135,12 +135,6 @@ var QUIC6 = uint16Entry("quic6")
 // Get returns the value of entry in r. ok is false when the key is absent;
 // err is non-nil when it is present but its value is malformed.
 func (r *Record) Get[T any](entry Entry[T]) (value T, ok bool, err error) {
-	if r == nil {
-		return value, false, errors.New("nil ENR")
-	}
-	if entry.decode == nil {
-		return value, false, errors.New("entry has no decoder")
-	}
 	raw, ok := r.values[entry.key]
 	if !ok {
 		return value, false, nil
@@ -155,15 +149,8 @@ func (r *Record) Get[T any](entry Entry[T]) (value T, ok bool, err error) {
 // Set pairs the entry's key with value, for Sign and Update. Encoding errors,
 // such as an invalid address, are returned by Sign and Update.
 func (e Entry[T]) Set(value T) Pair {
-	pair := Pair{key: e.key}
-	if e.encode == nil {
-		pair.err = errors.New("entry has no encoder")
-		return pair
-	}
-	pair.encode = func() ([]byte, error) {
-		return e.encode(value)
-	}
-	return pair
+	encoded, err := e.encode(value)
+	return Pair{key: e.key, value: encoded, err: err}
 }
 
 func uint16Entry(key string) Entry[uint16] {

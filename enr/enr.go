@@ -5,12 +5,13 @@ package enr
 
 import (
 	"bytes"
+	"cmp"
 	"encoding/base64"
 	"errors"
 	"fmt"
 	"math"
 	"net/netip"
-	"sort"
+	"slices"
 	"strings"
 
 	"github.com/ethp2p/ethp2p/identity"
@@ -37,10 +38,10 @@ type signedPair struct {
 
 // Parse decodes the unpadded base64url text form of an ENR and verifies it.
 func Parse(text string) (*Record, error) {
-	if !strings.HasPrefix(text, "enr:") {
-		return nil, errors.New("ENR text must start with enr:")
+	encoded, ok := strings.CutPrefix(text, "enr:")
+	if !ok {
+		return nil, errors.New(`ENR text lacks the "enr:" prefix`)
 	}
-	encoded := text[len("enr:"):]
 	if len(encoded) == 0 || len(encoded) > base64.RawURLEncoding.EncodedLen(maxRecordSize) {
 		return nil, errors.New("invalid ENR base64 length")
 	}
@@ -63,10 +64,10 @@ func Decode(raw []byte) (*Record, error) {
 	if len(raw) > maxRecordSize {
 		return nil, fmt.Errorf("ENR exceeds %d-byte limit", maxRecordSize)
 	}
-	owned := append([]byte(nil), raw...)
+	owned := bytes.Clone(raw)
 	root, rest, err := decodeRLP(owned)
 	if err != nil {
-		return nil, describeRLPError(err)
+		return nil, fmt.Errorf("invalid RLP: %w", err)
 	}
 	if len(rest) != 0 {
 		return nil, errors.New("trailing bytes after ENR")
@@ -100,7 +101,7 @@ func Decode(raw []byte) (*Record, error) {
 		previous = key.payload
 		name := string(key.payload)
 		keys = append(keys, name)
-		values[name] = append([]byte(nil), value.raw...)
+		values[name] = bytes.Clone(value.raw)
 	}
 
 	idRaw, ok := values["id"]
@@ -146,25 +147,16 @@ func Decode(raw []byte) (*Record, error) {
 
 // Encode returns a copy of the original canonical RLP bytes.
 func (r *Record) Encode() []byte {
-	if r == nil {
-		return nil
-	}
-	return append([]byte(nil), r.raw...)
+	return bytes.Clone(r.raw)
 }
 
 // String returns the unpadded base64url text form of the record.
 func (r *Record) String() string {
-	if r == nil {
-		return ""
-	}
 	return "enr:" + base64.RawURLEncoding.EncodeToString(r.raw)
 }
 
 // Seq returns the record sequence number.
 func (r *Record) Seq() uint64 {
-	if r == nil {
-		return 0
-	}
 	return r.seq
 }
 
@@ -191,19 +183,6 @@ func (r *Record) QUIC() []netip.AddrPort {
 	return endpoints
 }
 
-func (r *Record) encodeCanonical() []byte {
-	if r == nil {
-		return nil
-	}
-	body := encodeRLPString(r.signature[:])
-	body = append(body, encodeUint64(r.seq)...)
-	for _, key := range r.keys {
-		body = append(body, encodeRLPString([]byte(key))...)
-		body = append(body, r.values[key]...)
-	}
-	return encodeRLPList(body)
-}
-
 // Update returns a new record signed by key with sequence number Seq()+1. It
 // keeps r's entries and replaces or adds those in pairs. key must be the key
 // that signed r.
@@ -227,7 +206,7 @@ func (r *Record) Update(key *identity.PrivKey, pairs ...Pair) (*Record, error) {
 			continue
 		}
 		raw := r.values[k]
-		merged = append(merged, Pair{key: k, encode: func() ([]byte, error) { return raw, nil }})
+		merged = append(merged, Pair{key: k, value: raw})
 	}
 	return Sign(key, r.seq+1, append(merged, pairs...)...)
 }
@@ -251,24 +230,17 @@ func Sign(key *identity.PrivKey, seq uint64, pairs ...Pair) (*Record, error) {
 		if pair.err != nil {
 			return nil, fmt.Errorf("encode ENR key %q: %w", pair.key, pair.err)
 		}
-		if pair.encode == nil {
-			return nil, fmt.Errorf("ENR key %q has no encoder", pair.key)
-		}
-		value, err := pair.encode()
-		if err != nil {
-			return nil, fmt.Errorf("encode ENR key %q: %w", pair.key, err)
-		}
-		if _, err := decodeSingleRLP(value); err != nil {
+		if _, err := decodeSingleRLP(pair.value); err != nil {
 			return nil, fmt.Errorf("encode ENR key %q: invalid RLP value: %w", pair.key, err)
 		}
-		signed = append(signed, signedPair{key: pair.key, value: value})
+		signed = append(signed, signedPair{key: pair.key, value: pair.value})
 	}
 	signed = append(signed,
 		signedPair{key: "id", value: encodeRLPString([]byte("v4"))},
 		signedPair{key: "secp256k1", value: encodeRLPString(key.Public().Bytes())},
 	)
-	sort.Slice(signed, func(i, j int) bool {
-		return signed[i].key < signed[j].key
+	slices.SortFunc(signed, func(a, b signedPair) int {
+		return cmp.Compare(a.key, b.key)
 	})
 
 	content := encodeRLPList(encodeSignedContent(seq, signed))
@@ -276,11 +248,7 @@ func Sign(key *identity.PrivKey, seq uint64, pairs ...Pair) (*Record, error) {
 	signature := key.SignHash(hash)
 
 	body := encodeRLPString(signature)
-	body = append(body, encodeUint64(seq)...)
-	for _, pair := range signed {
-		body = append(body, encodeRLPString([]byte(pair.key))...)
-		body = append(body, pair.value...)
-	}
+	body = append(body, encodeSignedContent(seq, signed)...)
 	raw := encodeRLPList(body)
 	if len(raw) > maxRecordSize {
 		return nil, fmt.Errorf("signed ENR is %d bytes; maximum is %d", len(raw), maxRecordSize)
