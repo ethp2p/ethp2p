@@ -9,6 +9,7 @@ import (
 	"sync"
 
 	"github.com/ethp2p/ethp2p/enr"
+	"github.com/ethp2p/ethp2p/internal/ctxutil"
 	"github.com/ethp2p/ethp2p/transport"
 	"github.com/ethp2p/ethp2p/wire"
 )
@@ -240,7 +241,11 @@ func (p *Peer) OpenUniStream(ctx context.Context, sel wire.Selector) (SendStream
 	if err := p.ctx.Err(); err != nil {
 		return nil, err
 	}
-	stream, err := p.conn.OpenUniStream(ctx, sel)
+	openCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	stop := ctxutil.OnCancel(p.ctx, cancel)
+	defer stop()
+	stream, err := p.conn.OpenUniStream(openCtx, sel)
 	if err := p.contextError(ctx); err != nil {
 		if stream != nil {
 			stream.CancelWrite(streamFailureCode(p.ctx, err).Wire())
@@ -264,7 +269,11 @@ func (p *Peer) OpenStream(ctx context.Context, sel wire.Selector) (Stream, error
 	if err := p.ctx.Err(); err != nil {
 		return nil, err
 	}
-	stream, err := p.conn.OpenStream(ctx, sel)
+	openCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	stop := ctxutil.OnCancel(p.ctx, cancel)
+	defer stop()
+	stream, err := p.conn.OpenStream(openCtx, sel)
 	if err := p.contextError(ctx); err != nil {
 		if stream != nil {
 			cancelTransportStream(stream, streamFailureCode(p.ctx, err))

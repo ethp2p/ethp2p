@@ -150,6 +150,75 @@ func TestPeerCloseKeepsOtherFamily(t *testing.T) {
 	}
 }
 
+func TestPeerCloseCancelsBlockedOpenWithoutClosingOtherFamily(t *testing.T) {
+	a, b := transporttest.NewEndpoint(t), transporttest.NewEndpoint(t)
+	left, right := newTestStack(t, a), newTestStack(t, b)
+	leftA, leftAWake := registerTestFamily(t, left, ProtocolSpec{Selector: 1, MaxQueued: 300})
+	leftB, leftBWake := registerTestFamily(t, left, ProtocolSpec{Selector: 2, MaxQueued: 8})
+	rightA, rightAWake := registerTestFamily(t, right, ProtocolSpec{Selector: 1, MaxQueued: 300})
+	rightB, rightBWake := registerTestFamily(t, right, ProtocolSpec{Selector: 2, MaxQueued: 8})
+	startTestStack(t, left)
+	startTestStack(t, right)
+	ctx, cancel := context.WithTimeout(t.Context(), testTimeout)
+	defer cancel()
+	if err := left.Connect(ctx, b.Record(t, 1)); err != nil {
+		t.Fatal(err)
+	}
+	leftPeerA := awaitPeer(t, leftA, leftAWake)
+	awaitPeer(t, leftB, leftBWake)
+	rightPeerA := awaitPeer(t, rightA, rightAWake)
+	rightPeerB := awaitPeer(t, rightB, rightBWake)
+
+	// Interop allows 256 incoming uni streams; the control stream uses one.
+	// Keep the streams open so the receiver cannot return their credit.
+	var held []SendStream
+	for range 255 {
+		stream, err := rightPeerA.OpenUniStream(ctx, 1)
+		if err != nil {
+			t.Fatal(err)
+		}
+		held = append(held, stream)
+	}
+	defer func() {
+		for _, stream := range held {
+			stream.CancelWrite(wire.Unspecified)
+		}
+	}()
+	probeCtx, stopProbe := context.WithTimeout(ctx, 50*time.Millisecond)
+	_, probeErr := rightPeerA.OpenUniStream(probeCtx, 1)
+	stopProbe()
+	if !errors.Is(probeErr, context.DeadlineExceeded) {
+		t.Fatalf("stream credit was not exhausted: %v", probeErr)
+	}
+	blockedCtx, blockedCancel := context.WithTimeout(ctx, 2*time.Second)
+	defer blockedCancel()
+	closer := time.AfterFunc(100*time.Millisecond, func() { rightPeerA.Close(wire.Refused) })
+	defer closer.Stop()
+	stream, err := rightPeerA.OpenUniStream(blockedCtx, 1)
+	if err == nil {
+		stream.CancelWrite(wire.Unspecified)
+		t.Fatal("open succeeded without stream credit")
+	}
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("blocked open after Peer.Close = %v, want context.Canceled", err)
+	}
+	if err := blockedCtx.Err(); err != nil {
+		t.Fatalf("open waited for caller deadline after Peer.Close: %v", err)
+	}
+
+	// Releasing the queued streams restores credit for the other family.
+	leftPeerA.Close(wire.Refused)
+	for _, stream := range held {
+		stream.CancelWrite(wire.Unspecified)
+	}
+	other, err := rightPeerB.OpenUniStream(ctx, 2)
+	if err != nil {
+		t.Fatalf("other family cannot open a stream: %v", err)
+	}
+	_ = other.Close()
+	_ = awaitStreamEvent(t, leftB, leftBWake)
+}
+
 func TestPeerCloseLastFamilyClosesView(t *testing.T) {
 	a, b := transporttest.NewEndpoint(t), transporttest.NewEndpoint(t)
 	left, right := newTestStack(t, a), newTestStack(t, b)
