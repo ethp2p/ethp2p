@@ -652,7 +652,7 @@ type Strategy[CI ChunkIdent, R Wire] interface {
 	// AttachPeer registers a peer in this session. Called before
 	// PollChunks can target this peer. The strategy should initialize
 	// per-peer state (send tracking, routing, etc.).
-	AttachPeer(peer PeerID, stats *PeerSessionStats)
+	AttachPeer(peer PeerID)
 
 	// DetachPeer removes a peer. completed=true means the peer
 	// signaled successful reconstruction (SESS value 1); false means

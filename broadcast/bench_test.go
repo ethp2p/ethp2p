@@ -9,8 +9,8 @@ import (
 	"time"
 
 	ethp2p "github.com/ethp2p/ethp2p"
-	"github.com/ethp2p/ethp2p/wire"
 	"github.com/ethp2p/ethp2p/transport"
+	"github.com/ethp2p/ethp2p/wire"
 )
 
 // BenchmarkSessionDispatchFanout measures the throughput of the session
@@ -224,10 +224,10 @@ func (cs *dispatchStrategy) HaveChunk(_ *testChunk) bool { return false }
 func (cs *dispatchStrategy) VerifyChunk(_ transport.PeerID, _ *testChunk, _ []byte) Verdict {
 	return VerdictAccepted
 }
-func (cs *dispatchStrategy) Verified() <-chan VerifyResult[*testChunk]      { return nil }
-func (cs *dispatchStrategy) DedupKey(_ *testChunk) []byte                   { return nil }
-func (cs *dispatchStrategy) AttachPeer(transport.PeerID, *PeerSessionStats) {}
-func (cs *dispatchStrategy) DetachPeer(transport.PeerID, bool)              {}
+func (cs *dispatchStrategy) Verified() <-chan VerifyResult[*testChunk] { return nil }
+func (cs *dispatchStrategy) DedupKey(_ *testChunk) []byte              { return nil }
+func (cs *dispatchStrategy) AttachPeer(transport.PeerID)               {}
+func (cs *dispatchStrategy) DetachPeer(transport.PeerID, bool)         {}
 
 func (cs *dispatchStrategy) TakeChunk(_ transport.PeerID, _ *testChunk, _ []byte, _ *DedupCancel) (Verdict, bool, error) {
 	return VerdictAccepted, false, nil
@@ -278,5 +278,5 @@ type blackholeStream struct{}
 
 func (s *blackholeStream) Write(p []byte) (int, error)        { return len(p), nil }
 func (s *blackholeStream) Close() error                       { return nil }
-func (s *blackholeStream) CancelWrite(_ wire.Code)        {}
+func (s *blackholeStream) CancelWrite(_ wire.Code)            {}
 func (s *blackholeStream) SetWriteDeadline(_ time.Time) error { return nil }

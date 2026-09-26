@@ -42,7 +42,6 @@ type dedupGroup struct {
 // sessionPeer is Session's per-peer state.
 type sessionPeer struct {
 	conn        *PeerConn
-	stats       *PeerSessionStats
 	chunkOutbox chan peerSendChunk
 	completed   bool
 }
@@ -520,9 +519,6 @@ func (s *session[CI, R]) handleRoutingUpdate(peer transport.PeerID, data []byte)
 }
 
 func (s *session[CI, R]) handleSendComplete(peer transport.PeerID, handle ChunkHandle, err error, size int) {
-	if sp := s.peers[peer]; sp != nil {
-		sp.stats.inflight--
-	}
 	key := outboundKey{peer: peer, handle: handle}
 	if cancel, exists := s.outboundCancels[key]; exists {
 		cancel()
@@ -550,11 +546,10 @@ func (s *session[CI, R]) handlePeerAttached(p *PeerConn) {
 	chunkOutbox := make(chan peerSendChunk, 16)
 	sp := &sessionPeer{
 		conn:        p,
-		stats:       NewPeerSessionStats(p.id),
 		chunkOutbox: chunkOutbox,
 	}
 	s.peers[p.id] = sp
-	s.strategy.AttachPeer(p.id, sp.stats)
+	s.strategy.AttachPeer(p.id)
 
 	// Bundle initial routing with SessionOpen so the peer has our
 	// inventory before any chunk traffic.
@@ -721,7 +716,6 @@ func (s *session[CI, R]) sendChunk(peer transport.PeerID, chunkID CI, data []byt
 			s.hooks.Trace.Emit(trace.DispatchSlot{Peer: string(peer), Channel: string(s.channelID), Message: string(s.messageID), Acquired: true})
 		}
 		s.outboundCancels[key] = cancel
-		sp.stats.inflight++
 		select {
 		case sp.conn.wakeCh <- struct{}{}:
 		default:

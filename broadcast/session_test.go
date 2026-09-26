@@ -114,7 +114,7 @@ func (ms *mockStrategy) DedupKey(chunkID *testChunk) []byte {
 	}
 	return nil
 }
-func (ms *mockStrategy) AttachPeer(peer transport.PeerID, stats *PeerSessionStats) {
+func (ms *mockStrategy) AttachPeer(peer transport.PeerID) {
 	ms.attachCalls = append(ms.attachCalls, mockAttachCall{peer: peer})
 }
 

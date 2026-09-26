@@ -42,7 +42,6 @@ type strategy struct {
 // peerState tracks per-peer dispatch state within a session.
 type peerState struct {
 	bitmap    Bitmap
-	stats     *broadcast.PeerSessionStats
 	inflight  []int // per-chunk in-flight send count
 	completed bool
 }
@@ -136,10 +135,9 @@ func (s *strategy) DedupKey(chunkID *ChunkIdent) []byte {
 	return buf[:]
 }
 
-func (s *strategy) AttachPeer(peer transport.PeerID, stats *broadcast.PeerSessionStats) {
+func (s *strategy) AttachPeer(peer transport.PeerID) {
 	ps := &peerState{
 		bitmap:   NewBitmap(s.totalChunks),
-		stats:    stats,
 		inflight: make([]int, s.totalChunks),
 	}
 	s.peers[peer] = ps

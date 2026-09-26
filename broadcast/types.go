@@ -3,7 +3,6 @@ package broadcast
 import (
 	"context"
 	"io"
-	"time"
 
 	"github.com/ethp2p/ethp2p/transport"
 )
@@ -82,29 +81,6 @@ const (
 	// async worker pool. The result will arrive on the Verified() channel.
 	VerdictPending
 )
-
-// PeerSessionStats tracks per-peer per-session statistics. The session
-// owns and mutates these (same goroutine as strategy calls). Strategy
-// implementations read via getter methods; unexported fields prevent
-// external writes.
-type PeerSessionStats struct {
-	peerID   transport.PeerID
-	sent     int
-	recv     int
-	inflight int
-	latency  time.Duration
-}
-
-// NewPeerSessionStats creates stats for the given peer.
-func NewPeerSessionStats(peer transport.PeerID) *PeerSessionStats {
-	return &PeerSessionStats{peerID: peer}
-}
-
-func (s *PeerSessionStats) PeerID() transport.PeerID { return s.peerID }
-func (s *PeerSessionStats) Sent() int                { return s.sent }
-func (s *PeerSessionStats) Recv() int                { return s.recv }
-func (s *PeerSessionStats) Inflight() int            { return s.inflight }
-func (s *PeerSessionStats) Latency() time.Duration   { return s.latency }
 
 // VerifyResult carries the outcome of an async chunk verification
 // submitted via VerifyChunk. Posted to the Verified() channel and
@@ -219,10 +195,7 @@ type Strategy[CI ChunkIdent, R Wire] interface {
 	// AttachPeer registers a peer in this session. Called before
 	// PollChunks can target this peer. The strategy should initialize
 	// per-peer state (send tracking, routing, etc.).
-	//
-	// stats is owned by the session. Mutations happen only between
-	// strategy calls; it is safe to retain the pointer.
-	AttachPeer(peer transport.PeerID, stats *PeerSessionStats)
+	AttachPeer(peer transport.PeerID)
 
 	// DetachPeer removes a peer. completed=true means the peer
 	// signaled successful reconstruction with Reconstructed (protocol value 1,

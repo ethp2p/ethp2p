@@ -11,8 +11,8 @@ import (
 
 	ethp2p "github.com/ethp2p/ethp2p"
 	bcastpb "github.com/ethp2p/ethp2p/broadcast/pb"
-	"github.com/ethp2p/ethp2p/wire"
 	"github.com/ethp2p/ethp2p/transport"
+	"github.com/ethp2p/ethp2p/wire"
 )
 
 // fakeReceiveStream wraps a bytes.Reader to satisfy ethp2p.ReceiveStream
@@ -21,7 +21,7 @@ type fakeReceiveStream struct {
 	*bytes.Reader
 }
 
-func (f *fakeReceiveStream) CancelRead(wire.Code)        {}
+func (f *fakeReceiveStream) CancelRead(wire.Code)            {}
 func (f *fakeReceiveStream) SetReadDeadline(time.Time) error { return nil }
 
 var _ ethp2p.ReceiveStream = (*fakeReceiveStream)(nil)
@@ -109,7 +109,6 @@ func (ds *decodeOnTakeStrategy) TakeChunk(peer transport.PeerID, chunk *testChun
 type pushingStrategy struct {
 	messageID MessageID
 	pending   []*testChunk
-	peers     map[transport.PeerID]*PeerSessionStats
 	peerSent  map[transport.PeerID]map[int]bool
 	peerReady map[transport.PeerID]bool // true = peer can receive next chunk via Poll
 	closed    bool
@@ -130,7 +129,6 @@ func newPushingStrategy(messageID MessageID) *pushingStrategy {
 func newPushingStrategyWithPushHook(messageID MessageID, pushHook func(messageID MessageID, peer transport.PeerID, chunkIdx int)) *pushingStrategy {
 	return &pushingStrategy{
 		messageID:      messageID,
-		peers:          make(map[transport.PeerID]*PeerSessionStats),
 		peerSent:       make(map[transport.PeerID]map[int]bool),
 		peerReady:      make(map[transport.PeerID]bool),
 		pushHook:       pushHook,
@@ -148,14 +146,12 @@ func (ps *pushingStrategy) VerifyChunk(_ transport.PeerID, _ *testChunk, _ []byt
 }
 func (ps *pushingStrategy) Verified() <-chan VerifyResult[*testChunk] { return nil }
 func (ps *pushingStrategy) DedupKey(_ *testChunk) []byte              { return nil }
-func (ps *pushingStrategy) AttachPeer(peer transport.PeerID, stats *PeerSessionStats) {
-	ps.peers[peer] = stats
+func (ps *pushingStrategy) AttachPeer(peer transport.PeerID) {
 	ps.peerSent[peer] = make(map[int]bool)
 	ps.peerReady[peer] = true
 }
 
 func (ps *pushingStrategy) DetachPeer(peer transport.PeerID, _ bool) {
-	delete(ps.peers, peer)
 	delete(ps.peerSent, peer)
 	delete(ps.peerReady, peer)
 }
@@ -177,7 +173,7 @@ func (ps *pushingStrategy) PollChunks() []ChunkDispatch[*testChunk] {
 	if ps.closed {
 		return nil
 	}
-	for peer := range ps.peers {
+	for peer := range ps.peerSent {
 		if !ps.peerReady[peer] {
 			continue
 		}

@@ -24,10 +24,6 @@ func ssTestPayload(_ *testing.T, n int) []byte {
 	return payload
 }
 
-func ssTestStats(peer transport.PeerID) *broadcast.PeerSessionStats {
-	return broadcast.NewPeerSessionStats(peer)
-}
-
 func takeChunk(s *strategy, peer transport.PeerID, idx int, data []byte) (broadcast.Verdict, bool, error) {
 	chunkID := &ChunkIdent{
 		Index: idx,
@@ -43,7 +39,7 @@ func TestOriginPollChunkDispatch(t *testing.T) {
 	}
 	defer s.Close()
 
-	s.AttachPeer("peerA", ssTestStats("peerA"))
+	s.AttachPeer("peerA")
 	chunks := s.PollChunks()
 	if len(chunks) == 0 {
 		t.Fatal("expected chunk dispatch")
@@ -68,7 +64,7 @@ func TestRelayDecode(t *testing.T) {
 	}
 	defer relay.Close()
 
-	relay.AttachPeer("peerA", ssTestStats("peerA"))
+	relay.AttachPeer("peerA")
 	var complete bool
 	for i := 0; i < origin.preamble.DataChunks; i++ {
 		v, c, err := takeChunk(relay, "peerA", i, origin.chunks[i])
@@ -105,7 +101,7 @@ func TestRelayDuplicateIsUseless(t *testing.T) {
 	}
 	defer relay.Close()
 
-	relay.AttachPeer("peerA", ssTestStats("peerA"))
+	relay.AttachPeer("peerA")
 	data := origin.chunks[0]
 	if v, _, err := takeChunk(relay, "peerA", 0, data); err != nil || v != broadcast.VerdictAccepted {
 		t.Fatalf("first verdict=%d err=%v", v, err)
@@ -127,7 +123,7 @@ func TestRelayBadChunkInvalid(t *testing.T) {
 	}
 	defer relay.Close()
 
-	relay.AttachPeer("peerA", ssTestStats("peerA"))
+	relay.AttachPeer("peerA")
 	chunkID := &ChunkIdent{Index: 0}
 	v := relay.VerifyChunk("peerA", chunkID, []byte("corrupted"))
 	if v != broadcast.VerdictInvalid {
@@ -147,7 +143,7 @@ func TestRoutingUpdateReturnsCancelHandles(t *testing.T) {
 	}
 	defer relay.Close()
 
-	relay.AttachPeer("peerA", ssTestStats("peerA"))
+	relay.AttachPeer("peerA")
 
 	// Simulate in-flight send of chunk 1 to peerA.
 	ps := relay.peers["peerA"]
