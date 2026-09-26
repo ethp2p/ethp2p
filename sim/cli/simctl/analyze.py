@@ -226,14 +226,6 @@ def _int_str(v: float) -> str:
     return str(int(v))
 
 
-def _empty_msg() -> MessageStats:
-    return MessageStats()
-
-
-def _get_msg(r: RunStats, idx: int) -> MessageStats:
-    return r.messages.get(idx, _empty_msg())
-
-
 def _sanity_checks(results: list[RunStats], msg_size: int) -> list[tuple[bool, str]]:
     """Run sanity checks across all results, returning (passed, label) pairs."""
     checks: list[tuple[bool, str]] = []
@@ -301,7 +293,7 @@ def print_table(results: list[RunStats]) -> None:
         return f"{label:>{lw}}" + "".join(f"{v:>{col_w}}" for v in vals)
 
     def ms(r: RunStats, idx: int) -> MessageStats:
-        return _get_msg(r, idx)
+        return r.messages.get(idx, MessageStats())
 
     print(f"\n{hdr()}")
     print(sep())
