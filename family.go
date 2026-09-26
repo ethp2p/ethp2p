@@ -9,8 +9,8 @@ import (
 	"sync"
 
 	"github.com/ethp2p/ethp2p/enr"
-	"github.com/ethp2p/ethp2p/wire"
 	"github.com/ethp2p/ethp2p/transport"
+	"github.com/ethp2p/ethp2p/wire"
 )
 
 // ProtocolSpec registers one protocol of a Family.
@@ -153,12 +153,13 @@ func (f *Family) sharedWith(selectors []wire.Selector) bool {
 	return true
 }
 
-// addPeer queues a PeerUp for a new handle. The caller fills in
-// peer.delivery from the result.
+// addPeer initializes the handle before queuing PeerUp, which can be
+// consumed as soon as the family mutex is released.
 func (f *Family) addPeer(p *Peer) *peerDelivery {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	d := &peerDelivery{family: f, peer: p, queued: make(map[wire.Selector]int)}
+	p.delivery = d
 	d.schedule()
 	return d
 }

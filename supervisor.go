@@ -206,7 +206,6 @@ func (sup *peerSupervisor) attach(conn *transport.Conn) error {
 		ctx, cancel := context.WithCancel(context.Background())
 		peer := &Peer{ctx: ctx, cancel: cancel, id: id, sup: sup, family: family, conn: conn}
 		delivery := family.addPeer(peer)
-		peer.delivery = delivery
 		handles = append(handles, delivery)
 		for _, spec := range family.protocols {
 			routes[spec.Selector] = delivery

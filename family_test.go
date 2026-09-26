@@ -65,6 +65,29 @@ func TestFamilySharedOnlyWhenComplete(t *testing.T) {
 	}
 }
 
+func TestPeerUpHandleCanCloseImmediately(t *testing.T) {
+	f := &Family{wake: make(chan struct{}, 1)}
+	s := &Stack{peers: make(map[transport.PeerID]*peerSupervisor)}
+	sup := &peerSupervisor{stack: s, id: "remote", wake: make(chan struct{}, 1)}
+	s.peers[sup.id] = sup
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	f.addPeer(&Peer{ctx: ctx, cancel: cancel, sup: sup, family: f})
+
+	up, ok := f.Next()
+	if !ok || up.Kind != PeerUp {
+		t.Fatalf("first event = %+v, %v; want PeerUp", up, ok)
+	}
+	up.Peer.Close(wire.Refused)
+	if err := up.Peer.Context().Err(); err != context.Canceled {
+		t.Fatalf("peer context after Close = %v", err)
+	}
+	down, ok := f.Next()
+	if !ok || down.Kind != PeerDown || down.Code != wire.Refused {
+		t.Fatalf("second event = %+v, %v; want PeerDown Refused", down, ok)
+	}
+}
+
 func TestPeerCloseKeepsOtherFamily(t *testing.T) {
 	a, b := transporttest.NewEndpoint(t), transporttest.NewEndpoint(t)
 	left, right := newTestStack(t, a), newTestStack(t, b)
