@@ -1,8 +1,10 @@
 """Simulation runners for simnet and Shadow modes."""
 
 import gzip
+import secrets
 import shutil
 import subprocess
+import sys
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -18,9 +20,6 @@ from simctl.config import (
     save_config,
 )
 from simctl.manifest import (
-    format_dir_timestamp,
-    get_command_argv,
-    random_suffix,
     try_get_git_sha,
     utcnow_iso,
     write_json_atomic,
@@ -50,8 +49,8 @@ class RunResult:
 def get_run_dir(config: Config, base_dir: Path, mode: str) -> Path:
     """Generate a unique run directory name based on config and timestamp."""
     now = datetime.now()
-    timestamp = format_dir_timestamp(now)
-    suffix = random_suffix()
+    timestamp = f"{now.strftime('%Y%m%d-%H%M%S')}-{now.microsecond // 1_000:03d}"
+    suffix = secrets.token_hex(3)
     safe_name = config.name.replace(" ", "-").lower() if config.name else "run"
     return base_dir / f"run-{mode}-{timestamp}-{suffix}-{safe_name}"
 
@@ -322,7 +321,7 @@ def run_simulation(config: Config, output_dir: Path) -> RunResult:
         "status": "running",
         "started_at": started_at,
         "mode": mode,
-        "command": get_command_argv(),
+        "command": list(sys.argv),
         "cwd": str(Path.cwd()),
         "git_sha": git_sha,
         "paths": {"run_dir": str(run_dir.resolve())},
