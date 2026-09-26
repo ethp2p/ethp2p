@@ -5,7 +5,7 @@ go 1.27.0
 require (
 	github.com/decred/dcrd/dcrec/secp256k1/v4 v4.4.0
 	github.com/klauspost/reedsolomon v1.12.5
-	github.com/libp2p/go-libp2p v0.47.0
+	github.com/libp2p/go-libp2p v0.48.1-0.20260909103954-528ecd0d780d
 	github.com/libp2p/go-libp2p-pubsub v0.15.0
 	github.com/marcopolo/simnet v0.0.5
 	github.com/multiformats/go-multiaddr v0.16.1
@@ -104,5 +104,3 @@ require (
 	golang.org/x/tools v0.41.0 // indirect
 	lukechampine.com/blake3 v1.4.1 // indirect
 )
-
-replace github.com/libp2p/go-libp2p => ./ref/go-libp2p
