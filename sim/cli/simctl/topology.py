@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import random
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -33,21 +33,7 @@ class Topology:
     edges: list[Edge]
 
     def to_dict(self) -> dict:
-        return {
-            "nodes": [
-                {
-                    "num": n.num,
-                    "upload_bw_mbps": n.upload_bw_mbps,
-                    "download_bw_mbps": n.download_bw_mbps,
-                    "country": n.country,
-                }
-                for n in self.nodes
-            ],
-            "edges": [
-                {"source": e.source, "target": e.target, "latency_ms": e.latency_ms}
-                for e in self.edges
-            ],
-        }
+        return asdict(self)
 
     def save(self, path: Path) -> None:
         with open(path, "w") as f:
