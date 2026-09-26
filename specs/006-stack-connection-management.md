@@ -1,18 +1,24 @@
 # Stack connection management and shared QUIC lifetimes
 
-Status: partially implemented; see [Implementation status](#implementation-status).
+Status: historical proposal, superseded by [008](008-stack.md).
+The [implementation status](#implementation-status) below describes the reviewed 2026-09-08 baseline,
+not the current branch. See [`stack.go`](../stack.go) for the implemented APIs.
 
 This document describes the proposed evolution of `ethp2p.Stack` from a per-connection stream router
 into the owner of ethp2p connection management.
-It records the reasoning behind the proposal, the smallest fixes to the current patch,
-and the decisions that still need implementation evidence.
+It records the reasoning behind the proposal, the smallest fixes to the reviewed patch,
+and the decisions that needed implementation evidence at that baseline.
 
 The source baseline is commit `a0815c57`, compared with `main` at `b027eb51`.
 Runtime observations below come from the review of that commit on 2026-09-08.
-Proposed types and methods are sketches.
-They are not existing APIs, and omitted error handling must not be copied into an implementation.
+Proposed types and methods are sketches of the baseline design.
+Some now exist with different contracts; inspect the implementation before using them.
 
 ## Implementation status
+
+This section records what existed at commit `a0815c57`.
+`NewStack`, `Start`, `Connect`, `Disconnect`, the connection table, and connection IDs
+have since been implemented in [`stack.go`](../stack.go).
 
 Implemented:
 
@@ -39,7 +45,7 @@ Implemented:
 - Incoming SESS and CHUNK streams wait in bounded queues for the BCAST handshake.
   A failed handshake and queue overflow cancel the affected streams.
 
-Not yet implemented:
+Not yet implemented at the reviewed baseline:
 
 - Resetting streams already handed out when a view closes.
 - Outbound SESS stream admission that preserves CHUNK progress under stream-credit pressure.
@@ -65,11 +71,11 @@ Discovery, peer scoring, duty-aware selection,
 and automatic reconnection can then operate through the same connection-management methods.
 Those policies should not be prerequisites for correct connection cleanup.
 
-## What the patch does today
+## What the reviewed patch did
 
 The implementation spans four responsibilities:
 
-| Component | Current responsibility | Missing contract |
+| Component | Baseline responsibility | Contract proposed at the baseline |
 | --- | --- | --- |
 | `SharedTransport` | Owns the QUIC endpoint and publishes libp2p and ethp2p views | Tracking streams already handed to a view so they can be stopped before physical connection close |
 | `sharedConn` | Owns per-view cancellation, classifies bidirectional streams, and queues inbound streams | Completion tracking for streams already handed out |
@@ -77,13 +83,13 @@ The implementation spans four responsibilities:
 | `broadcast.Engine` | Tracks peers and channel subscriptions, and ignores cleanup from a replaced binding | Connection admission and lifetime remain with the application |
 | `broadcast.PeerConn` | Performs BCAST handshake and queues early SESS and CHUNK streams until it completes | Outbound SESS stream admission under stream-credit pressure |
 
-The application currently accepts or dials a connection and launches `Stack.ServeConn` itself.
-The simulation also retains raw connections for bandwidth accounting in `BroadcastNode.conns`.
+At the reviewed baseline, the application accepted or dialed a connection and launched
+`Stack.ServeConn` itself. The simulation retained raw connections for bandwidth accounting
+in `BroadcastNode.conns`.
 
 The baseline `Stack` had a wait group for active `ServeConn` calls.
-The current subsystem router has no connection table.
-It cannot list connections, select a connection for a peer, coalesce duplicate dials,
-or disconnect a specific peer.
+It had no connection table and could not list connections, select a connection for a peer,
+coalesce duplicate dials, or disconnect a specific peer.
 
 The relevant implementation files are:
 
@@ -127,7 +133,7 @@ The integration-tagged broadcast tests failed at compilation.
 Those passing results used the local patched libp2p checkout.
 A clean export of the commit could not build
 because `go.mod` replaces libp2p with the ignored `ref/go-libp2p` directory.
-That dependency limitation remains in the current checkout.
+The dependency limitation has since been resolved by pinning the libp2p branch in `go.mod`.
 
 The temporary reproduction tests were diagnostic artifacts outside the checkout.
 They are not part of this proposal's committed verification suite.
@@ -365,9 +371,8 @@ func (s *Stack) Init() error
 func (s *Stack) ServeConn(context.Context, transport.Conn) error
 ```
 
-The current `Stack` has since become a subsystem router with `Register`, `Notify`, `Next`,
-and the connection ownership API implemented in spec 008.
-The proposed connection ownership model still applies.
+The stack has since acquired the connection ownership API described in spec 008.
+The design below records its rationale; consult [`stack.go`](../stack.go) for current behavior.
 At the baseline, `Key` participated in stack validation while transport performed authentication.
 The proposed constructor derives identity from its endpoint:
 
