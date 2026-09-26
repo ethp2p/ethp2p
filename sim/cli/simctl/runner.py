@@ -291,27 +291,6 @@ def run_simnet_with_topology(
     return result
 
 
-def run_with_topology(
-    mode: str,
-    config: Config,
-    strat: StrategyConfig,
-    topology: Topology,
-    run_dir: Path,
-    parent_topology_path: Path,
-) -> subprocess.CompletedProcess[bytes]:
-    """Run simulation with a pre-generated topology, dispatching by mode."""
-    if mode == "simnet":
-        return run_simnet_with_topology(
-            config, strat, topology, run_dir, parent_topology_path
-        )
-    elif mode == "shadow":
-        return run_shadow_with_topology(
-            config, strat, topology, run_dir, parent_topology_path
-        )
-    else:
-        raise ValueError(f"Unknown mode: {mode!r}")
-
-
 def run_simulation(config: Config, output_dir: Path) -> RunResult:
     """Run all strategies in a config, sharing one topology."""
     started_at = utcnow_iso()
@@ -365,14 +344,13 @@ def run_simulation(config: Config, output_dir: Path) -> RunResult:
         strat_dir = strategies_dir / strat_dir_name
         strat_dir.mkdir(parents=True, exist_ok=True)
 
-        result = run_with_topology(
-            mode=mode,
-            config=config,
-            strat=strat,
-            topology=topology,
-            run_dir=strat_dir,
-            parent_topology_path=run_dir / "topology.json",
-        )
+        runner = {
+            "simnet": run_simnet_with_topology,
+            "shadow": run_shadow_with_topology,
+        }.get(mode)
+        if runner is None:
+            raise ValueError(f"Unknown mode: {mode!r}")
+        result = runner(config, strat, topology, strat_dir, run_dir / "topology.json")
 
         results.append(
             StrategyResult(
