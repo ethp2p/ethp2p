@@ -92,21 +92,6 @@ func (h *emitPlanner) Increment(id int) {
 	heap.Fix(h, idx)
 }
 
-// Contains reports whether the heap has an entry with the given ID.
-func (h *emitPlanner) Contains(id int) bool {
-	_, ok := h.idToIndex[id]
-	return ok
-}
-
-// Delete removes the entry with the given ID.
-func (h *emitPlanner) Delete(id int) {
-	idx, ok := h.idToIndex[id]
-	if !ok {
-		return
-	}
-	heap.Remove(h, idx)
-}
-
 // GetSent returns the Sent count for the given chunk ID.
 // Returns 0, false if the entry does not exist.
 func (h *emitPlanner) GetSent(id int) (int, bool) {

@@ -72,33 +72,6 @@ func TestChunkHeap_IncrementMissing(t *testing.T) {
 	}
 }
 
-func TestChunkHeap_Delete(t *testing.T) {
-	h := newEmitPlanner()
-	h.Insert(emitEntry{Idx: 0, Times: 1})
-	h.Insert(emitEntry{Idx: 1, Times: 2})
-	h.Insert(emitEntry{Idx: 2, Times: 3})
-
-	h.Delete(0)
-	if h.Len() != 2 {
-		t.Fatalf("Len = %d, want 2 after delete", h.Len())
-	}
-
-	ec, _ := h.Top()
-	if ec.Idx != 1 {
-		t.Fatalf("Top.Idx = %d, want 1 after deleting 0", ec.Idx)
-	}
-}
-
-func TestChunkHeap_DeleteMissing(t *testing.T) {
-	h := newEmitPlanner()
-	h.Insert(emitEntry{Idx: 0, Times: 1})
-	// Should not panic.
-	h.Delete(99)
-	if h.Len() != 1 {
-		t.Fatalf("Len = %d, want 1", h.Len())
-	}
-}
-
 func TestChunkHeap_InsertUpdate(t *testing.T) {
 	h := newEmitPlanner()
 	h.Insert(emitEntry{Idx: 0, Times: 5})
