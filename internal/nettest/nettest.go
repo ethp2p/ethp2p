@@ -293,9 +293,6 @@ func (n *Net) ConnInfo(t *testing.T, a, b *Node) ethp2p.ConnInfo {
 // Settle runs all currently runnable bubble goroutines to a durable block.
 func (n *Net) Settle() { synctest.Wait() }
 
-// Advance moves virtual time forward, then settles runnable work.
-func (n *Net) Advance(d time.Duration) { time.Sleep(d); synctest.Wait() }
-
 // Trace returns the shared event recorder.
 func (n *Net) Trace() *Recorder { return n.recorder }
 
