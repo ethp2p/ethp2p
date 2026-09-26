@@ -438,10 +438,10 @@ func TestDecodeKeepsArbitraryRLPValues(t *testing.T) {
 func TestDecodeSignRoundTripRandomEntries(t *testing.T) {
 	random := rand.New(rand.NewSource(778))
 	key := examplePrivateKey(t)
-	for i := 0; i < 60; i++ {
+	for i := range 60 {
 		pairs := make([]Pair, 0, 7)
 		count := random.Intn(6) + 1
-		for j := 0; j < count; j++ {
+		for j := range count {
 			value := make([]byte, random.Intn(16))
 			_, _ = random.Read(value)
 			pairs = append(pairs, BytesEntry(fmt.Sprintf("custom-%02d-%02d", i, j)).Set(value))

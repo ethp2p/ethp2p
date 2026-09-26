@@ -58,8 +58,7 @@ func TestVerifyLeavesSlotEmptyOnMismatch(t *testing.T) {
 
 	raw := theirs.config.Certificates[0].Certificate[0]
 	err = config.VerifyPeerCertificate([][]byte{raw}, nil)
-	var mismatch ErrPeerMismatch
-	if !errors.As(err, &mismatch) {
+	if _, ok := errors.AsType[ErrPeerMismatch](err); !ok {
 		t.Fatalf("verify error = %v, want ErrPeerMismatch", err)
 	}
 	if slot.key != nil {

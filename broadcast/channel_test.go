@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"maps"
 	"sync"
 	"testing"
 	"testing/synctest"
@@ -83,9 +84,7 @@ type decodeOnTakeStrategy struct {
 
 func newDecodeOnTakeStrategy() *decodeOnTakeStrategy {
 	return &decodeOnTakeStrategy{
-		mockStrategy: mockStrategy{
-			takeVerdict: VerdictAccepted,
-		},
+		takeVerdict: VerdictAccepted,
 	}
 }
 
@@ -237,12 +236,8 @@ func (ps *pushingStrategy) snapshot() (pushCount, sentOK map[transport.PeerID]in
 	defer ps.mu.Unlock()
 	pc := make(map[transport.PeerID]int, len(ps.pushCount))
 	so := make(map[transport.PeerID]int, len(ps.sentOK))
-	for k, v := range ps.pushCount {
-		pc[k] = v
-	}
-	for k, v := range ps.sentOK {
-		so[k] = v
-	}
+	maps.Copy(pc, ps.pushCount)
+	maps.Copy(so, ps.sentOK)
 	return pc, so
 }
 

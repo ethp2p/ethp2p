@@ -26,7 +26,7 @@ func TestCreatorDepartureReviewUnsubscribedCreatorDeparture(t *testing.T) {
 			tr.handle(<-inbox)
 		}
 	}
-	for i := 0; i < 20; i++ {
+	for i := range 20 {
 		p := newPeerConn(e, context.Background(), "same-peer", nil)
 		e.handlePeerHandshake(engineEvent{peer: p, channels: []ChannelID{tr.id}})
 		drain()
@@ -57,7 +57,7 @@ func TestCreatorDepartureReviewRetirementChurn(t *testing.T) {
 	defer p.Close()
 	tr := newTestChannel(make(chan channelEvent, 2048))
 	var opened []*session[*testChunk, *testRouting]
-	for i := 0; i < 100; i++ {
+	for i := range 100 {
 		s := tr.newSession(MessageID(fmt.Sprint(i)), nil, false, newMockStrategy())
 		s.handlePeerAttached(p)
 		p.lifecycle.pop() // control owned the open before it stalled
@@ -80,7 +80,7 @@ func TestCreatorDepartureReviewRetirementChurn(t *testing.T) {
 		return n
 	}
 	before := count()
-	for i := 0; i < 1000; i++ {
+	for i := range 1000 {
 		s := tr.newSession(MessageID(fmt.Sprint(i%100)), nil, false, newMockStrategy())
 		s.handlePeerAttached(p)
 		s.notifyPeersComplete()
@@ -117,7 +117,7 @@ func TestCreatorDepartureReviewCreatorCapAcrossChannels(t *testing.T) {
 	other := testPeer("other")
 	defer other.Close()
 	var channels []*Channel[*testChunk, *testRouting, *testPreamble]
-	for i := 0; i < 20; i++ {
+	for i := range 20 {
 		tr := newTestChannel(make(chan channelEvent, 32))
 		tr.id = ChannelID(fmt.Sprint(i))
 		tr.sessions = make(map[MessageID]*session[*testChunk, *testRouting])

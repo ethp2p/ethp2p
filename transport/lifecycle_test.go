@@ -205,8 +205,8 @@ func TestClosedEthp2pViewResetsNewUniStream(t *testing.T) {
 	}
 	select {
 	case <-stream.Context().Done():
-		var reset *quic.StreamError
-		if !errors.As(context.Cause(stream.Context()), &reset) || !reset.Remote || uint64(reset.ErrorCode) != wire.Closing.Wire() {
+		reset, ok := errors.AsType[*quic.StreamError](context.Cause(stream.Context()))
+		if !ok || !reset.Remote || uint64(reset.ErrorCode) != wire.Closing.Wire() {
 			t.Fatalf("peer stream cause = %v, want remote wire 20", context.Cause(stream.Context()))
 		}
 	case <-time.After(time.Second):

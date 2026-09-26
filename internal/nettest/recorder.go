@@ -3,6 +3,7 @@ package nettest
 import (
 	"errors"
 	"fmt"
+	"maps"
 	"os"
 	"reflect"
 	"slices"
@@ -80,9 +81,7 @@ func (r *Recorder) timeline() string {
 	var b strings.Builder
 	r.mu.Lock()
 	names := make(map[string]string, len(r.peerNames))
-	for id, name := range r.peerNames {
-		names[id] = name
-	}
+	maps.Copy(names, r.peerNames)
 	r.mu.Unlock()
 	for _, rec := range r.Records() {
 		fmt.Fprintf(&b, "+%10s  %s  %s\n", rec.At, rec.Node, renderEvent(rec.Event, names))

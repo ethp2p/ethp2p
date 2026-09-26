@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net"
 	"net/netip"
+	"slices"
 	"strconv"
 	"sync"
 	"testing"
@@ -59,10 +60,10 @@ func Run(t *testing.T, fn func(t *testing.T, n *Net)) {
 			for _, node := range n.nodes {
 				node.releaseGates()
 			}
-			for i := len(n.nodes) - 1; i >= 0; i-- {
-				n.nodes[i].Close()
-				if err := n.nodes[i].closeError(); err != nil {
-					t.Errorf("close node %s: %v", n.nodes[i].Name, err)
+			for _, v := range slices.Backward(n.nodes) {
+				v.Close()
+				if err := v.closeError(); err != nil {
+					t.Errorf("close node %s: %v", v.Name, err)
 				}
 			}
 			n.sim.Close()

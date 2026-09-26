@@ -33,7 +33,7 @@ func TestTraceWriterWithOptions_WritesDecoderMetadata(t *testing.T) {
 	}
 
 	var hdr traceHeader
-	line := strings.Split(strings.TrimSpace(buf.String()), "\n")[0]
+	line, _, _ := strings.Cut(strings.TrimSpace(buf.String()), "\n")
 	if err := json.Unmarshal([]byte(line), &hdr); err != nil {
 		t.Fatal(err)
 	}
@@ -62,40 +62,37 @@ func TestGossipsubTrace_ProducesExpectedEvents(t *testing.T) {
 
 	trace := newGossipsubTrace(0, tw)
 	channel := gossipsubChannelID
-	topicPtr := func(s string) *string { return &s }
 
 	trace.Trace(&pubsubpb.TraceEvent{
 		Type: pubsubpb.TraceEvent_ADD_PEER.Enum(),
 		AddPeer: &pubsubpb.TraceEvent_AddPeer{
 			PeerID: []byte("peer-b"),
-			Proto:  topicPtr("/meshsub/1.1.0"),
+			Proto:  new("/meshsub/1.1.0"),
 		},
 	})
 	trace.Trace(&pubsubpb.TraceEvent{
 		Type: pubsubpb.TraceEvent_JOIN.Enum(),
 		Join: &pubsubpb.TraceEvent_Join{
-			Topic: topicPtr(channel),
+			Topic: new(channel),
 		},
 	})
 
 	trace.SendRPC(&pubsub.RPC{
-		RPC: pubsubpb.RPC{
-			Publish: []*pubsubpb.Message{{
-				Data:  encodeGossipsubMessage("msg-0", []byte("payload")),
-				Topic: topicPtr(channel),
-			}},
-			Control: &pubsubpb.ControlMessage{
-				Ihave:     []*pubsubpb.ControlIHave{{TopicID: topicPtr(channel), MessageIDs: []string{"msg-0"}}},
-				Iwant:     []*pubsubpb.ControlIWant{{MessageIDs: []string{"msg-0"}}},
-				Idontwant: []*pubsubpb.ControlIDontWant{{MessageIDs: []string{"msg-0"}}},
-			},
+		Publish: []*pubsubpb.Message{{
+			Data:  encodeGossipsubMessage("msg-0", []byte("payload")),
+			Topic: new(channel),
+		}},
+		Control: &pubsubpb.ControlMessage{
+			Ihave:     []*pubsubpb.ControlIHave{{TopicID: new(channel), MessageIDs: []string{"msg-0"}}},
+			Iwant:     []*pubsubpb.ControlIWant{{MessageIDs: []string{"msg-0"}}},
+			Idontwant: []*pubsubpb.ControlIDontWant{{MessageIDs: []string{"msg-0"}}},
 		},
 	}, peer.ID("peer-b"))
 
 	trace.ValidateMessage(&pubsub.Message{
 		Message: &pubsubpb.Message{
 			Data:  encodeGossipsubMessage("msg-0", []byte("payload")),
-			Topic: topicPtr(channel),
+			Topic: new(channel),
 		},
 		ReceivedFrom: peer.ID("peer-b"),
 	})
@@ -106,7 +103,7 @@ func TestGossipsubTrace_ProducesExpectedEvents(t *testing.T) {
 			ReceivedFrom: []byte("peer-b"),
 			Meta: &pubsubpb.TraceEvent_RPCMeta{
 				Control: &pubsubpb.TraceEvent_ControlMeta{
-					Ihave:     []*pubsubpb.TraceEvent_ControlIHaveMeta{{Topic: topicPtr(channel), MessageIDs: [][]byte{[]byte("msg-0")}}},
+					Ihave:     []*pubsubpb.TraceEvent_ControlIHaveMeta{{Topic: new(channel), MessageIDs: [][]byte{[]byte("msg-0")}}},
 					Iwant:     []*pubsubpb.TraceEvent_ControlIWantMeta{{MessageIDs: [][]byte{[]byte("msg-0")}}},
 					Idontwant: []*pubsubpb.TraceEvent_ControlIDontWantMeta{{MessageIDs: [][]byte{[]byte("msg-0")}}},
 				},
@@ -117,7 +114,7 @@ func TestGossipsubTrace_ProducesExpectedEvents(t *testing.T) {
 		Type: pubsubpb.TraceEvent_DELIVER_MESSAGE.Enum(),
 		DeliverMessage: &pubsubpb.TraceEvent_DeliverMessage{
 			ReceivedFrom: []byte("peer-b"),
-			Topic:        topicPtr(channel),
+			Topic:        new(channel),
 			MessageID:    []byte("msg-0"),
 		},
 	})
@@ -125,7 +122,7 @@ func TestGossipsubTrace_ProducesExpectedEvents(t *testing.T) {
 	trace.UndeliverableMessage(&pubsub.Message{
 		Message: &pubsubpb.Message{
 			Data:  encodeGossipsubMessage("msg-0", []byte("payload")),
-			Topic: topicPtr(channel),
+			Topic: new(channel),
 		},
 	})
 

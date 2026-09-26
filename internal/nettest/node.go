@@ -127,8 +127,8 @@ func (nd *Node) Close() {
 		// Stop stack delivery before channels and engine; the shared endpoint
 		// remains alive until every protocol owner has released its work.
 		nd.recordClose(nd.Stack.Close())
-		for i := len(nd.channelOrder) - 1; i >= 0; i-- {
-			nd.channels[nd.channelOrder[i]].Close()
+		for _, v := range slices.Backward(nd.channelOrder) {
+			nd.channels[v].Close()
 		}
 		nd.recordClose(nd.Engine.Close())
 		nd.recordClose(nd.shared.Close())
