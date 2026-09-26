@@ -1,6 +1,7 @@
 package ethp2p
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"net"
@@ -10,8 +11,8 @@ import (
 	"time"
 
 	"github.com/ethp2p/ethp2p/enr"
-	"github.com/ethp2p/ethp2p/wire"
 	"github.com/ethp2p/ethp2p/transport"
+	"github.com/ethp2p/ethp2p/wire"
 )
 
 // ErrStackClosed reports Start or Connect after stack closure.
@@ -278,13 +279,7 @@ func (s *Stack) Connections() []ConnInfo {
 		}
 	}
 	slices.SortFunc(infos, func(a, b ConnInfo) int {
-		if a.ID < b.ID {
-			return -1
-		}
-		if a.ID > b.ID {
-			return 1
-		}
-		return 0
+		return cmp.Compare(a.ID, b.ID)
 	})
 	return infos
 }
