@@ -451,9 +451,6 @@ func (c *sharedConn) startDispatchers() {
 	c.wg.Go(c.drainUni)
 }
 
-// remotePeerID returns the identity authenticated for the remote endpoint.
-func (c *sharedConn) remotePeerID() PeerID { return c.remote }
-
 // closeSide releases one view and closes the connection when both are released.
 func (c *sharedConn) closeSide(want side, code quic.ApplicationErrorCode, reason string) {
 	switch want {

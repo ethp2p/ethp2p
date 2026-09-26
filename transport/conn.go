@@ -43,7 +43,7 @@ func openFailureCode(ctx context.Context, err error) wire.Code {
 }
 
 // RemotePeerID returns the identity authenticated for the remote endpoint.
-func (c *Conn) RemotePeerID() PeerID { return c.remotePeerID() }
+func (c *Conn) RemotePeerID() PeerID { return c.remote }
 
 func (c *Conn) Outbound() bool { return c.outbound }
 
