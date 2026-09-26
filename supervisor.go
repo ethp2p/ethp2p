@@ -282,12 +282,19 @@ func (sup *peerSupervisor) handleClosed() {
 	sup.dropView(wire.NoSharedProtocols, nil)
 }
 
-// updateRecord keeps the higher Seq; nil is ignored.
+// updateRecord keeps the higher Seq across concurrent admission and Connect.
+// Nil is ignored.
 func (sup *peerSupervisor) updateRecord(rec *enr.Record) {
 	if rec == nil {
 		return
 	}
-	if old := sup.record.Load(); old == nil || rec.Seq() > old.Seq() {
-		sup.record.Store(rec)
+	for {
+		old := sup.record.Load()
+		if old != nil && rec.Seq() <= old.Seq() {
+			return
+		}
+		if sup.record.CompareAndSwap(old, rec) {
+			return
+		}
 	}
 }
