@@ -231,7 +231,8 @@ sim/
 ├── trace_observer.go      # Trace-level observation
 ├── strategy_gossipsub.go  # Gossipsub node implementation
 ├── cmd/
-│   └── shadow/            # Shadow binary (--config, --node-num)
+│   ├── shadow/            # Shadow binary (--config, --node-num)
+│   └── simnet/            # simctl test binary (--config)
 └── cli/
     ├── simctl/            # Python CLI (config, runner, topology, experiment)
     └── data/
