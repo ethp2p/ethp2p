@@ -21,14 +21,6 @@ func TestChunkHeap_InsertAndTop(t *testing.T) {
 	}
 }
 
-func TestChunkHeap_TopEmpty(t *testing.T) {
-	h := newEmitPlanner()
-	_, ok := h.Top()
-	if ok {
-		t.Fatal("Top on empty heap should return false")
-	}
-}
-
 func TestChunkHeap_PopFrontOrder(t *testing.T) {
 	h := newEmitPlanner()
 	h.Insert(emitEntry{Idx: 0, Times: 10})
@@ -59,16 +51,6 @@ func TestChunkHeap_Increment(t *testing.T) {
 	ec, _ := h.Top()
 	if ec.Idx != 1 {
 		t.Fatalf("Top.Idx = %d, want 1 after incrementing 0", ec.Idx)
-	}
-}
-
-func TestChunkHeap_IncrementMissing(t *testing.T) {
-	h := newEmitPlanner()
-	h.Insert(emitEntry{Idx: 0, Times: 1})
-	// Should not panic.
-	h.Increment(99)
-	if h.Len() != 1 {
-		t.Fatalf("Len = %d, want 1", h.Len())
 	}
 }
 

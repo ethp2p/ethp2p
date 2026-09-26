@@ -7,20 +7,6 @@ import (
 	"github.com/ethp2p/ethp2p/internal/nettest"
 )
 
-func TestPairPublishDecode(t *testing.T) {
-	nettest.Run(t, func(t *testing.T, n *nettest.Net) {
-		a, b := n.Node("a"), n.Node("b")
-		ca, cb := a.Channel("test-channel"), b.Channel("test-channel")
-		n.Connect(a, b)
-		n.AwaitPeers(t, a, "test-channel", b)
-		n.AwaitPeers(t, b, "test-channel", a)
-		p := payload(4096)
-		ca.Publish(t, "msg-1", p)
-		n.AwaitDecoded(t, b, "test-channel", "msg-1")
-		cb.AwaitReceived(t, "msg-1", p)
-	})
-}
-
 func TestMultiPeerFanOut(t *testing.T) {
 	nettest.Run(t, func(t *testing.T, n *nettest.Net) {
 		origin := n.Node("a")

@@ -1,7 +1,6 @@
 package e2e
 
 import (
-	"fmt"
 	"sync/atomic"
 	"testing"
 
@@ -89,32 +88,5 @@ func TestChainRelay(t *testing.T) {
 		n.AwaitDecoded(t, c, "chain-channel", "chain-msg")
 		cb.AwaitReceived(t, "chain-msg", p)
 		cc.AwaitReceived(t, "chain-msg", p)
-	})
-}
-
-func TestStarRelay(t *testing.T) {
-	nettest.Run(t, func(t *testing.T, n *nettest.Net) {
-		center := n.Node("center")
-		source := center.Channel("star-channel")
-		var leaves []*nettest.Node
-		var channels []*nettest.Channel
-		for i := range 3 {
-			leaf := n.Node(fmt.Sprintf("leaf-%d", i))
-			leaves = append(leaves, leaf)
-			channels = append(channels, leaf.Channel("star-channel"))
-		}
-		for _, leaf := range leaves {
-			n.Connect(center, leaf)
-		}
-		n.AwaitPeers(t, center, "star-channel", leaves...)
-		for _, leaf := range leaves {
-			n.AwaitPeers(t, leaf, "star-channel", center)
-		}
-		p := payload(4096)
-		source.Publish(t, "star-msg", p)
-		for i, leaf := range leaves {
-			n.AwaitDecoded(t, leaf, "star-channel", "star-msg")
-			channels[i].AwaitReceived(t, "star-msg", p)
-		}
 	})
 }

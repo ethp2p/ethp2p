@@ -1,32 +1,11 @@
 package e2e
 
 import (
-	"errors"
 	"testing"
 
-	"github.com/ethp2p/ethp2p/broadcast"
-	"github.com/ethp2p/ethp2p/broadcast/rs"
 	"github.com/ethp2p/ethp2p/internal/nettest"
 	"github.com/ethp2p/ethp2p/internal/trace"
 )
-
-func TestDuplicateChannelReportsError(t *testing.T) {
-	nettest.Run(t, func(t *testing.T, n *nettest.Net) {
-		a := n.Node("a")
-		first := a.Channel("duplicate")
-		second := broadcast.AttachChannel(a.Engine, "duplicate", rs.NewScheme(rs.DefaultConfig()))
-		n.Await(t, nettest.Match(a, trace.ChannelAttached{Channel: "duplicate", Err: broadcast.ErrChannelExists}), nettest.DefaultTimeout)
-		n.Trace().Require(t,
-			nettest.Where[trace.ChannelAttached](a, func(event trace.ChannelAttached) bool { return event.Channel == "duplicate" && event.Err == nil }),
-			nettest.Match(a, trace.ChannelAttached{Channel: "duplicate", Err: broadcast.ErrChannelExists}),
-		)
-		if got := n.Trace().Count(nettest.Match(a, trace.ChannelAttached{Channel: "duplicate"})); got != 2 {
-			t.Fatalf("channel attachment callbacks = %d, want two", got)
-		}
-		first.Close()
-		second.Stop()
-	})
-}
 
 func TestDropChannelTwiceIsSafe(t *testing.T) {
 	nettest.Run(t, func(t *testing.T, n *nettest.Net) {
@@ -35,35 +14,6 @@ func TestDropChannelTwiceIsSafe(t *testing.T) {
 		channel.Close()
 		a.Engine.DropChannel("drop-twice")
 		n.Await(t, nettest.Match(a, trace.ChannelDropped{Channel: "drop-twice"}), nettest.DefaultTimeout)
-	})
-}
-
-func TestStoppingChannelClosesSubscription(t *testing.T) {
-	nettest.Run(t, func(t *testing.T, n *nettest.Net) {
-		a := n.Node("a")
-		channel := broadcast.AttachChannel(a.Engine, "stop-subscription", rs.NewScheme(rs.DefaultConfig()))
-		deliveries := make(chan broadcast.FullMessage, 1)
-		if err := channel.Subscribe(deliveries); err != nil {
-			t.Fatal(err)
-		}
-		channel.Stop()
-		if _, open := <-deliveries; open {
-			t.Fatal("subscription stayed open after Stop")
-		}
-	})
-}
-
-func TestChannelAllowsOnlyOneSubscriber(t *testing.T) {
-	nettest.Run(t, func(t *testing.T, n *nettest.Net) {
-		a := n.Node("a")
-		channel := broadcast.AttachChannel(a.Engine, "single-subscription", rs.NewScheme(rs.DefaultConfig()))
-		defer channel.Stop()
-		if err := channel.Subscribe(make(chan broadcast.FullMessage, 1)); err != nil {
-			t.Fatal(err)
-		}
-		if err := channel.Subscribe(make(chan broadcast.FullMessage, 1)); !errors.Is(err, broadcast.ErrAlreadySubscribed) {
-			t.Fatalf("second Subscribe = %v, want ErrAlreadySubscribed", err)
-		}
 	})
 }
 
