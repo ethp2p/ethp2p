@@ -100,7 +100,7 @@ func TestStreamEndPolicyUsesWireCodes(t *testing.T) {
 				}
 				raw := &wireSendProbe{in: in}
 				key := sessionKey{channelID: "c", messageID: "m"}
-				(&PeerConn{}).handleCtrl(peerCloseStream{channelID: key.channelID, messageID: key.messageID}, map[sessionKey]*peerSessionState{
+				(&PeerConn{}).handleCtrl(peerCloseStream(key), map[sessionKey]*peerSessionState{
 					key: {sessOut: stream},
 				}, make(chan slotUpdate, 1))
 				return nil, raw
