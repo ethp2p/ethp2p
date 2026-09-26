@@ -89,6 +89,7 @@ func (channelCreatorDeparted) channelEvent() {}
 // channelSessionDisposed is sent by a session when it has no remaining work.
 type channelSessionDisposed struct {
 	messageID MessageID
+	session   any // ignore stale requests after the message ID is reused
 }
 
 // channelPeerChange notifies the channel of a topology mutation.

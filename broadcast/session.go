@@ -635,26 +635,35 @@ func (s *session[CI, R]) handlePeerCompleted(peer transport.PeerID) {
 // Sessions with no peers ever attached (e.g. relay decoded from buffered
 // chunks before any peer joined) are left for TTL cleanup.
 func (s *session[CI, R]) maybeDispose() {
-	if !s.everHadPeers {
+	if !s.disposable() {
 		return
+	}
+	select {
+	case s.channelInbox <- channelSessionDisposed{messageID: s.messageID, session: s}:
+	case <-s.channelDone:
+	default:
+	}
+}
+
+// disposable is checked again by the channel when it receives the queued
+// disposal request, since a peer may have reattached in the meantime.
+func (s *session[CI, R]) disposable() bool {
+	if !s.everHadPeers {
+		return false
 	}
 	decoded := s.stage >= stageReconstructed
 	if !decoded {
 		if len(s.peers) > 0 {
-			return
+			return false
 		}
 	} else {
 		for _, sp := range s.peers {
 			if !sp.completed {
-				return
+				return false
 			}
 		}
 	}
-	select {
-	case s.channelInbox <- channelSessionDisposed{messageID: s.messageID}:
-	case <-s.channelDone:
-	default:
-	}
+	return true
 }
 
 // drainPolls emits routing first so peers learn our state before

@@ -83,6 +83,38 @@ func TestLifecycleDuplicateHandshakeAndBound(t *testing.T) {
 	}
 }
 
+func TestSessionSurvivesQueuedDisposalAfterPeerReturns(t *testing.T) {
+	p := testPeer("peer")
+	defer p.Close()
+	inbox := make(chan channelEvent, 4)
+	tr := newTestChannel(inbox)
+	tr.members = make(map[transport.PeerID]*PeerConn)
+	s := tr.newSession("message", nil, false, newMockStrategy())
+	tr.sessions = map[MessageID]*session[*testChunk, *testRouting]{s.messageID: s}
+	defer func() {
+		if tr.sessions[s.messageID] == s {
+			_ = s.Close()
+		}
+	}()
+
+	tr.handle(channelPeerChange{peerID: p.id, peerRef: p})
+	tr.handle(channelPeerChange{peerID: p.id})
+	if len(inbox) != 1 {
+		t.Fatalf("last peer departure queued %d disposal events, want 1", len(inbox))
+	}
+	tr.handle(channelPeerChange{peerID: p.id, peerRef: p})
+	tr.handle(<-inbox)
+	if tr.sessions[s.messageID] != s || s.peers[p.id] == nil {
+		t.Fatal("queued disposal closed session after peer returned")
+	}
+
+	tr.handle(channelPeerChange{peerID: p.id})
+	tr.handle(<-inbox)
+	if tr.sessions[s.messageID] != nil {
+		t.Fatal("session remained after final peer departure")
+	}
+}
+
 func TestCapacityReviewLifecycleTopologyBound(t *testing.T) {
 	for _, churn := range []bool{false, true} {
 		t.Run(map[bool]string{false: "duplicate_subscribe", true: "unsubscribe_resubscribe"}[churn], func(t *testing.T) {

@@ -264,7 +264,10 @@ func (tr *Channel[CI, R, P]) handle(evt channelEvent) {
 	case channelPublish:
 		tr.handlePublish(e)
 	case channelSessionDisposed:
-		tr.disposeSession(e.messageID, "all_peers_done")
+		// Peer topology can change while this event waits in the inbox.
+		if sess := tr.sessions[e.messageID]; sess != nil && e.session == sess && sess.disposable() {
+			tr.disposeSession(e.messageID, "all_peers_done")
+		}
 	case channelChunkSent:
 		if sess := tr.sessions[e.messageID]; sess != nil {
 			sess.handleSendComplete(e.peerID, e.handle, e.err, e.size)
