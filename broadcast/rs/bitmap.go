@@ -45,15 +45,6 @@ func (b Bitmap) OnesCount() int {
 	return count
 }
 
-func (b Bitmap) IsZero() bool {
-	for i := range b {
-		if b[i] != 0 {
-			return false
-		}
-	}
-	return true
-}
-
 func (b Bitmap) Clone() Bitmap {
 	clone := make(Bitmap, len(b))
 	copy(clone, b)
@@ -63,12 +54,6 @@ func (b Bitmap) Clone() Bitmap {
 func (b Bitmap) Or(other Bitmap) {
 	for i := range min(len(b), len(other)) {
 		b[i] |= other[i]
-	}
-}
-
-func (b Bitmap) And(other Bitmap) {
-	for i := range min(len(b), len(other)) {
-		b[i] &= other[i]
 	}
 }
 
