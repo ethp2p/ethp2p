@@ -4,7 +4,7 @@ import (
 	"context"
 	"sync"
 
-	"github.com/ethp2p/ethp2p/transport"
+	"github.com/ethp2p/ethp2p/legacy/transport"
 )
 
 const defaultMaxInboundChunkStreams = 5

@@ -11,8 +11,8 @@ import (
 	"sync"
 
 	"github.com/ethp2p/ethp2p/broadcast"
-	"github.com/ethp2p/ethp2p/transport"
-	quicTransport "github.com/ethp2p/ethp2p/transport/quic"
+	"github.com/ethp2p/ethp2p/legacy/transport"
+	quicTransport "github.com/ethp2p/ethp2p/legacy/transport/quic"
 	"github.com/quic-go/quic-go"
 )
 

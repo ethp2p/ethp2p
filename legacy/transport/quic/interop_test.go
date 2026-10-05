@@ -13,7 +13,7 @@ import (
 	"testing"
 	"time"
 
-	quictls "github.com/ethp2p/ethp2p/transport/quic/tls"
+	quictls "github.com/ethp2p/ethp2p/legacy/transport/quic/tls"
 	"github.com/libp2p/go-libp2p"
 	"github.com/libp2p/go-libp2p/core/crypto"
 	"github.com/libp2p/go-libp2p/core/host"

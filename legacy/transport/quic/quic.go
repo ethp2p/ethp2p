@@ -6,8 +6,8 @@ import (
 	"context"
 	"errors"
 
-	"github.com/ethp2p/ethp2p/transport"
-	quictls "github.com/ethp2p/ethp2p/transport/quic/tls"
+	"github.com/ethp2p/ethp2p/legacy/transport"
+	quictls "github.com/ethp2p/ethp2p/legacy/transport/quic/tls"
 	"github.com/quic-go/quic-go"
 )
 

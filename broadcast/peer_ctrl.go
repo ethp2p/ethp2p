@@ -4,9 +4,9 @@ import (
 	"time"
 
 	bcastpb "github.com/ethp2p/ethp2p/broadcast/pb"
+	"github.com/ethp2p/ethp2p/legacy/transport"
 	"github.com/ethp2p/ethp2p/protocol"
 	protopb "github.com/ethp2p/ethp2p/protocol/pb"
-	"github.com/ethp2p/ethp2p/transport"
 )
 
 const chunkWriteTimeout = 5 * time.Second

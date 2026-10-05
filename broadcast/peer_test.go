@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/ethp2p/ethp2p/transport"
+	"github.com/ethp2p/ethp2p/legacy/transport"
 )
 
 type uniHandshakeTransport struct {

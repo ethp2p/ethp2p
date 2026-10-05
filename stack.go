@@ -8,7 +8,7 @@ import (
 	"sync/atomic"
 
 	"github.com/ethp2p/ethp2p/broadcast"
-	"github.com/ethp2p/ethp2p/transport"
+	"github.com/ethp2p/ethp2p/legacy/transport"
 )
 
 // PrivKey is the private-key capability the stack requires. libp2p's
