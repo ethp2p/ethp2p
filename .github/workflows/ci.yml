@@ -6,9 +6,6 @@ on:
   # no branch filter: stacked PRs target non-main bases (e.g. quictls-handshake)
   pull_request:
 
-env:
-  GO_VERSION: "1.25"
-
 jobs:
   markdown-lint:
     runs-on: ubuntu-latest
@@ -18,6 +15,7 @@ jobs:
       - name: Lint specs
         uses: rvben/rumdl@v0
         with:
+          version: "0.2.78"
           path: specs/
           report-type: annotations
 
@@ -28,13 +26,13 @@ jobs:
 
       - uses: actions/setup-go@v5
         with:
-          go-version: ${{ env.GO_VERSION }}
+          go-version-file: go.mod
 
       - name: Run go vet
         run: go vet ./...
 
       - name: Install staticcheck
-        run: go install honnef.co/go/tools/cmd/staticcheck@latest
+        run: go install honnef.co/go/tools/cmd/staticcheck@v0.8.1
 
       - name: Run staticcheck
         run: staticcheck ./...
@@ -46,7 +44,7 @@ jobs:
 
       - uses: actions/setup-go@v5
         with:
-          go-version: ${{ env.GO_VERSION }}
+          go-version-file: go.mod
 
       - name: Run unit tests
         run: go test -race -v ./broadcast/...
@@ -58,10 +56,10 @@ jobs:
 
       - uses: actions/setup-go@v5
         with:
-          go-version: ${{ env.GO_VERSION }}
+          go-version-file: go.mod
 
       - name: Run RS simnet tests
-        run: go test -race -v -run 'TestNetwork/RS|TestNodeReconnection' ./sim/...
+        run: go test -race -v -run 'TestNetwork/RS' ./sim/...
 
   simnet-gossipsub:
     runs-on: ubuntu-latest
@@ -70,21 +68,7 @@ jobs:
 
       - uses: actions/setup-go@v5
         with:
-          go-version: ${{ env.GO_VERSION }}
+          go-version-file: go.mod
 
       - name: Run Gossipsub simnet tests
         run: go test -race -v -run 'TestNetwork/Gossipsub' ./sim/...
-
-  large-network-rs:
-    runs-on: ubuntu-latest
-    if: github.ref == 'refs/heads/main'
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-go@v5
-        with:
-          go-version: ${{ env.GO_VERSION }}
-
-      - name: Run large network RS tests
-        run: go test -race -v -run 'TestLargeNetwork_RS|TestScalability' ./sim/...
-

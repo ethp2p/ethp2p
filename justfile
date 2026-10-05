@@ -26,15 +26,11 @@ specs:
 
 # Generate a topology
 topology n="10" d="4" seed="42" out="topology.json":
-    simctl topology -n {{n}} -d {{d}} -s {{seed}} -o {{out}}
+    uv run --project sim/cli simctl topology -n {{n}} -d {{d}} -s {{seed}} -o {{out}}
 
 # Run simnet tests
 test-simnet:
     go test ./sim/... -v
-
-# Run simnet tests (short mode)
-test-simnet-short:
-    go test ./sim/... -v -short
 
 # Run a Shadow simulation
 shadow config="config.yaml":
@@ -46,7 +42,7 @@ build-simnode:
 
 # Generate default config
 init-config out="config.yaml":
-    simctl init -o {{out}}
+    uv run --project sim/cli simctl init -o {{out}}
 
 # Open analysis notebook
 analyze:

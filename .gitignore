@@ -6,26 +6,16 @@
 # Coverage files
 coverage.out
 
-# Go cache
-.gocache/
-
-# ping and server latencies
-scripts/*.csv
-
 # qlogs
 */*.sqlog
 
 # shadow runs
 sim/cli/runs/
-experiments/
-
-# built binaries
-/simnode
 runs/
 
+# built binaries
 sim/simcfg/simnode/simnode
 
-.work/
 ref/
 
 .claude/
