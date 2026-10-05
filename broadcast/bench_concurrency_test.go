@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/ethp2p/ethp2p/transport"
+	"github.com/ethp2p/ethp2p/legacy/transport"
 )
 
 // BenchmarkSessionDispatchFanout measures the throughput of the session

@@ -7,7 +7,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/ethp2p/ethp2p/transport"
+	"github.com/ethp2p/ethp2p/legacy/transport"
 )
 
 const maxConcurrentReads = 64

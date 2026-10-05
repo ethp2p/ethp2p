@@ -17,8 +17,8 @@ import (
 
 	"github.com/ethp2p/ethp2p/broadcast"
 	"github.com/ethp2p/ethp2p/broadcast/rs"
-	"github.com/ethp2p/ethp2p/transport"
-	quicpkg "github.com/ethp2p/ethp2p/transport/quic"
+	"github.com/ethp2p/ethp2p/legacy/transport"
+	quicpkg "github.com/ethp2p/ethp2p/legacy/transport/quic"
 	"github.com/quic-go/quic-go"
 )
 

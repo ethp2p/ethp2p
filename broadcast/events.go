@@ -4,7 +4,7 @@ import (
 	"context"
 
 	bcastpb "github.com/ethp2p/ethp2p/broadcast/pb"
-	"github.com/ethp2p/ethp2p/transport"
+	"github.com/ethp2p/ethp2p/legacy/transport"
 )
 
 // ---------------------------------------------------------------------------

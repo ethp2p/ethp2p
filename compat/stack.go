@@ -5,7 +5,7 @@ import (
 	"fmt"
 
 	"github.com/ethp2p/ethp2p"
-	"github.com/ethp2p/ethp2p/transport"
+	"github.com/ethp2p/ethp2p/legacy/transport"
 	"github.com/libp2p/go-libp2p/core/crypto"
 	"github.com/libp2p/go-libp2p/core/peer"
 )

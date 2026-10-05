@@ -5,7 +5,7 @@ import (
 	"io"
 	"time"
 
-	"github.com/ethp2p/ethp2p/transport"
+	"github.com/ethp2p/ethp2p/legacy/transport"
 )
 
 // testTransport implements transport.Conn for in-process testing.
