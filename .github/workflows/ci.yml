@@ -46,8 +46,9 @@ jobs:
         with:
           go-version-file: go.mod
 
+      # TestNetwork runs per strategy in the simnet jobs; everything else runs here.
       - name: Run unit tests
-        run: go test -race -v ./broadcast/...
+        run: go test -race -skip '^TestNetwork$' ./...
 
   simnet-rs:
     runs-on: ubuntu-latest
