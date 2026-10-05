@@ -64,10 +64,19 @@ func newLibp2pHost(t *testing.T, keyType string) (host.Host, string) {
 	require.True(t, ok, "unknown key type %q", keyType)
 	sk, err := gen()
 	require.NoError(t, err)
-	h, err := libp2p.New(libp2p.Identity(sk))
+	h := newLoopbackHost(t, sk)
+	return h, dialAddr(t, quicAddrOf(t, h))
+}
+
+// newLoopbackHost starts a libp2p host listening only on loopback QUIC. On
+// every interface, which address comes first depends on the machine, and
+// some (VPN, CGNAT) do not answer a local dial.
+func newLoopbackHost(t *testing.T, sk crypto.PrivKey) host.Host {
+	t.Helper()
+	h, err := libp2p.New(libp2p.Identity(sk), libp2p.ListenAddrStrings("/ip4/127.0.0.1/udp/0/quic-v1"))
 	require.NoError(t, err)
 	t.Cleanup(func() { h.Close() })
-	return h, dialAddr(t, quicAddrOf(t, h))
+	return h
 }
 
 // quicAddrOf returns h's first QUIC address, skipping WebTransport addrs
@@ -218,13 +227,7 @@ func TestInteropWrongPeerIDReverse(t *testing.T) {
 func TestInteropSamePeerIDFreshCert(t *testing.T) {
 	sk, _, err := crypto.GenerateEd25519Key(rand.Reader)
 	require.NoError(t, err)
-	newHost := func() host.Host {
-		h, err := libp2p.New(libp2p.Identity(sk))
-		require.NoError(t, err)
-		t.Cleanup(func() { h.Close() })
-		return h
-	}
-	h1, h2 := newHost(), newHost()
+	h1, h2 := newLoopbackHost(t, sk), newLoopbackHost(t, sk)
 	require.Equal(t, h1.ID(), h2.ID())
 
 	identity := newTestIdentity(t, false)
