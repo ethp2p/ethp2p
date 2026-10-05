@@ -113,7 +113,7 @@ func (t *Conn) SupportsStreams() bool {
 
 // SupportsDatagrams returns true if the underlying QUIC connection supports datagrams.
 func (t *Conn) SupportsDatagrams() bool {
-	return t.conn.ConnectionState().SupportsDatagrams
+	return t.conn.ConnectionState().SupportsDatagrams.Remote
 }
 
 // OpenStream opens a stream, blocking until there is capacity to do so.
