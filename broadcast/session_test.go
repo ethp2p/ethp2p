@@ -769,8 +769,7 @@ func TestSession_HandleChunkData_DedupCancellation(t *testing.T) {
 		synctest.Wait()
 
 		// Verify the dedup group was created.
-		key := string(chunkID)
-		if _, ok := s.dedupGroups[key]; !ok {
+		if _, ok := s.dedupGroups[string(chunkID)]; !ok {
 			t.Fatal("expected dedup group to exist after handleChunkStream")
 		}
 
@@ -781,7 +780,7 @@ func TestSession_HandleChunkData_DedupCancellation(t *testing.T) {
 		// Process the chunk data: VerdictAccepted should cancel the dedup group.
 		s.handleChunkData(cr.peerID, cr.chunkID, cr.payload)
 
-		if _, ok := s.dedupGroups[key]; ok {
+		if _, ok := s.dedupGroups[string(chunkID)]; ok {
 			t.Fatal("dedup group should be removed after VerdictAccepted")
 		}
 

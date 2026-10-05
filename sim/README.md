@@ -205,9 +205,6 @@ RS and RLNC nodes are created via `ECStrategy`, which wraps the broadcast engine
 ```bash
 # Unit tests (fast, in-process simnet)
 GOEXPERIMENT=synctest go test ./sim/... -v -short -count=1
-
-# Large network tests (32 nodes, realistic topologies)
-GOEXPERIMENT=synctest go test ./sim/... -v -run TestLargeNetwork -timeout=30m
 ```
 
 ## Adding a new strategy
