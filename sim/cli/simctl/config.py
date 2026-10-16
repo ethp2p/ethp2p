@@ -18,20 +18,20 @@ class SimulationConfig(BaseModel):
 
 class StrategyConfig(BaseModel):
     """Strategy-specific configuration."""
-    name: Literal["RS", "RS-ChunkLen", "gossipsub"]
+    name: Literal["RS", "gossipsub"]
 
     # RS options
     data_shards: int = 16
     parity_shards: int = 16
 
-    # Chunk options (RS-ChunkLen)
+    # Optional RS chunk sizing override
     chunk_len: int | None = None
 
     # Forward multiplier (RS relays)
     forward_multiplier: int = 4
 
     # Bitmap options
-    enable_bitmaps: bool = True
+    disable_bitmap: bool = False
     bitmap_threshold: int = 100
 
     # Per-strategy override for publish wait (optional, used in experiments)
@@ -94,15 +94,15 @@ def get_strategy_dir_name(strat: StrategyConfig, num_nodes: int, msg_size: int) 
     """Generate a compact directory name for a strategy run."""
     parts = [strat.name]
 
-    if strat.name in ("RS", "RS-ChunkLen"):
+    if strat.name == "RS":
         parts.append(f"d{strat.data_shards}")
         parts.append(f"p{strat.parity_shards}")
 
-    if strat.name == "RS-ChunkLen" and strat.chunk_len is not None:
+    if strat.name == "RS" and strat.chunk_len is not None:
         parts.append(f"cl{strat.chunk_len}")
 
     if strat.name != "gossipsub":
-        parts.append(f"bm{int(strat.enable_bitmaps)}")
+        parts.append(f"bm{int(not strat.disable_bitmap)}")
         parts.append(f"t{strat.bitmap_threshold}")
 
     parts.append(f"n{num_nodes}")

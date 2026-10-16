@@ -2,20 +2,30 @@ package broadcast
 
 import (
 	"context"
+	"errors"
 	"fmt"
-	"io"
 	"sync"
 	"time"
 
-	"github.com/ethp2p/ethp2p/legacy/transport"
+	ethp2p "github.com/ethp2p/ethp2p"
+	"github.com/ethp2p/ethp2p/identity"
+	"github.com/ethp2p/ethp2p/internal/ctxutil"
+	"github.com/ethp2p/ethp2p/wire"
 )
 
 const maxConcurrentReads = 64
 
+type pendingChunkRead struct {
+	peer    identity.PeerID
+	chunkID []byte
+	dataLen uint32
+	stream  ethp2p.ReceiveStream
+}
+
 // outboundKey identifies an in-flight outbound chunk send to a specific peer.
 // handle is the strategy-assigned opaque token from ChunkID.Handle().
 type outboundKey struct {
-	peer   PeerID
+	peer   identity.PeerID
 	handle ChunkHandle
 }
 
@@ -24,20 +34,18 @@ type outboundKey struct {
 // VerdictAccepted, the group is cancelled, aborting the others.
 type dedupGroup struct {
 	ctx    context.Context
-	cancel context.CancelFunc
+	cancel context.CancelCauseFunc
 }
 
-// sessionPeer is Session's per-peer state.
 type sessionPeer struct {
 	conn        *PeerConn
-	stats       *PeerSessionStats
 	chunkOutbox chan peerSendChunk
 	completed   bool
 }
 
 // session is the per-message state struct, generic on chunk identifier CI and
 // routing type R. All Strategy mutations happen inside the owning
-// Channel's run() goroutine. Implements the exported Session interface.
+// Channel's run() goroutine.
 // sessionStage tracks the lifecycle of a session as a linear progression.
 // Integer comparison is intentional: s.stage >= stageDecoding means
 // "complete or beyond, including origin".
@@ -63,10 +71,10 @@ type session[CI ChunkIdent, R Wire] struct {
 	createdAt time.Time
 
 	// everHadPeers is set on the first handlePeerAttached call.
-	// maybeDispose uses it to distinguish "no peers yet" (wait for
+	// idle uses it to distinguish "no peers yet" (wait for
 	// peer attachment) from "all peers gone" (dispose).
 	everHadPeers bool
-	peers        map[PeerID]*sessionPeer
+	peers        map[identity.PeerID]*sessionPeer
 	channelInbox chan<- channelEvent
 	observer     Observer
 
@@ -76,88 +84,67 @@ type session[CI ChunkIdent, R Wire] struct {
 	outboundCancels map[outboundKey]context.CancelFunc
 
 	// readSem bounds the number of concurrent inbound data reads.
-	readSem chan struct{}
+	readSem   chan struct{}
+	readQueue []pendingChunkRead
 
 	// dedupGroups maps dedup keys to cancel functions. All concurrent
 	// reads with the same non-nil key share a context; when one
 	// completes with VerdictAccepted, the cancel cancels the others.
 	dedupGroups map[string]*dedupGroup
 
-	// pendingVerify tracks chunks awaiting async verification
-	// (VerdictPending from VerifyChunk). Keyed by dedup group key
-	// (or a synthetic key when dedup is nil). When a dedup group
-	// resolves, pending verifications in that group are cancelled.
-	pendingVerify map[string]context.CancelFunc
-
-	// wg tracks in-flight background goroutines (chunk reads, decode)
-	// for graceful shutdown.
 	wg sync.WaitGroup
 
-	// sessCtx is a child of the channel context. Cancelling it cancels all
-	// outstanding outbound chunk sends AND inbound reads for this session.
+	// sessCtx is a child of the channel context. Cancelling it cancels this
+	// session's inbound reads and drops its queued outbound chunk sends. It
+	// does not cancel a chunk write already in progress: doSendChunk bounds
+	// that write by the peer context and chunkWriteTimeout only.
 	sessCtx    context.Context
-	sessCancel context.CancelFunc
-
-	// ctx is the channel's context, used as a fallback in select statements
-	// for channel sends (peerOpenSession, chunkOutbox).
-	ctx  context.Context
-	done chan struct{}
+	sessCancel context.CancelCauseFunc
 }
 
 // Close performs synchronous cleanup. Called from the channel goroutine only.
-// Cancels all outbound sends and inbound reads, waits for background
-// goroutines to finish, closes strategy, notifies peers, closes the done channel.
-func (s *session[CI, R]) Close() error {
+// Drops queued outbound sends, cancels inbound reads, waits for background
+// goroutines to finish, closes strategy and notifies peers.
+func (s *session[CI, R]) Close() {
+	s.closeWithCode(wire.Unspecified)
+}
+
+// closeWithCode propagates the reason for session disposal to active stream
+// readers before waiting for their cancellation to complete.
+func (s *session[CI, R]) closeWithCode(code wire.Code) {
 	s.notifyPeersSessionDone()
-	s.sessCancel()
+	cause := error(context.Canceled)
+	switch code {
+	case Redundant:
+		cause = errChunkRedundant
+	case wire.Refused:
+		cause = errStreamRefused
+	}
+	s.sessCancel(cause)
+	for _, pending := range s.readQueue {
+		pending.stream.CancelRead(code)
+	}
+	s.readQueue = nil
 	s.wg.Wait()
 	s.strategy.Close()
-	close(s.done)
-	return nil
 }
 
-// Done returns a channel that is closed when the session is disposed.
-func (s *session[CI, R]) Done() <-chan struct{} {
-	return s.done
-}
-
-// MessageID returns the session's message ID.
-func (s *session[CI, R]) MessageID() MessageID {
-	return s.messageID
-}
-
-// notifyPeersComplete sends peerCloseStream to all peers,
-// telling them we no longer need chunks. Called as soon as the
-// strategy signals completeness (before decode), since decode failure
-// is non-recoverable.
+// notifyPeersComplete marks every peer's outbound SESS stream for closure,
+// telling it we no longer need chunks. Called as soon as the strategy signals
+// completeness (before decode), since decode failure is non-recoverable.
 func (s *session[CI, R]) notifyPeersComplete() {
 	for _, sp := range s.peers {
-		select {
-		case sp.conn.ctrlQ <- peerCloseStream{channelID: s.channelID, messageID: s.messageID}:
-		case <-sp.conn.ctx.Done():
-		default:
-		}
+		sp.conn.ctrlState.closeSessionStream(sessionKey{channelID: s.channelID, messageID: s.messageID})
 	}
 }
 
-// signalReconstructed marks the session as reconstructed and attempts
-// disposal. Called after a successful decode.
-func (s *session[CI, R]) signalReconstructed() {
-	s.stage = stageReconstructed
-	s.maybeDispose()
-}
-
-// notifyPeersSessionDone sends peerCloseSession to each peer's ctrlQ
-// so the outbound loop can evict the peerSessionState entry. Sends to
-// all peers including completed ones, because completed peers may still
-// have outbound loop entries (signalReconstructed only closed the SESS
-// stream, it didn't remove the chunk slot).
+// notifyPeersSessionDone marks the peer session closed so the outbound loop
+// closes its SESS stream and drops the chunk slot. It covers completed peers
+// too: notifyPeersComplete ended only their SESS stream, and their chunk slot
+// stays registered until this close.
 func (s *session[CI, R]) notifyPeersSessionDone() {
 	for _, sp := range s.peers {
-		select {
-		case sp.conn.ctrlQ <- peerCloseSession{channelID: s.channelID, messageID: s.messageID}:
-		case <-sp.conn.ctx.Done():
-		}
+		sp.conn.ctrlState.closeSession(sessionKey{channelID: s.channelID, messageID: s.messageID})
 	}
 }
 
@@ -165,7 +152,7 @@ func (s *session[CI, R]) notifyPeersSessionDone() {
 // stream. If the chunk is needed, it acquires a semaphore slot, resolves
 // a dedup group, and spawns a goroutine to read the data. The goroutine
 // posts a channelChunkData back to the channel inbox on completion.
-func (s *session[CI, R]) handleChunkStream(peer PeerID, chunkID []byte, dataLen uint32, stream transport.ReceiveStream) {
+func (s *session[CI, R]) handleChunkStream(peer identity.PeerID, chunkID []byte, dataLen uint32, stream ethp2p.ReceiveStream) {
 	chunk := s.newCI()
 	if err := chunk.Unmarshal(chunkID); err != nil {
 		s.observer.OnChunkError(ChunkProcessError{
@@ -174,7 +161,7 @@ func (s *session[CI, R]) handleChunkStream(peer PeerID, chunkID []byte, dataLen 
 			MessageID: s.messageID,
 			Err:       fmt.Errorf("unmarshal chunk id: %w", err),
 		})
-		stream.CancelRead(0)
+		stream.CancelRead(wire.Unspecified)
 		return
 	}
 	if dataLen > maxChunkDataSize {
@@ -184,10 +171,13 @@ func (s *session[CI, R]) handleChunkStream(peer PeerID, chunkID []byte, dataLen 
 			MessageID: s.messageID,
 			Err:       fmt.Errorf("chunk data length %d exceeds max %d", dataLen, maxChunkDataSize),
 		})
-		stream.CancelRead(0)
+		stream.CancelRead(wire.Unspecified)
 		return
 	}
-	if s.stage >= stageDecoding || s.strategy.HaveChunk(chunk) {
+	// The strategy is frozen for Decode once the session leaves stageConsuming,
+	// so HaveChunk is consulted only before that.
+	haveChunk := s.stage < stageDecoding && s.strategy.HaveChunk(chunk)
+	if s.stage >= stageDecoding || haveChunk {
 		v := VerdictRedundant
 		if s.stage >= stageReconstructed {
 			v = VerdictSurplus
@@ -195,26 +185,26 @@ func (s *session[CI, R]) handleChunkStream(peer PeerID, chunkID []byte, dataLen 
 			v = VerdictDecoding
 		}
 		s.observer.OnChunkRcvd(peer, s.channelID, s.messageID, v)
-		stream.CancelRead(0)
+		stream.CancelRead(Redundant)
 		return
 	}
 
-	// Acquire semaphore (non-blocking).
+	// The actor never waits for a reader. Queue independent payload reads and
+	// let a completion wake the actor when a slot becomes available.
 	select {
 	case s.readSem <- struct{}{}:
 	default:
-		stream.CancelRead(0)
+		s.readQueue = append(s.readQueue, pendingChunkRead{peer, chunkID, dataLen, stream})
 		return
 	}
 
-	// Determine read context via dedup group.
 	readCtx := s.sessCtx
 	dedupKey := s.strategy.DedupKey(chunk)
 	if dedupKey != nil {
 		key := string(dedupKey)
 		grp, ok := s.dedupGroups[key]
 		if !ok {
-			ctx, cancel := context.WithCancel(s.sessCtx)
+			ctx, cancel := context.WithCancelCause(s.sessCtx)
 			grp = &dedupGroup{ctx: ctx, cancel: cancel}
 			s.dedupGroups[key] = grp
 		}
@@ -224,24 +214,28 @@ func (s *session[CI, R]) handleChunkStream(peer PeerID, chunkID []byte, dataLen 
 	msgID := s.messageID
 	inbox := s.channelInbox
 	s.wg.Go(func() {
-		defer func() { <-s.readSem }()
-
-		// Watcher: cancel stream read when context is done.
-		done := make(chan struct{})
-		go func() {
+		defer func() {
+			<-s.readSem
 			select {
-			case <-readCtx.Done():
-				stream.CancelRead(0)
-			case <-done:
+			case inbox <- channelReadDone{messageID: msgID}:
+			case <-s.sessCtx.Done():
 			}
 		}()
-		defer close(done)
 
+		// Once readCtx ends, the callback owns cancelling the stream; stop
+		// joins it, so no path below races it.
+		stop := ctxutil.OnCancel(readCtx, func() { stream.CancelRead(streamCancellationCode(context.Cause(readCtx))) })
+		defer stop()
 		_ = stream.SetReadDeadline(time.Now().Add(chunkReadTimeout))
 		defer func() { _ = stream.SetReadDeadline(time.Time{}) }()
 
-		buf := make([]byte, dataLen)
-		if _, err := io.ReadFull(stream, buf); err != nil {
+		buf, err := readChunkData(stream, dataLen)
+		if err != nil {
+			stop()
+			// Reads never cancel a side, so end it here with the read error's
+			// code: a DATA frame out of place or of the wrong length is
+			// Refused, and one truncated by FIN is Unspecified.
+			stream.CancelRead(streamCancellationCode(errors.Join(err, context.Cause(readCtx))))
 			return
 		}
 
@@ -257,9 +251,18 @@ func (s *session[CI, R]) handleChunkStream(peer PeerID, chunkID []byte, dataLen 
 	})
 }
 
+func (s *session[CI, R]) drainReads() {
+	for len(s.readQueue) > 0 && len(s.readSem) < cap(s.readSem) {
+		pending := s.readQueue[0]
+		s.readQueue[0] = pendingChunkRead{}
+		s.readQueue = s.readQueue[1:]
+		s.handleChunkStream(pending.peer, pending.chunkID, pending.dataLen, pending.stream)
+	}
+}
+
 // handleChunkData processes fully-read chunk data. Called on the channel
 // goroutine via channelChunkData events.
-func (s *session[CI, R]) handleChunkData(peer PeerID, chunkID []byte, payload []byte) {
+func (s *session[CI, R]) handleChunkData(peer identity.PeerID, chunkID []byte, payload []byte) {
 	chunk := s.newCI()
 	if err := chunk.Unmarshal(chunkID); err != nil {
 		s.observer.OnChunkError(ChunkProcessError{
@@ -281,20 +284,11 @@ func (s *session[CI, R]) handleChunkData(peer PeerID, chunkID []byte, payload []
 		return
 	}
 
-	// Verify before accepting.
 	verdict := s.strategy.VerifyChunk(peer, chunk, payload)
 	switch verdict {
 	case VerdictAccepted:
 		s.acceptChunk(peer, chunk, payload)
 	case VerdictPending:
-		// Store a cancellable context keyed by dedup group so that
-		// dedup resolution can cancel stale pending verifications.
-		dedupKey := s.strategy.DedupKey(chunk)
-		if dedupKey != nil {
-			key := string(dedupKey)
-			_, cancel := context.WithCancel(s.sessCtx)
-			s.pendingVerify[key] = cancel
-		}
 	default:
 		s.observer.OnChunkRcvd(peer, s.channelID, s.messageID, verdict)
 	}
@@ -302,20 +296,10 @@ func (s *session[CI, R]) handleChunkData(peer PeerID, chunkID []byte, payload []
 
 // handleVerifyResult processes the outcome of an async chunk
 // verification. Called on the channel goroutine via channelVerifyResult.
-func (s *session[CI, R]) handleVerifyResult(peer PeerID, chunkID []byte, payload []byte, verdict Verdict) {
+func (s *session[CI, R]) handleVerifyResult(peer identity.PeerID, chunkID []byte, payload []byte, verdict Verdict) {
 	chunk := s.newCI()
 	if err := chunk.Unmarshal(chunkID); err != nil {
 		return
-	}
-
-	// Remove pending verification tracking.
-	dedupKey := s.strategy.DedupKey(chunk)
-	if dedupKey != nil {
-		key := string(dedupKey)
-		if cancel, ok := s.pendingVerify[key]; ok {
-			cancel()
-			delete(s.pendingVerify, key)
-		}
 	}
 
 	switch verdict {
@@ -330,7 +314,7 @@ func (s *session[CI, R]) handleVerifyResult(peer PeerID, chunkID []byte, payload
 // decides when to cancel the dedup group by calling dedup.Cancel().
 // Called from handleChunkData (sync verification) and
 // handleVerifyResult (async verification).
-func (s *session[CI, R]) acceptChunk(peer PeerID, chunk CI, payload []byte) {
+func (s *session[CI, R]) acceptChunk(peer identity.PeerID, chunk CI, payload []byte) {
 	dedup := s.buildDedupCancel(chunk)
 	verdict, complete, err := s.strategy.TakeChunk(peer, chunk, payload, dedup)
 	if err != nil {
@@ -365,7 +349,7 @@ func (s *session[CI, R]) acceptChunk(peer PeerID, chunk CI, payload []byte) {
 
 // buildDedupCancel looks up the dedup group for chunk and returns a
 // cancel handle that, when called, tears down the group context and
-// cleans up session bookkeeping (dedupGroups, pendingVerify).
+// cleans up session bookkeeping (dedupGroups).
 func (s *session[CI, R]) buildDedupCancel(chunk CI) *DedupCancel {
 	dedupKey := s.strategy.DedupKey(chunk)
 	if dedupKey == nil {
@@ -377,16 +361,12 @@ func (s *session[CI, R]) buildDedupCancel(chunk CI) *DedupCancel {
 		return nil
 	}
 	return &DedupCancel{CancelFunc: func() {
-		grp.cancel()
+		grp.cancel(errChunkRedundant)
 		delete(s.dedupGroups, key)
-		if cancel, ok := s.pendingVerify[key]; ok {
-			cancel()
-			delete(s.pendingVerify, key)
-		}
 	}}
 }
 
-func (s *session[CI, R]) handleRoutingUpdate(peer PeerID, data []byte) {
+func (s *session[CI, R]) handleRoutingUpdate(peer identity.PeerID, data []byte) {
 	update := s.newR()
 	if err := update.Unmarshal(data); err != nil {
 		s.observer.OnChunkError(ChunkProcessError{Peer: peer, ChannelID: s.channelID, MessageID: s.messageID, Err: err})
@@ -407,10 +387,7 @@ func (s *session[CI, R]) handleRoutingUpdate(peer PeerID, data []byte) {
 	s.drainPolls()
 }
 
-func (s *session[CI, R]) handleSendComplete(peer PeerID, handle ChunkHandle, err error, size int) {
-	if sp := s.peers[peer]; sp != nil {
-		sp.stats.inflight--
-	}
+func (s *session[CI, R]) handleSendComplete(peer identity.PeerID, handle ChunkHandle, err error, size int) {
 	key := outboundKey{peer: peer, handle: handle}
 	if cancel, exists := s.outboundCancels[key]; exists {
 		cancel()
@@ -424,15 +401,19 @@ func (s *session[CI, R]) handleSendComplete(peer PeerID, handle ChunkHandle, err
 }
 
 func (s *session[CI, R]) handlePeerAttached(p *PeerConn) {
+	// The channel unbinds a peer ID before it binds that ID's next PeerConn,
+	// so an attached ID here is p itself and attaching is idempotent.
+	if s.peers[p.id] != nil {
+		return
+	}
 	s.everHadPeers = true
 	chunkOutbox := make(chan peerSendChunk, 16)
 	sp := &sessionPeer{
 		conn:        p,
-		stats:       NewPeerSessionStats(p.id),
 		chunkOutbox: chunkOutbox,
 	}
 	s.peers[p.id] = sp
-	s.strategy.AttachPeer(p.id, sp.stats)
+	s.strategy.AttachPeer(p.id)
 
 	// Bundle initial routing with SessionOpen so the peer has our
 	// inventory before any chunk traffic.
@@ -445,45 +426,57 @@ func (s *session[CI, R]) handlePeerAttached(p *PeerConn) {
 		initialRouting, _ = routing.Marshal()
 		s.observer.OnRoutingUpdate(p.id, s.channelID, s.messageID)
 	}
-	select {
-	case p.ctrlQ <- peerOpenSession{
+	p.ctrlState.openSession(peerOpenSession{
 		channelID:      s.channelID,
 		messageID:      s.messageID,
 		preamble:       s.preamble,
 		initialRouting: initialRouting,
-		channelInbox:   s.channelInbox,
 		chunkOutbox:    chunkOutbox,
-	}:
-	case <-s.ctx.Done():
-		return
-	}
+	})
 	s.drainPolls()
 }
 
-func (s *session[CI, R]) handlePeerDropped(peer PeerID) {
+func (s *session[CI, R]) handlePeerDropped(peer identity.PeerID) {
+	if sp := s.peers[peer]; sp != nil {
+		sp.conn.ctrlState.closeSession(sessionKey{channelID: s.channelID, messageID: s.messageID})
+	}
+	kept := s.readQueue[:0]
+	for _, pending := range s.readQueue {
+		if pending.peer == peer {
+			pending.stream.CancelRead(wire.Unspecified)
+		} else {
+			kept = append(kept, pending)
+		}
+	}
+	clear(s.readQueue[len(kept):])
+	s.readQueue = kept
 	delete(s.peers, peer)
+	s.cancelOutbound(peer)
 	s.strategy.DetachPeer(peer, false)
-	s.maybeDispose()
 }
 
-func (s *session[CI, R]) handlePeerCompleted(peer PeerID) {
-	sp, ok := s.peers[peer]
-	if !ok || sp.completed {
-		return
-	}
-	sp.completed = true
+// cancelOutbound cancels every in-flight chunk send to peer. DetachPeer's
+// contract requires it before the strategy forgets the peer.
+func (s *session[CI, R]) cancelOutbound(peer identity.PeerID) {
 	for key, cancel := range s.outboundCancels {
 		if key.peer == peer {
 			cancel()
 			delete(s.outboundCancels, key)
 		}
 	}
-	s.strategy.DetachPeer(peer, true)
-	s.maybeDispose()
 }
 
-// maybeDispose signals channelSessionDisposed when the session has no
-// remaining work.
+func (s *session[CI, R]) handlePeerCompleted(peer identity.PeerID) {
+	sp, ok := s.peers[peer]
+	if !ok || sp.completed {
+		return
+	}
+	sp.completed = true
+	s.cancelOutbound(peer)
+	s.strategy.DetachPeer(peer, true)
+}
+
+// idle reports that the session has no remaining work.
 //
 // A session is either "decoded" (origin, or relay that has reconstructed)
 // or "not decoded" (relay still receiving chunks):
@@ -492,41 +485,32 @@ func (s *session[CI, R]) handlePeerCompleted(peer PeerID) {
 //     dropped. A non-completed peer still needs chunks from us.
 //   - Not decoded: dispose when all peers have been dropped (removed from
 //     map). Completed peers stay in the map because they may still send
-//     us chunks on separate streams; only disconnection (drop) removes
-//     them. If all peers are gone, the session can't make progress.
+//     us chunks on separate streams; only a drop (disconnection, or the
+//     end of their SESS stream other than Reconstructed) removes them. If
+//     all peers are gone, the session can't make progress.
 //
-// Called from handlePeerDropped, handlePeerCompleted, and
-// signalReconstructed. The channel's single-goroutine event loop guarantees
-// these cannot fire during session creation or the peer-attach loop.
-// Sessions with no peers ever attached (e.g. relay decoded from buffered
-// chunks before any peer joined) are left for TTL cleanup.
-func (s *session[CI, R]) maybeDispose() {
+// The channel checks it after a peer drops or completes and after decode,
+// and disposes the session in the same event. Sessions with no peers ever
+// attached (e.g. relay decoded from buffered chunks before any peer joined)
+// are left for TTL cleanup.
+func (s *session[CI, R]) idle() bool {
 	if !s.everHadPeers {
-		return
+		return false
 	}
-	decoded := s.stage >= stageReconstructed
-	if !decoded {
-		if len(s.peers) > 0 {
-			return
-		}
-	} else {
-		for _, sp := range s.peers {
-			if !sp.completed {
-				return
-			}
+	if s.stage < stageReconstructed {
+		return len(s.peers) == 0
+	}
+	for _, sp := range s.peers {
+		if !sp.completed {
+			return false
 		}
 	}
-	select {
-	case s.channelInbox <- channelSessionDisposed{messageID: s.messageID}:
-	default:
-	}
+	return true
 }
 
 // drainPolls emits routing first so peers learn our state before
 // receiving chunks, then dispatches all pending chunk sends.
 func (s *session[CI, R]) drainPolls() {
-	// Routing before chunks: peers update their view of our inventory
-	// before the chunk dispatches arrive, reducing cross-sends.
 	if routing, ok := s.strategy.PollRouting(false); ok {
 		s.broadcastRouting(routing)
 	}
@@ -536,16 +520,9 @@ func (s *session[CI, R]) drainPolls() {
 	}
 }
 
-// flushRouting broadcasts routing state if it changed since the last poll.
-func (s *session[CI, R]) flushRouting() {
-	if routing, ok := s.strategy.PollRouting(false); ok {
-		s.broadcastRouting(routing)
-	}
-}
-
 // sendChunk marshals and pushes a chunk to the target peer's slot.
 // If the slot is full, reports a failed send back to the strategy.
-func (s *session[CI, R]) sendChunk(peer PeerID, chunkID CI, data []byte) {
+func (s *session[CI, R]) sendChunk(peer identity.PeerID, chunkID CI, data []byte) {
 	handle := chunkID.Handle()
 	chunkIDBytes, err := chunkID.Marshal()
 	if err != nil {
@@ -568,12 +545,11 @@ func (s *session[CI, R]) sendChunk(peer PeerID, chunkID CI, data []byte) {
 		payload:     data,
 		ctx:         ctx,
 		resultCh:    s.channelInbox,
-		sessionDone: s.done,
+		sessionDone: s.sessCtx.Done(),
 	}
 	select {
 	case sp.chunkOutbox <- chunk:
 		s.outboundCancels[key] = cancel
-		sp.stats.inflight++
 		select {
 		case sp.conn.wakeCh <- struct{}{}:
 		default:
@@ -584,8 +560,6 @@ func (s *session[CI, R]) sendChunk(peer PeerID, chunkID CI, data []byte) {
 	}
 }
 
-// broadcastRouting marshals a routing update and sends it to all
-// non-completed peers via their control queues.
 func (s *session[CI, R]) broadcastRouting(update R) {
 	data, err := update.Marshal()
 	if err != nil {
@@ -595,18 +569,12 @@ func (s *session[CI, R]) broadcastRouting(update R) {
 		if sp.completed {
 			continue
 		}
-		select {
-		case sp.conn.ctrlQ <- peerSendRouting{
+		if sp.conn.ctrlState.setRouting(peerSendRouting{
 			channelID: s.channelID,
 			messageID: s.messageID,
 			update:    data,
-		}:
+		}) {
 			s.observer.OnRoutingUpdate(pid, s.channelID, s.messageID)
-		case <-sp.conn.ctx.Done():
-		default:
-			// Non-blocking: if the peer's control queue is full,
-			// skip this routing update to avoid circular deadlock
-			// between session goroutines and peer outbound loops.
 		}
 	}
 }

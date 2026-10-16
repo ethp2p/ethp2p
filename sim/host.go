@@ -1,105 +1,66 @@
-// package sim is a simple implementation of a host using
-// quic for transport. It's provided here to explain the
-// transport capabilities required to drive `broadcast.Broadcaster`
-// and must not be used in production.
+// package sim is a network simulation harness for broadcast strategies. It
+// drives the production ethp2p stack rather than a private transport, so
+// measured behaviour reflects the real protocol.
 package sim
 
 import (
-	"context"
-	"crypto/ed25519"
-	"crypto/rand"
-	"crypto/tls"
-	"crypto/x509"
-	"errors"
-	"math/big"
+	"encoding/binary"
+	"fmt"
+	"math/rand/v2"
 	"net"
-	"time"
+	"net/netip"
 
-	"github.com/quic-go/quic-go"
-	"github.com/quic-go/quic-go/http3/qlog"
+	"github.com/ethp2p/ethp2p/enr"
+	"github.com/ethp2p/ethp2p/identity"
+	"github.com/ethp2p/ethp2p/transport"
 )
 
-// QUICHost is QUIC transport and listener for ec broadcast. The host is provided
-// for illustrating the transport requirements of an application that uses `broadcast.Broadcaster`.
-type QUICHost struct {
-	Transport *quic.Transport
-	Listener  *quic.Listener
-	UDPAddr   *net.UDPAddr
-	Config    *quic.Config
-}
-
-// NewQUICHost creates a new `QUICHost`. The returned host listens for new
-// connections on conn.
-func NewQUICHost(conn net.PacketConn) (QUICHost, error) {
-	transport, ln, err := makeQUICTransportAndListener(conn)
-	if err != nil {
-		return QUICHost{}, err
-	}
-	return QUICHost{
-		Transport: transport,
-		Listener:  ln,
-		UDPAddr:   ln.Addr().(*net.UDPAddr),
-		Config:    defaultQuicConfig.Clone(),
-	}, nil
-}
-
-// Dial dials the host at `addr`.
-func (q *QUICHost) Dial(ctx context.Context, addr net.Addr, conf *quic.Config) (*quic.Conn, error) {
-	tlsConf := &tls.Config{InsecureSkipVerify: true, NextProtos: []string{"eth-ec-broadcast"}}
-	if conf == nil {
-		conf = q.Config.Clone()
-	}
-	return q.Transport.Dial(ctx, addr, tlsConf, conf)
-}
-
-// Accept accepts a new connection.
-func (q *QUICHost) Accept(ctx context.Context) (*quic.Conn, error) {
-	return q.Listener.Accept(ctx)
-}
-
-func (q *QUICHost) Close() error {
-	return errors.Join(q.Transport.Close(), q.Listener.Close(), q.Transport.Conn.Close())
-}
-
-var defaultQuicConfig = quic.Config{
-	MaxIdleTimeout:          365 * 24 * time.Hour, // quic-go rejects math.MaxInt64; 1-year effectively disables
-	MaxIncomingStreams:      16384,                // per-chunk streams at scale need headroom
-	MaxIncomingUniStreams:   16384,
-	DisablePathMTUDiscovery: true, // Required for Shadow simulator (disables DF bit)
-	Tracer:                  qlog.DefaultConnectionTracer,
-}
-
-func makeQUICTransportAndListener(conn net.PacketConn) (*quic.Transport, *quic.Listener, error) {
-	transport := &quic.Transport{Conn: conn}
-	tls, err := generateTLSConfig()
-	if err != nil {
-		return nil, nil, err
-	}
-	conf := defaultQuicConfig.Clone()
-	ln, err := transport.Listen(tls, conf)
-	if err != nil {
-		return nil, nil, err
-	}
-	return transport, ln, nil
-}
-
-// generateTLSConfig returns a barebones TLS config.
-func generateTLSConfig() (*tls.Config, error) {
-	_, priv, err := ed25519.GenerateKey(rand.Reader)
+// nodeRecord derives the simulation identity and advertises its bound endpoint.
+// Shadow processes can reconstruct a peer's record from its node number.
+func nodeRecord(nodeNum int, addr net.Addr) (*enr.Record, error) {
+	key, _, err := nodeIdentity(nodeNum)
 	if err != nil {
 		return nil, err
 	}
-	template := x509.Certificate{SerialNumber: big.NewInt(1)}
-	certDER, err := x509.CreateCertificate(rand.Reader, &template, &template, priv.Public(), priv)
+	endpoint, err := netip.ParseAddrPort(addr.String())
 	if err != nil {
 		return nil, err
 	}
+	return enr.Sign(key, 1, enr.EndpointEntries(endpoint)...)
+}
 
-	return &tls.Config{
-		Certificates: []tls.Certificate{{
-			Certificate: [][]byte{certDER},
-			PrivateKey:  priv,
-		}},
-		NextProtos: []string{"eth-ec-broadcast"},
-	}, nil
+// nodeIdentity returns the transport identity for a simulation node. Deriving it
+// from the node number keeps experiments reproducible and lets a run predict
+// every peer ID before any node starts, which the trace header needs.
+//
+// Outside simulation an identity is generated randomly and kept secret; this
+// determinism is a property of the harness, not of ethp2p.
+func nodeIdentity(nodeNum int) (*identity.PrivKey, identity.PeerID, error) {
+	var seed [32]byte
+	binary.BigEndian.PutUint64(seed[:], uint64(nodeNum))
+	secret := make([]byte, 32)
+	_, _ = rand.NewChaCha8(seed).Read(secret) // ChaCha8.Read never fails.
+	key, err := identity.ParsePrivKey(secret)
+	if err != nil {
+		return nil, "", fmt.Errorf("derive identity for node %d: %w", nodeNum, err)
+	}
+	return key, key.Public().PeerID(), nil
+}
+
+// newNodeEndpoint builds the shared QUIC endpoint for a simulation node over the
+// packet connection supplied by the driver. The config disables path MTU
+// discovery, which Shadow requires, and raises the stream limits for large
+// topologies.
+//
+// The caller owns the packet connection and the endpoint's shutdown.
+func newNodeEndpoint(nodeNum int, packetConn net.PacketConn) (*transport.Endpoint, error) {
+	key, _, err := nodeIdentity(nodeNum)
+	if err != nil {
+		return nil, err
+	}
+	endpoint, err := transport.NewEndpoint(key, packetConn, transport.Shadow())
+	if err != nil {
+		return nil, fmt.Errorf("create endpoint: %w", err)
+	}
+	return endpoint, nil
 }

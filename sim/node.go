@@ -6,14 +6,12 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
-	"strconv"
-	"strings"
 	"sync"
 
+	"github.com/ethp2p/ethp2p"
 	"github.com/ethp2p/ethp2p/broadcast"
-	"github.com/ethp2p/ethp2p/legacy/transport"
-	quicTransport "github.com/ethp2p/ethp2p/legacy/transport/quic"
-	"github.com/quic-go/quic-go"
+	"github.com/ethp2p/ethp2p/broadcast/rs"
+	"github.com/ethp2p/ethp2p/transport"
 )
 
 // Node defines the interface for network simulation nodes.
@@ -29,27 +27,26 @@ type Node interface {
 	Close() error
 }
 
-// BroadcastNode wraps broadcast.Engine and a generic Channel to implement the
-// Node interface. The generic Channel boundary is captured at construction
-// via closures (publishFn, stopFn) and a receive channel.
+// BroadcastNode owns the shared QUIC endpoint, ethp2p stack, RS engine, channel,
+// and message subscription, assembled in the stack's documented setup order.
+//
+// Peer identity comes from the transport's authenticated handshake rather than
+// from the topology.
 type BroadcastNode struct {
 	num      int
-	quicHost QUICHost
+	endpoint *transport.Endpoint
+	packet   net.PacketConn
+	stack    *ethp2p.Stack
 	engine   *broadcast.Engine
 
-	publishFn func(broadcast.MessageID, []byte) error
-	stopFn    func()
-	recvCh    chan broadcast.FullMessage
+	channel *broadcast.Channel[*rs.ChunkIdent, *rs.Bitmap, *rs.Preamble]
+	recvCh  chan broadcast.FullMessage
 
-	logger *slog.Logger
-
-	mu         sync.Mutex
-	conns      []*quic.Conn
-	peerByAddr map[string]int
-	wg         sync.WaitGroup
-	closed     bool
-	baseSent   int // cumulative baseline for ResetBandwidthStats
-	baseRecv   int
+	mu        sync.Mutex
+	closeOnce sync.Once
+	closeErr  error
+	baseSent  int // cumulative baseline for ResetBandwidthStats
+	baseRecv  int
 }
 
 func (n *BroadcastNode) NodeNum() int {
@@ -57,31 +54,26 @@ func (n *BroadcastNode) NodeNum() int {
 }
 
 func (n *BroadcastNode) Addr() net.Addr {
-	return n.quicHost.UDPAddr
+	return n.packet.LocalAddr()
 }
 
-func (n *BroadcastNode) Start(ctx context.Context) {
-	go n.processIncomingConnections(ctx)
-}
+// Start satisfies Node; construction already starts the stack and reports errors.
+func (n *BroadcastNode) Start(context.Context) {}
 
 func (n *BroadcastNode) Close() error {
-	n.mu.Lock()
-	if n.closed {
-		n.mu.Unlock()
-		return nil
-	}
-	n.closed = true
-	n.mu.Unlock()
-
-	n.stopFn()
-	err := n.engine.Close()
-	err2 := n.quicHost.Close()
-	n.wg.Wait()
-	return errors.Join(err, err2)
+	n.closeOnce.Do(func() {
+		stackErr := n.stack.Close()
+		n.channel.Stop()
+		engineErr := n.engine.Close()
+		endpointErr := n.endpoint.Close()
+		packetErr := n.packet.Close()
+		n.closeErr = errors.Join(stackErr, engineErr, endpointErr, packetErr)
+	})
+	return n.closeErr
 }
 
 func (n *BroadcastNode) Publish(messageID string, data []byte) {
-	n.publishFn(broadcast.MessageID(messageID), data)
+	_ = n.channel.Publish(broadcast.MessageID(messageID), data)
 }
 
 func (n *BroadcastNode) Receive(ctx context.Context) (string, []byte, error) {
@@ -96,65 +88,12 @@ func (n *BroadcastNode) Receive(ctx context.Context) (string, []byte, error) {
 	}
 }
 
-func (n *BroadcastNode) processIncomingConnections(ctx context.Context) {
-	for {
-		c, err := n.quicHost.Accept(ctx)
-		if err != nil {
-			if !(errors.Is(err, ctx.Err()) || strings.Contains(err.Error(), "transport closed")) {
-				n.logger.Error("failed to accept connection", "err", err)
-			}
-			return
-		}
-		n.mu.Lock()
-		n.conns = append(n.conns, c)
-		n.mu.Unlock()
-		n.mu.Lock()
-		remote, ok := n.peerByAddr[c.RemoteAddr().String()]
-		n.mu.Unlock()
-		if !ok {
-			_ = c.CloseWithError(0, "unknown simulation peer")
-			n.logger.Error("failed to authenticate simulation peer", "addr", c.RemoteAddr())
-			continue
-		}
-		n.engine.NotifyPeerConnected(quicTransport.NewTransport(
-			c,
-			transport.Inbound,
-			simAuthInfo(n.num, remote),
-		))
-	}
-}
-
-// setPeerAddresses installs the topology-derived address-to-node mapping used
-// to authenticate inbound simulation connections. Scenario calls this before
-// Start, so a Shadow process does not depend on state from other processes.
-func (n *BroadcastNode) setPeerAddresses(peers map[int]net.Addr) {
-	byAddr := make(map[string]int, len(peers))
-	for nodeNum, addr := range peers {
-		if addr != nil {
-			byAddr[addr.String()] = nodeNum
-		}
-	}
-	n.mu.Lock()
-	n.peerByAddr = byAddr
-	n.mu.Unlock()
-}
-
 func (n *BroadcastNode) DialPeer(ctx context.Context, p int, addr net.Addr) error {
-	cu, err := n.quicHost.Dial(ctx, addr, nil)
+	rec, err := nodeRecord(p, addr)
 	if err != nil {
 		return err
 	}
-
-	n.mu.Lock()
-	n.conns = append(n.conns, cu)
-	n.mu.Unlock()
-
-	n.engine.NotifyPeerConnected(quicTransport.NewTransport(
-		cu,
-		transport.Outbound,
-		simAuthInfo(n.num, p),
-	))
-	return nil
+	return n.stack.Connect(ctx, rec)
 }
 
 func (n *BroadcastNode) BandwidthStats() (bytesSent, bytesReceived int) {
@@ -164,12 +103,8 @@ func (n *BroadcastNode) BandwidthStats() (bytesSent, bytesReceived int) {
 }
 
 func (n *BroadcastNode) rawBandwidth() (sent, received int) {
-	for _, c := range n.conns {
-		s := c.ConnectionStats()
-		sent += int(s.BytesSent)
-		received += int(s.BytesReceived)
-	}
-	return sent, received
+	tx, rx := n.stack.Traffic()
+	return int(tx), int(rx)
 }
 
 // ResetBandwidthStats returns bytes sent/received since the last reset
@@ -183,40 +118,73 @@ func (n *BroadcastNode) ResetBandwidthStats() (bytesSent, bytesReceived int) {
 	return ds, dr
 }
 
-// newBroadcastNode assembles a BroadcastNode from an already-configured
-// engine, channel closures, and a raw PacketConn. Used by NewECNodeFunc.
-func newBroadcastNode(
-	engine *broadcast.Engine,
-	publishFn func(broadcast.MessageID, []byte) error,
-	stopFn func(),
-	recvCh chan broadcast.FullMessage,
-	conn net.PacketConn,
-	nodeNum int,
-	logger *slog.Logger,
-) (*BroadcastNode, error) {
-	qh, err := NewQUICHost(conn)
-	if err != nil {
-		engine.Close()
-		return nil, fmt.Errorf("failed to create quic host: %w", err)
+func newParticipant(s Strategy, nodeNum int, conn net.PacketConn, logger *slog.Logger, obs broadcast.Observer, tw *TraceWriter) (Node, error) {
+	switch s.Name {
+	case "RS":
+		return newBroadcastNode(s.RS, conn, nodeNum, obs)
+	case "gossipsub":
+		return NewGossipsubNode(conn, nodeNum, logger, tw)
+	default:
+		return nil, fmt.Errorf("unknown strategy: %s", s.Name)
 	}
-
-	return &BroadcastNode{
-		num:        nodeNum,
-		quicHost:   qh,
-		engine:     engine,
-		publishFn:  publishFn,
-		stopFn:     stopFn,
-		recvCh:     recvCh,
-		logger:     logger,
-		peerByAddr: make(map[string]int),
-	}, nil
 }
 
-func simAuthInfo(local, remote int) transport.AuthInfo {
-	localID := strconv.Itoa(local)
-	remoteID := strconv.Itoa(remote)
-	return transport.AuthInfo{
-		Local:  transport.PeerID(localID),
-		Remote: transport.PeerID(remoteID),
+// newBroadcastNode builds the endpoint and stack, registers the RS engine, and
+// subscribes the channel before starting the endpoint and stack.
+// The returned node owns their shutdown and conn; on failure, the caller owns
+// conn. Transport owns the connection pumps.
+func newBroadcastNode(
+	cfg rs.Config,
+	conn net.PacketConn,
+	nodeNum int,
+	obs broadcast.Observer,
+) (*BroadcastNode, error) {
+	endpoint, err := newNodeEndpoint(nodeNum, conn)
+	if err != nil {
+		return nil, err
 	}
+	record, err := nodeRecord(nodeNum, conn.LocalAddr())
+	if err != nil {
+		_ = endpoint.Close()
+		return nil, err
+	}
+	stack, err := ethp2p.NewStack(endpoint.Ethp2p(), ethp2p.Config{Record: record})
+	if err != nil {
+		_ = endpoint.Close()
+		return nil, err
+	}
+	engine := broadcast.NewEngine(broadcast.EngineConfig{Observer: obs})
+	if err := engine.Register(stack); err != nil {
+		_ = stack.Close()
+		_ = engine.Close()
+		_ = endpoint.Close()
+		return nil, err
+	}
+	channel := broadcast.AttachChannel(engine, "broadcast", rs.NewScheme(cfg))
+	recvCh := make(chan broadcast.FullMessage, 64)
+	if err := channel.Subscribe(recvCh); err != nil {
+		_ = stack.Close()
+		channel.Stop()
+		_ = engine.Close()
+		_ = endpoint.Close()
+		return nil, fmt.Errorf("failed to subscribe: %w", err)
+	}
+	// Start requires both views wired, even though RS nodes run no libp2p host.
+	_ = endpoint.Libp2p()
+	if err := endpoint.Start(); err != nil {
+		_ = stack.Close()
+		channel.Stop()
+		_ = engine.Close()
+		_ = endpoint.Close()
+		return nil, err
+	}
+	if err := stack.Start(); err != nil {
+		_ = stack.Close()
+		channel.Stop()
+		_ = engine.Close()
+		_ = endpoint.Close()
+		return nil, err
+	}
+	return &BroadcastNode{num: nodeNum, endpoint: endpoint, packet: conn,
+		stack: stack, engine: engine, channel: channel, recvCh: recvCh}, nil
 }

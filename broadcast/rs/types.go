@@ -1,18 +1,30 @@
 package rs
 
 import (
+	"errors"
+
 	"github.com/ethp2p/ethp2p/broadcast"
 	rspb "github.com/ethp2p/ethp2p/broadcast/rs/pb"
 	"google.golang.org/protobuf/proto"
 )
 
 type Config struct {
-	DataShards        int
-	ParityShards      int
-	ChunkLen          int
-	BitmapThreshold   int
-	ForwardMultiplier int
-	DisableBitmap     bool
+	DataShards        int  `yaml:"data_shards"`
+	ParityShards      int  `yaml:"parity_shards"`
+	ChunkLen          int  `yaml:"chunk_len"`
+	BitmapThreshold   int  `yaml:"bitmap_threshold"`
+	ForwardMultiplier int  `yaml:"forward_multiplier"`
+	DisableBitmap     bool `yaml:"disable_bitmap"`
+}
+
+func (c Config) Validate() error {
+	if c.DataShards < 0 || c.ParityShards < 0 || c.ChunkLen < 0 || c.BitmapThreshold < 0 || c.ForwardMultiplier < 0 {
+		return errors.New("RS config fields must be non-negative")
+	}
+	if c.ChunkLen == 0 && (c.DataShards == 0 || c.ParityShards == 0) {
+		return errors.New("data_shards and parity_shards must be positive when chunk_len is zero")
+	}
+	return nil
 }
 
 func DefaultConfig() Config {
@@ -28,7 +40,6 @@ func DefaultConfig() Config {
 // instances for the RS erasure code.
 func NewScheme(config Config) broadcast.Scheme[*ChunkIdent, *Bitmap, *Preamble] {
 	return broadcast.Scheme[*ChunkIdent, *Bitmap, *Preamble]{
-		Name: "reed-solomon",
 		NewOrigin: func(_ broadcast.MessageID, payload []byte) (broadcast.Strategy[*ChunkIdent, *Bitmap], *Preamble, error) {
 			s, err := newOriginStrategy(&config, payload)
 			if err != nil {

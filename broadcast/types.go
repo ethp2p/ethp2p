@@ -3,7 +3,8 @@ package broadcast
 import (
 	"context"
 	"io"
-	"time"
+
+	"github.com/ethp2p/ethp2p/identity"
 )
 
 // DedupCancel is a handle the session passes into TakeChunk so the
@@ -44,14 +45,10 @@ type ChunkIdent interface {
 }
 
 type (
-	// TODO formally define PeerID in ethp2p
-	PeerID string
 	// TODO MessageID could be a structured / nested token, so the app can dispose all sessions related to, e.g. slot N
 	MessageID string
 	// TODO ChannelID will be abbreviated after handshake.
 	ChannelID string
-	// TODO assuming a simple ordinal
-	ProtocolVersion uint
 	// ChunkHandle is an opaque strategy-assigned token threaded through
 	// the send/complete path for correlation.
 	ChunkHandle uint64
@@ -83,34 +80,11 @@ const (
 	VerdictPending
 )
 
-// PeerSessionStats tracks per-peer per-session statistics. The session
-// owns and mutates these (same goroutine as strategy calls). Strategy
-// implementations read via getter methods; unexported fields prevent
-// external writes.
-type PeerSessionStats struct {
-	peerID   PeerID
-	sent     int
-	recv     int
-	inflight int
-	latency  time.Duration
-}
-
-// NewPeerSessionStats creates stats for the given peer.
-func NewPeerSessionStats(peer PeerID) *PeerSessionStats {
-	return &PeerSessionStats{peerID: peer}
-}
-
-func (s *PeerSessionStats) PeerID() PeerID         { return s.peerID }
-func (s *PeerSessionStats) Sent() int              { return s.sent }
-func (s *PeerSessionStats) Recv() int              { return s.recv }
-func (s *PeerSessionStats) Inflight() int          { return s.inflight }
-func (s *PeerSessionStats) Latency() time.Duration { return s.latency }
-
 // VerifyResult carries the outcome of an async chunk verification
 // submitted via VerifyChunk. Posted to the Verified() channel and
 // processed on the channel goroutine.
 type VerifyResult[CI ChunkIdent] struct {
-	Peer    PeerID
+	Peer    identity.PeerID
 	ChunkID CI
 	Data    []byte
 	Verdict Verdict
@@ -123,18 +97,6 @@ type FullMessage struct {
 	Data      []byte
 }
 
-// Session is the public non-generic interface for session observation.
-// The concrete session[C, R] implements this.
-type Session interface {
-	io.Closer
-	Done() <-chan struct{}
-	MessageID() MessageID
-}
-
-// ---------------------------------------------------------------------------
-// Strategy types
-// ---------------------------------------------------------------------------
-
 // Strategy is the per-session interface that unifies coding, routing,
 // and dispatch. One instance per (channel, message, direction). Created
 // by Scheme factory functions.
@@ -144,25 +106,28 @@ type Session interface {
 // All methods are called from a single goroutine (the owning Channel's
 // run loop), with two exceptions:
 //
-//   - Work() and Verified() return channels; the channels themselves
-//     are read by the channel goroutine, but the strategy may write to
-//     them from internal goroutines (e.g. an async encoder or
-//     verification worker pool).
-//   - VerifyChunk() reads only immutable state set at construction
-//     (preamble hashes, commitment parameters). It may submit work to
-//     an internal worker pool whose results arrive on Verified().
+//   - Verified() returns a channel read by the channel goroutine; the
+//     strategy may write to it from a verification worker pool.
 //   - Decode() is called from a background goroutine after TakeChunk
 //     signals completeness. Safe because the strategy rejects further
 //     chunks after completeness, freezing the state for concurrent reads.
 //   - Close() is called after all in-flight reads have drained, so no
 //     concurrent calls are in progress.
 //
+// VerifyChunk runs on the run loop, so a slow verification stalls the
+// channel. A strategy with expensive verification submits the work to an
+// internal worker pool, returns VerdictPending, and delivers the result on
+// Verified().
+//
 // Because of single-goroutine access, implementations do not need
-// internal locking for session state. The exception is strategies that
-// produce chunks asynchronously (e.g. RLNC origin encoding), which
-// must synchronize the producer goroutine with PollChunks.
+// internal locking for session state.
 //
 // # Lifecycle
+//
+// Methods called by the channel actor, including factories and Close, must not
+// wait for engine or peer progress, stream credit, or further channel events.
+// Async verification must use Verified rather than block the actor. This keeps
+// inbox backpressure independent of the network's stream-credit backpressure.
 //
 // Factory (Scheme.NewOrigin / Scheme.NewRelay)
 //
@@ -214,18 +179,16 @@ type Strategy[CI ChunkIdent, R Wire] interface {
 	// AttachPeer registers a peer in this session. Called before
 	// PollChunks can target this peer. The strategy should initialize
 	// per-peer state (send tracking, routing, etc.).
-	//
-	// stats is owned by the session. Mutations happen only between
-	// strategy calls; it is safe to retain the pointer.
-	AttachPeer(peer PeerID, stats *PeerSessionStats)
+	AttachPeer(peer identity.PeerID)
 
 	// DetachPeer removes a peer. completed=true means the peer
-	// signaled successful reconstruction (SESS stream reset with
-	// code 0x01); false means disconnection or unsubscribe. The
+	// signaled successful reconstruction with Reconstructed (protocol value 1,
+	// wire code 0x03);
+	// false means disconnection or unsubscribe. The
 	// session cancels all in-flight sends for this peer before
 	// calling DetachPeer, so any subsequent ChunkSent callbacks for
 	// this peer will arrive with ok=false.
-	DetachPeer(peer PeerID, completed bool)
+	DetachPeer(peer identity.PeerID, completed bool)
 
 	// VerifyChunk verifies an inbound chunk before acceptance. Returns
 	// VerdictAccepted or VerdictInvalid for synchronous verification
@@ -237,7 +200,7 @@ type Strategy[CI ChunkIdent, R Wire] interface {
 	// it reads only immutable state set at construction (preamble
 	// hashes, commitment parameters). Results are posted to
 	// Verified() and processed on the channel goroutine.
-	VerifyChunk(peer PeerID, chunkID CI, data []byte) Verdict
+	VerifyChunk(peer identity.PeerID, chunkID CI, data []byte) Verdict
 
 	// Verified returns a channel that delivers results of async
 	// verifications submitted via VerifyChunk (VerdictPending).
@@ -266,7 +229,7 @@ type Strategy[CI ChunkIdent, R Wire] interface {
 	// background goroutine. After returning true, the strategy must
 	// reject further chunks so the state remains frozen for the
 	// concurrent Decode call.
-	TakeChunk(peer PeerID, chunkID CI, data []byte, dedup *DedupCancel) (Verdict, bool, error)
+	TakeChunk(peer identity.PeerID, chunkID CI, data []byte, dedup *DedupCancel) (Verdict, bool, error)
 
 	// RoutingUpdate delivers a peer's routing state (e.g. a bitmap
 	// of which chunks they have). The strategy updates its internal
@@ -274,7 +237,7 @@ type Strategy[CI ChunkIdent, R Wire] interface {
 	// sending chunks the peer already has. Returns handles of
 	// in-flight sends to this peer that are now redundant (the peer
 	// acquired the data through another path).
-	RoutingUpdate(peer PeerID, update R) (cancel []ChunkHandle, err error)
+	RoutingUpdate(peer identity.PeerID, update R) (cancel []ChunkHandle, err error)
 
 	// PollChunks returns pending chunk dispatches. Each dispatch
 	// targets a specific peer and carries a ChunkID whose Marshal()
@@ -298,7 +261,7 @@ type Strategy[CI ChunkIdent, R Wire] interface {
 	// from ChunkID.Handle(). err=nil means the chunk was written to
 	// the wire; non-nil carries the failure reason (ErrChunkSlotFull,
 	// ErrChunkWriteFail, ErrChunkCancelled, etc.).
-	ChunkSent(peer PeerID, handle ChunkHandle, err error)
+	ChunkSent(peer identity.PeerID, handle ChunkHandle, err error)
 
 	// Progress returns decode progress: chunks received and chunks needed.
 	Progress() (have, need int)
@@ -313,16 +276,10 @@ type Strategy[CI ChunkIdent, R Wire] interface {
 	// evict a previously accepted chunk. Decode failure after
 	// completeness therefore indicates a bug.
 	Decode() ([]byte, error)
-
-	// Work returns a channel signaled when new dispatches are
-	// available from an async producer (e.g. background encoder).
-	// Returns nil if the strategy never produces asynchronously.
-	Work() <-chan struct{}
 }
 
 // Scheme is a per-channel factory for creating Strategy instances.
 type Scheme[CI ChunkIdent, R Wire, P Wire] struct {
-	Name      string
 	NewOrigin func(MessageID, []byte) (Strategy[CI, R], P, error)
 	NewRelay  func(MessageID, P) (Strategy[CI, R], error)
 	NewCI     func() CI
@@ -333,7 +290,7 @@ type Scheme[CI ChunkIdent, R Wire, P Wire] struct {
 // ChunkDispatch directs a chunk to a specific peer. The session
 // extracts the correlation handle via ChunkID.Handle().
 type ChunkDispatch[CI ChunkIdent] struct {
-	Peer    PeerID
+	Peer    identity.PeerID
 	ChunkID CI
 	Data    []byte
 }

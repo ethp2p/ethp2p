@@ -10,7 +10,7 @@ import (
 
 // ShadowDriver implements Driver for Shadow simulation.
 type ShadowDriver struct {
-	Strategy    StrategyFunc
+	Strategy    Strategy
 	TraceWriter *TraceWriter
 
 	observer *Observer
@@ -41,7 +41,7 @@ func (s *ShadowDriver) NewNode(nodeNum int, logger *slog.Logger) (Node, error) {
 		s.observer = o
 		obs = o
 	}
-	return s.Strategy(nodeNum, sconn, logger, obs, s.TraceWriter)
+	return newParticipant(s.Strategy, nodeNum, sconn, logger, obs, s.TraceWriter)
 }
 
 // Observer returns the observer for the node created by this driver.

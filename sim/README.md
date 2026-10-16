@@ -41,10 +41,11 @@ simulation:
   bandwidth_log_frequency_ms: 100
 
 strategy:
-  name: RS                     # RS, RS-ChunkLen, RLNC, RLNC-ChunkLen, gossipsub
+  name: RS                     # RS or gossipsub
   data_shards: 16
   parity_shards: 16
-  enable_bitmaps: true
+  chunk_len: 16384             # optional RS chunk size in bytes
+  disable_bitmap: false
   bitmap_threshold: 100
 
 workload:
@@ -75,11 +76,12 @@ Each strategy reads only its own fields; unknown fields are ignored.
 
 | Strategy | Fields |
 |----------|--------|
-| RS | `data_shards`, `parity_shards`, `enable_bitmaps`, `bitmap_threshold` |
-| RS-ChunkLen | `chunk_len`, `enable_bitmaps`, `bitmap_threshold` |
+| RS | `data_shards`, `parity_shards`, optional `chunk_len`, `forward_multiplier`, `disable_bitmap`, `bitmap_threshold` |
 | RLNC | `num_chunks`, `enable_bitmaps` |
 | RLNC-ChunkLen | `num_chunks_per_generation`, `target_chunk_size`, `origin_redundancy`, `enable_bitmaps` |
 | gossipsub | (none) |
+
+For RS, omit `chunk_len` to use shard-based sizing; set it to choose a chunk size. `disable_bitmap` defaults to `false`, so bitmap forwarding is enabled unless explicitly disabled.
 
 ### Experiment config
 
@@ -194,8 +196,7 @@ RS and RLNC nodes are created via `ECStrategy`, which wraps the broadcast engine
 
 | Strategy | Description |
 |----------|-------------|
-| RS | Reed-Solomon erasure coding |
-| RS-ChunkLen | RS with fixed chunk size instead of fixed shard count |
+| RS | Reed-Solomon erasure coding; optional `chunk_len` sets the chunk size |
 | RLNC | Random linear network coding |
 | RLNC-ChunkLen | RLNC with generations and target chunk size |
 | gossipsub | libp2p gossipsub baseline (no erasure coding) |
@@ -205,11 +206,14 @@ RS and RLNC nodes are created via `ECStrategy`, which wraps the broadcast engine
 ```bash
 # Unit tests (fast, in-process simnet)
 GOEXPERIMENT=synctest go test ./sim/... -v -short -count=1
+
+# Large network tests (32 nodes, realistic topologies)
+GOEXPERIMENT=synctest go test ./sim/... -v -run TestLargeNetwork -timeout=30m
 ```
 
 ## Adding a new strategy
 
-For erasure-coded strategies, implement a `Scheme` (see `broadcast/rs`, `broadcast/rlnc`) and wire it via `ECStrategy` in `config.go`. For non-EC strategies, implement the `Node` interface directly (see `strategy_gossipsub.go`). In both cases, add the strategy name to `StrategyConfig.UnmarshalYAML` and `strategyFunc()` in `config.go`, and to the Python config in `cli/simctl/config.py`.
+For erasure-coded strategies, implement a `Scheme` (see `broadcast/rs`, `broadcast/rlnc`) and wire it via `ECStrategy` in `config.go`. For non-EC strategies, implement the `Node` interface directly (see `strategy_gossipsub.go`). Add the strategy name and its config fields to `StrategyConfig` in `config.go`, update `strategyFunc()` to construct it, and mirror the accepted schema in `cli/simctl/config.py`. Represent parameter variants as fields on a strategy (for example, RS `chunk_len`) rather than separate strategy names.
 
 ## Package layout
 

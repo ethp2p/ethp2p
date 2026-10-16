@@ -43,13 +43,16 @@ func main() {
 	}
 	defer scenario.Close()
 
+	drv, ok := scenario.Driver.(*sim.ShadowDriver)
+	if !ok || drv == nil {
+		log.Fatalf("shadow scenario has driver %T, expected *sim.ShadowDriver", scenario.Driver)
+	}
+
 	// When trace_file is configured, each Shadow node writes its events
 	// to a local file. Shadow sets CWD to shadow.data/hosts/nodeN/, so
 	// the file lands in the per-node output directory. After simulation,
 	// simctl merges all per-node event files into a single .bctrace.
 	if rc.Simulation.TraceFile != "" {
-		drv := scenario.Driver.(*sim.ShadowDriver)
-
 		f, err := os.Create("events.ndjson")
 		if err != nil {
 			log.Fatalf("failed to create trace file: %v", err)
@@ -98,7 +101,6 @@ func main() {
 		eventCh = ch
 	}
 
-	drv, _ := scenario.Driver.(*sim.ShadowDriver)
 	statsDone := make(chan struct{})
 	go func() {
 		defer close(statsDone)

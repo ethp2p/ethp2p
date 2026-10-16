@@ -9,14 +9,12 @@ import (
 	"slices"
 
 	"github.com/ethp2p/ethp2p/broadcast"
+	"github.com/ethp2p/ethp2p/identity"
 	"github.com/klauspost/reedsolomon"
 )
 
-// Compile-time interface check.
 var _ broadcast.Strategy[*ChunkIdent, *Bitmap] = (*strategy)(nil)
 
-// strategy is the unified per-session RS implementation of
-// broadcast.Strategy[*ChunkIdent, *Bitmap].
 type strategy struct {
 	config   *Config
 	preamble Preamble
@@ -25,7 +23,7 @@ type strategy struct {
 	totalChunks  int
 	chunks       [][]byte // indexed by chunk; nil = not received
 	emitPlanner  *emitPlanner
-	peers        map[broadcast.PeerID]*peerState
+	peers        map[identity.PeerID]*peerState
 	routingDirty bool
 
 	// Per-relay random seed for deterministic priority ordering:
@@ -38,10 +36,8 @@ type strategy struct {
 	complete bool // cached completeness; set once in TakeChunk
 }
 
-// peerState tracks per-peer dispatch state within a session.
 type peerState struct {
 	bitmap    Bitmap
-	stats     *broadcast.PeerSessionStats
 	inflight  []int // per-chunk in-flight send count
 	completed bool
 }
@@ -91,7 +87,7 @@ func newOriginStrategy(config *Config, payload []byte) (*strategy, error) {
 		totalChunks:  total,
 		chunks:       chunks,
 		emitPlanner:  planner,
-		peers:        make(map[broadcast.PeerID]*peerState),
+		peers:        make(map[identity.PeerID]*peerState),
 		have:         AllOnesBitmap(total),
 		routingDirty: true,
 	}, nil
@@ -100,6 +96,13 @@ func newOriginStrategy(config *Config, payload []byte) (*strategy, error) {
 func newRelayStrategy(config *Config, preamble *Preamble) (*strategy, error) {
 	if preamble == nil {
 		return nil, fmt.Errorf("nil preamble")
+	}
+	// The preamble comes from a remote peer. Requiring one hash per chunk
+	// also bounds the allocations below by the bytes the peer actually sent.
+	if preamble.DataChunks <= 0 || preamble.ParityChunks < 0 ||
+		len(preamble.ChunkHashes) != preamble.TotalChunks() {
+		return nil, fmt.Errorf("malformed preamble: %d data, %d parity, %d hashes",
+			preamble.DataChunks, preamble.ParityChunks, len(preamble.ChunkHashes))
 	}
 	cfg := *config
 	if cfg.ForwardMultiplier <= 0 {
@@ -115,7 +118,7 @@ func newRelayStrategy(config *Config, preamble *Preamble) (*strategy, error) {
 		totalChunks: total,
 		chunks:      make([][]byte, total),
 		emitPlanner: newEmitPlanner(),
-		peers:       make(map[broadcast.PeerID]*peerState),
+		peers:       make(map[identity.PeerID]*peerState),
 		seed:        rand.Uint64(),
 		have:        NewBitmap(total),
 	}, nil
@@ -135,16 +138,15 @@ func (s *strategy) DedupKey(chunkID *ChunkIdent) []byte {
 	return buf[:]
 }
 
-func (s *strategy) AttachPeer(peer broadcast.PeerID, stats *broadcast.PeerSessionStats) {
+func (s *strategy) AttachPeer(peer identity.PeerID) {
 	ps := &peerState{
 		bitmap:   NewBitmap(s.totalChunks),
-		stats:    stats,
 		inflight: make([]int, s.totalChunks),
 	}
 	s.peers[peer] = ps
 }
 
-func (s *strategy) DetachPeer(peer broadcast.PeerID, completed bool) {
+func (s *strategy) DetachPeer(peer identity.PeerID, completed bool) {
 	ps, ok := s.peers[peer]
 	if !ok {
 		return
@@ -156,7 +158,7 @@ func (s *strategy) DetachPeer(peer broadcast.PeerID, completed bool) {
 	delete(s.peers, peer)
 }
 
-func (s *strategy) VerifyChunk(_ broadcast.PeerID, chunkID *ChunkIdent, data []byte) broadcast.Verdict {
+func (s *strategy) VerifyChunk(_ identity.PeerID, chunkID *ChunkIdent, data []byte) broadcast.Verdict {
 	if chunkID.Index < 0 || chunkID.Index >= s.totalChunks {
 		return broadcast.VerdictInvalid
 	}
@@ -167,7 +169,7 @@ func (s *strategy) Verified() <-chan broadcast.VerifyResult[*ChunkIdent] {
 	return nil
 }
 
-func (s *strategy) TakeChunk(peer broadcast.PeerID, chunkID *ChunkIdent, data []byte, dedup *broadcast.DedupCancel) (broadcast.Verdict, bool, error) {
+func (s *strategy) TakeChunk(peer identity.PeerID, chunkID *ChunkIdent, data []byte, dedup *broadcast.DedupCancel) (broadcast.Verdict, bool, error) {
 	if chunkID.Index < 0 || chunkID.Index >= s.totalChunks {
 		return broadcast.VerdictInvalid, false, nil
 	}
@@ -204,7 +206,7 @@ func (s *strategy) Decode() ([]byte, error) {
 	return s.tryDecode()
 }
 
-func (s *strategy) RoutingUpdate(peer broadcast.PeerID, update *Bitmap) ([]broadcast.ChunkHandle, error) {
+func (s *strategy) RoutingUpdate(peer identity.PeerID, update *Bitmap) ([]broadcast.ChunkHandle, error) {
 	ps, ok := s.peers[peer]
 	if !ok {
 		return nil, nil
@@ -249,9 +251,7 @@ func (s *strategy) PollRouting(force bool) (*Bitmap, bool) {
 	return nil, false
 }
 
-// allocate selects the next chunk for the given peer and marks it
-// in-flight immediately.
-func (s *strategy) allocate(peer broadcast.PeerID, ps *peerState) (*ChunkIdent, []byte, bool) {
+func (s *strategy) allocate(peer identity.PeerID, ps *peerState) (*ChunkIdent, []byte, bool) {
 	var skipped []emitEntry
 
 	var foundIdx int
@@ -288,7 +288,7 @@ func (s *strategy) allocate(peer broadcast.PeerID, ps *peerState) (*ChunkIdent, 
 	return chunkID, foundData, true
 }
 
-func (s *strategy) ChunkSent(peer broadcast.PeerID, handle broadcast.ChunkHandle, err error) {
+func (s *strategy) ChunkSent(peer identity.PeerID, handle broadcast.ChunkHandle, err error) {
 	ps := s.peers[peer]
 	if ps == nil {
 		return
@@ -310,15 +310,12 @@ func (s *strategy) ChunkSent(peer broadcast.PeerID, handle broadcast.ChunkHandle
 			s.emitPlanner.AddSent(idx, 1)
 		}
 	} else {
+		// A failed attempt must be invisible to both counters: Sent (a
+		// credit earned only by successful sends, so it is left alone) and
+		// Times (bumped at allocate, for origin sessions too), so the chunk
+		// regains its emit priority and the peer can be offered it again.
 		ps.bitmap.Unset(idx)
-		// Refund: if the chunk's send budget was exhausted, grant
-		// one more attempt. The failed send didn't reach the peer,
-		// so it shouldn't count against ForwardMultiplier.
-		if !s.isOrigin {
-			if sent, ok := s.emitPlanner.GetSent(idx); ok && sent >= s.config.ForwardMultiplier {
-				s.emitPlanner.AddSent(idx, -1)
-			}
-		}
+		s.emitPlanner.Decrement(idx)
 	}
 }
 
@@ -326,11 +323,7 @@ func (s *strategy) Progress() (have, need int) {
 	return s.have.OnesCount(), s.preamble.DataChunks
 }
 
-func (s *strategy) Work() <-chan struct{} { return nil }
-
 func (s *strategy) Close() error { return nil }
-
-// --- Internal helpers ---
 
 func (s *strategy) verifyChunk(idx int, data []byte) broadcast.Verdict {
 	if idx < 0 || idx >= len(s.preamble.ChunkHashes) {
@@ -378,16 +371,11 @@ func (s *strategy) tryDecode() ([]byte, error) {
 	return data, nil
 }
 
-// chunkPriority computes a deterministic priority for a shard index
-// using the relay's seed. Different seeds produce different orderings.
 func (s *strategy) chunkPriority(idx int) uint32 {
 	// Fibonacci hashing with golden ratio constant for good dispersion.
 	return uint32((s.seed ^ uint64(idx)*0x9E3779B97F4A7C15) >> 32)
 }
 
-// shouldEmitRouting gates whether the strategy should broadcast its
-// bitmap. Called from PollRouting, which the session invokes after
-// every state-mutating event and on a 25ms routing ticker.
 func (s *strategy) shouldEmitRouting() bool {
 	if s.config.DisableBitmap {
 		return false
