@@ -1,0 +1,158 @@
+package transport
+
+import (
+	"context"
+	"crypto/tls"
+	"net"
+
+	"github.com/ethp2p/ethp2p/wire"
+	"github.com/libp2p/go-libp2p/p2p/transport/quicreuse"
+	"github.com/quic-go/quic-go"
+)
+
+// TODO: try to get rid of the libp2p import here.
+
+var (
+	_ quicreuse.QUICTransport = (*Libp2pTransport)(nil)
+	_ quicreuse.QUICListener  = (*libp2pListener)(nil)
+	_ quicreuse.QUICConn      = (*libp2pConn)(nil)
+)
+
+// Libp2pTransport provides the libp2p view of a shared QUIC endpoint.
+type Libp2pTransport struct{ endpoint *Endpoint }
+
+// Listen returns the libp2p listener. Listening itself begins at
+// Endpoint.Start, per the startup choreography. It ignores the
+// supplied configurations. Subsequent calls fail, even after the returned
+// listener is closed.
+func (t *Libp2pTransport) Listen(_ *tls.Config, _ *quic.Config) (quicreuse.QUICListener, error) {
+	if t.endpoint.stopped.Load() {
+		return nil, ErrClosed
+	}
+	t.endpoint.libMu.Lock()
+	defer t.endpoint.libMu.Unlock()
+	if t.endpoint.libListener != nil {
+		return nil, errAlreadyListening
+	}
+	t.endpoint.libListener = &libp2pListener{transport: t.endpoint, queue: t.endpoint.libQ}
+	return t.endpoint.libListener, nil
+}
+
+// Dial opens a libp2p-only connection using tlsConf. It ignores the supplied
+// QUIC configuration. libp2p authenticates the peer using tlsConf.
+func (t *Libp2pTransport) Dial(ctx context.Context, addr net.Addr, tlsConf *tls.Config, _ *quic.Config) (quicreuse.QUICConn, error) {
+	bound, cleanup := joinContext(ctx, t.endpoint.ctx)
+	defer cleanup()
+	raw, err := t.endpoint.raw.Dial(bound, addr, tlsConf, t.endpoint.config.quicConfig())
+	if err != nil {
+		if t.endpoint.ctx.Err() != nil {
+			return nil, ErrClosed
+		}
+		return nil, err
+	}
+	return raw, nil
+}
+
+// ReadNonQUICPacket reads the next non-QUIC packet from the shared endpoint.
+func (t *Libp2pTransport) ReadNonQUICPacket(ctx context.Context, payload []byte) (int, net.Addr, error) {
+	return t.endpoint.raw.ReadNonQUICPacket(ctx, payload)
+}
+
+// WriteTo sends a packet to addr through the shared endpoint.
+func (t *Libp2pTransport) WriteTo(payload []byte, addr net.Addr) (int, error) {
+	return t.endpoint.raw.WriteTo(payload, addr)
+}
+
+// Close is a no-op returning nil. The application owns endpoint shutdown;
+// libp2p must not close the shared endpoint while ethp2p still uses it.
+// Use [Endpoint.Close] to stop the endpoint.
+func (*Libp2pTransport) Close() error { return nil }
+
+// libp2pListener is the libp2p listener on the shared QUIC endpoint. There is at
+// most one; closing it detaches libp2p without stopping the endpoint.
+type libp2pListener struct {
+	transport *Endpoint
+	queue     chan quicreuse.QUICConn
+}
+
+// Accept waits for a libp2p connection, including those dialed by Ethp2pTransport.
+func (l *libp2pListener) Accept(ctx context.Context) (quicreuse.QUICConn, error) {
+	t := l.transport
+	select {
+	case c := <-l.queue:
+		// The endpoint may have closed, or Close may have detached libp2p,
+		// while this view was queued.
+		closed := t.libDetached() || t.ctx.Err() != nil
+		if closed {
+			_ = c.CloseWithError(quic.ApplicationErrorCode(wire.Closing.Wire()), "listener closed")
+			return nil, ErrClosed
+		}
+		return c, nil
+	case <-t.libDone:
+		return nil, ErrClosed
+	case <-t.ctx.Done():
+		return nil, ErrClosed
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+}
+
+// Addr returns the local address of the shared endpoint.
+func (l *libp2pListener) Addr() net.Addr { return l.transport.raw.Conn.LocalAddr() }
+
+// Close detaches libp2p and releases its queued views without stopping ethp2p.
+func (l *libp2pListener) Close() error {
+	l.transport.detachLibp2p()
+	return nil
+}
+
+// libp2pConn is the libp2p view of a split QUIC connection. It receives only
+// streams classified as libp2p while sharing outbound operations with the
+// ethp2p view. Closing it stops pending and later accepts and opens, and
+// resets streams routed to it; streams already handed out remain usable.
+type libp2pConn Conn
+
+func (c *libp2pConn) AcceptStream(ctx context.Context) (*quic.Stream, error) {
+	for {
+		if stream, ok := c.libp2pStreams.tryPop(); ok {
+			if c.libp2pCtx.Err() != nil {
+				resetBi(stream, wire.Closing)
+				return nil, context.Cause(c.libp2pCtx)
+			}
+			return stream, nil
+		}
+		select {
+		case <-c.libp2pStreams.ready:
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-c.libp2pCtx.Done():
+			return nil, context.Cause(c.libp2pCtx)
+		}
+	}
+}
+
+func (c *libp2pConn) OpenStreamSync(ctx context.Context) (*quic.Stream, error) {
+	bound, cleanup := joinContext(ctx, c.libp2pCtx)
+	defer cleanup()
+	stream, err := c.conn.OpenStreamSync(bound)
+	if err != nil && c.libp2pCtx.Err() != nil {
+		return nil, context.Cause(c.libp2pCtx)
+	}
+	return stream, err
+}
+
+func (c *libp2pConn) CloseWithError(code quic.ApplicationErrorCode, reason string) error {
+	// Mark only; the raw connection closes once the ethp2p view closes too.
+	(*Conn)(c).closeSide(sideLibp2p, code, reason, nil)
+	return nil
+}
+
+func (c *libp2pConn) ConnectionState() quic.ConnectionState {
+	state := c.conn.ConnectionState()
+	state.TLS.NegotiatedProtocol = AlpnLibp2p
+	return state
+}
+
+func (c *libp2pConn) Context() context.Context { return c.libp2pCtx }
+func (c *libp2pConn) LocalAddr() net.Addr      { return c.conn.LocalAddr() }
+func (c *libp2pConn) RemoteAddr() net.Addr     { return c.conn.RemoteAddr() }
