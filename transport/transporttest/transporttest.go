@@ -34,21 +34,11 @@ func (e *Endpoint) Record(tb testing.TB, seq uint64) *enr.Record {
 	if err != nil {
 		tb.Fatal(err)
 	}
-	rec, err := enr.Sign(e.Key, seq, endpointEntries(addr)...)
+	rec, err := enr.Sign(e.Key, seq, enr.EndpointEntries(addr)...)
 	if err != nil {
 		tb.Fatal(err)
 	}
 	return rec
-}
-
-// endpointEntries returns the entries advertising addr: ip/quic for an IPv4
-// endpoint (an IPv4-mapped IPv6 address unmaps to one), ip6/quic6 for an
-// IPv6 one.
-func endpointEntries(addr netip.AddrPort) []enr.Entry {
-	if unmapped := addr.Addr().Unmap(); unmapped.Is6() {
-		return []enr.Entry{enr.EntryIP6(unmapped), enr.EntryQUIC6(addr.Port())}
-	}
-	return []enr.Entry{enr.EntryIP(addr.Addr()), enr.EntryQUIC(addr.Port())}
 }
 
 // NewEndpoint builds an endpoint with a fresh identity and the Interop config.

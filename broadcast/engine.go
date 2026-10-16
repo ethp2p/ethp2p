@@ -2,55 +2,55 @@ package broadcast
 
 import (
 	"context"
+	"maps"
+	"slices"
 	"sync"
 
-	"github.com/ethp2p/ethp2p/legacy/transport"
+	ethp2p "github.com/ethp2p/ethp2p"
+	"github.com/ethp2p/ethp2p/identity"
+	"github.com/ethp2p/ethp2p/wire"
 )
 
-const defaultMaxInboundChunkStreams = 5
+// maxInboundChunkStreams bounds concurrent inbound CHUNK header readers per peer.
+const maxInboundChunkStreams = 5
 
 // EngineConfig holds configuration for an Engine.
 type EngineConfig struct {
 	Observer Observer
-
-	// MaxInboundChunkStreams bounds the number of concurrent inbound
-	// chunk streams per peer. Zero uses the default (5).
-	MaxInboundChunkStreams int
-}
-
-func (c *EngineConfig) maxInboundChunkStreams() int {
-	if c.MaxInboundChunkStreams > 0 {
-		return c.MaxInboundChunkStreams
-	}
-	return defaultMaxInboundChunkStreams
 }
 
 // Engine manages channels, peers, and message routing via a single-goroutine
-// event loop. All map mutations happen inside run(), eliminating mutex use.
+// event loop. Its maps belong to run(); registration is synchronized with Close.
 type Engine struct {
 	config EngineConfig
 
-	// channels contains the channels we have made the Engine aware of using AttachChannel.
-	// TODO: need a DetachChannel.
 	channels map[ChannelID]*channelHandle
 
-	// peers are all peers we are connected to that support our version of the
-	// broadcast protocol.
-	peers map[PeerID]*PeerConn
+	// peers contains the current ready binding for each authenticated peer ID.
+	// Cleanup events carry the binding that stopped and must compare it with
+	// this map: a reconnect's binding can be installed before the old one's
+	// Run reports its exit.
+	peers map[identity.PeerID]*PeerConn
 
-	// peerSubs tracks which channels each remote peer is subscribed to.
-	// Entries are inserted upon handshake, and subsequently updated
-	// as the peer subscribes and unsubscribes.
-	peerSubs map[PeerID]map[ChannelID]struct{}
+	// bindings routes streams by the stable family peer handle. Only PeerUp
+	// creates a binding; PeerDown removes it.
+	bindings map[*ethp2p.Peer]*PeerConn
 
-	eventCh chan engineEvent
+	eventCh chan func()
 
 	wg     sync.WaitGroup
 	ctx    context.Context
 	cancel context.CancelFunc
+
+	// family is set by Register before the event loop starts (Register
+	// starts it), so the loop reads it without synchronization.
+	family       *ethp2p.Family
+	started      bool
+	deliveryWake chan struct{}
 }
 
-// NewEngine constructs an Engine and starts its event loop.
+// NewEngine constructs an Engine. Its event loop is not running yet:
+// Register starts it, or Start does for engines that are never registered.
 func NewEngine(config EngineConfig) *Engine {
 	if config.Observer == nil {
 		config.Observer = NoOpObserver{}
@@ -58,89 +58,59 @@ func NewEngine(config EngineConfig) *Engine {
 	ctx, cancel := context.WithCancel(context.Background())
 
 	e := &Engine{
-		config:   config,
-		channels: make(map[ChannelID]*channelHandle),
-		peers:    make(map[PeerID]*PeerConn),
-		peerSubs: make(map[PeerID]map[ChannelID]struct{}),
-		eventCh:  make(chan engineEvent, 128),
-		ctx:      ctx,
-		cancel:   cancel,
+		config:       config,
+		channels:     make(map[ChannelID]*channelHandle),
+		peers:        make(map[identity.PeerID]*PeerConn),
+		bindings:     make(map[*ethp2p.Peer]*PeerConn),
+		eventCh:      make(chan func(), 128),
+		deliveryWake: make(chan struct{}, 1),
+		ctx:          ctx,
+		cancel:       cancel,
 	}
-	e.wg.Go(e.run)
 	return e
 }
 
-// NotifyPeerConnected is invoked by the environment to inform us when we've
-// connected to a new peer who could potentially participate in broadcast.
-// The conn is sent through the event loop, which spawns the peer's handshake
-// and run goroutines.
-//
-// Ownership of this protocol-scoped connection is passed to the Engine. When
-// compat shares the underlying QUIC connection with libp2p, closing this value
-// closes only the borrowed ethp2p view.
-func (e *Engine) NotifyPeerConnected(conn transport.Conn) {
-	select {
-	case e.eventCh <- engineEvent{kind: evPeerConnected, conn: conn}:
-	case <-e.ctx.Done():
-		conn.Close()
+// Start begins the event loop. It is called by Register, and directly for
+// engines that are never registered. At most once; later calls are no-ops.
+func (e *Engine) Start() {
+	if e.started {
+		return
 	}
+	e.started = true
+	e.wg.Go(e.run)
 }
 
-// NotifyPeerGone reports that a peer is no longer available.
-func (e *Engine) NotifyPeerGone(peerID PeerID) {
+// post runs fn on the engine actor unless the engine, or the sender's own
+// lifetime stop (nil if none), ends first.
+func (e *Engine) post(stop <-chan struct{}, fn func()) {
 	select {
-	case e.eventCh <- engineEvent{kind: evPeerGone, peerID: peerID}:
+	case e.eventCh <- fn:
+	case <-stop:
 	case <-e.ctx.Done():
 	}
 }
 
-// Close stops the engine and waits for its goroutines to exit.
+// Close stops the engine and waits for its goroutines to exit. Per the
+// startup choreography, Close is called at most once, after Register.
 func (e *Engine) Close() error {
 	e.cancel()
 	e.wg.Wait()
 	return nil
 }
 
-// Context returns the engine lifetime context.
-func (e *Engine) Context() context.Context {
-	return e.ctx
-}
-
 // DropChannel unregisters a channel from the engine.
 func (e *Engine) DropChannel(id ChannelID) {
-	select {
-	case e.eventCh <- engineEvent{kind: evChannelRemoved, channelID: id}:
-	case <-e.ctx.Done():
-	}
+	e.post(nil, func() { e.removeChannel(id) })
 }
 
-// onPeerHandshake is invoked when handshake completes.
-func (e *Engine) onPeerHandshake(p *PeerConn, channels []ChannelID, err error) {
-	select {
-	case e.eventCh <- engineEvent{kind: evPeerHandshake, peer: p, channels: channels, err: err}:
-	case <-e.ctx.Done():
-	}
-}
-
-// onPeerSubscribed is invoked when the peer subscribes to a new channel.
-func (e *Engine) onPeerSubscribed(peerID PeerID, channelID ChannelID) {
-	select {
-	case e.eventCh <- engineEvent{kind: evPeerSubscribed, peerID: peerID, channelID: channelID}:
-	case <-e.ctx.Done():
-	}
-}
-
-// onPeerUnsubscribed is invoked when the peer unsubscribes from a channel.
-func (e *Engine) onPeerUnsubscribed(peerID PeerID, channelID ChannelID) {
-	select {
-	case e.eventCh <- engineEvent{kind: evPeerUnsubscribed, peerID: peerID, channelID: channelID}:
-	case <-e.ctx.Done():
-	}
-}
-
+// channelHandle is the producer side of one Channel actor, shared by the
+// engine and every PeerConn bound to it. It is immutable after creation.
 type channelHandle struct {
 	inbox chan<- channelEvent
-	done  <-chan struct{}
+	// ctx is the channel's lifetime: producers stop once it ends, and
+	// Channel.drainInbox runs only after it ends.
+	ctx  context.Context
+	done <-chan struct{} // actor exited
 }
 
 func (e *Engine) run() {
@@ -149,169 +119,213 @@ func (e *Engine) run() {
 		case <-e.ctx.Done():
 			e.shutdown()
 			return
-		case evt := <-e.eventCh:
-			e.handle(evt)
+		case <-e.deliveryWake:
+			if family := e.family; family != nil {
+				for event, ok := family.Next(); ok; event, ok = family.Next() {
+					e.handleDelivery(event)
+				}
+			}
+		case fn := <-e.eventCh:
+			fn()
 		}
 	}
 }
 
-func (e *Engine) handle(ev engineEvent) {
-	switch ev.kind {
-	case evChannelCreated:
-		if _, ok := e.channels[ev.channelID]; ok {
-			ev.cancel()
-			e.config.Observer.OnChannelAttached(ev.channelID, ErrChannelExists)
-			return
-		}
-		e.channels[ev.channelID] = &channelHandle{inbox: ev.inbox, done: ev.done}
-		e.config.Observer.OnChannelAttached(ev.channelID, nil)
+func (e *Engine) addChannel(id ChannelID, h *channelHandle, cancel func()) {
+	if _, ok := e.channels[id]; ok {
+		cancel()
+		e.config.Observer.OnChannelAttached(id, ErrChannelExists)
+		return
+	}
+	e.channels[id] = h
+	e.config.Observer.OnChannelAttached(id, nil)
 
-		// Bind any existing peers that had already declared this channel during
-		// handshake, and notify all peers of our new subscription.
-		for _, p := range e.peers {
-			if subs := e.peerSubs[p.id]; subs != nil {
-				if _, ok := subs[ev.channelID]; ok {
-					e.enrolPeerToChannel(p, ev.channelID)
-				}
-			}
-			select {
-			case p.ctrlQ <- peerSubscribe{channelID: ev.channelID}:
-			default:
-			}
+	// Bind any existing peers that had already declared this channel during
+	// handshake, and notify all peers of our new subscription.
+	for _, p := range e.peers {
+		if _, ok := p.subs[id]; ok {
+			e.enrolPeerToChannel(p, id)
 		}
+		p.ctrlState.announce(id, true)
+	}
+}
 
-	case evChannelRemoved:
-		if _, ok := e.channels[ev.channelID]; !ok {
-			return
-		}
-		for _, p := range e.peers {
-			p.UnbindChannel(ev.channelID)
-			select {
-			case p.ctrlQ <- peerUnsubscribe{channelID: ev.channelID}:
-			default:
-			}
-		}
-		delete(e.channels, ev.channelID)
-		e.config.Observer.OnChannelDropped(ev.channelID)
+func (e *Engine) removeChannel(id ChannelID) {
+	if _, ok := e.channels[id]; !ok {
+		return
+	}
+	for _, p := range e.peers {
+		p.UnbindChannel(id)
+		p.ctrlState.announce(id, false)
+	}
+	delete(e.channels, id)
+	e.config.Observer.OnChannelDropped(id)
+}
 
-	case evPeerConnected:
-		p := newPeerConn(e, ev.conn)
-		channels := make([]ChannelID, 0, len(e.channels))
-		for id := range e.channels {
-			channels = append(channels, id)
-		}
-		e.wg.Go(func() { p.Run(channels) })
+func (e *Engine) peerSubscribed(p *PeerConn, id ChannelID) {
+	if e.peers[p.id] != p {
+		return
+	}
+	if _, subscribed := p.subs[id]; subscribed {
+		return
+	}
+	p.subs[id] = struct{}{}
+	e.enrolPeerToChannel(p, id)
+	e.config.Observer.OnPeerSubscribed(p.id, id)
+}
 
-	case evPeerHandshake:
-		if ev.err != nil {
-			e.wg.Go(func() { ev.peer.Close() })
-			return
-		}
-		p := ev.peer
-		if _, ok := e.peers[p.id]; ok {
-			return
-		}
-		e.peers[p.id] = p
-		subs := make(map[ChannelID]struct{}, len(ev.channels))
-		for _, channelID := range ev.channels {
-			subs[channelID] = struct{}{}
-			e.enrolPeerToChannel(p, channelID)
-		}
-		e.peerSubs[p.id] = subs
-		e.config.Observer.OnPeerHandshook(p.id, p.version, ev.channels)
-		for _, channelID := range ev.channels {
-			e.config.Observer.OnPeerSubscribed(p.id, channelID)
-		}
+func (e *Engine) peerUnsubscribed(p *PeerConn, id ChannelID) {
+	if e.peers[p.id] != p {
+		return
+	}
+	if _, subscribed := p.subs[id]; !subscribed {
+		return
+	}
+	delete(p.subs, id)
+	e.unenrolPeerFromChannel(p, id)
+	e.config.Observer.OnPeerUnsubscribed(p.id, id)
+}
 
-	case evPeerGone:
-		p, ok := e.peers[ev.peerID]
-		if !ok {
-			return
-		}
-		delete(e.peers, ev.peerID)
-		// Unbind peer from all channels so sessions see the peer drop.
-		if subs := e.peerSubs[ev.peerID]; subs != nil {
-			for channelID := range subs {
-				p.UnbindChannel(channelID)
-				if t := e.channels[channelID]; t != nil && t.inbox != nil {
-					select {
-					case t.inbox <- channelPeerChange{peerID: ev.peerID}:
-					case <-e.ctx.Done():
-					}
-				}
-			}
-		}
-		delete(e.peerSubs, ev.peerID)
-		e.config.Observer.OnPeerGone(ev.peerID)
-		e.wg.Go(func() { p.Close() })
+func (e *Engine) bindPeer(peer *ethp2p.Peer) *PeerConn {
+	if peer.Context().Err() != nil {
+		return nil
+	}
+	p := newPeerConn(e, peer.Context(), peer.ID(), peer)
+	e.bindings[peer] = p
 
-	case evPeerSubscribed:
-		if p, ok := e.peers[ev.peerID]; ok {
-			if e.peerSubs[ev.peerID] == nil {
-				e.peerSubs[ev.peerID] = make(map[ChannelID]struct{})
-			}
-			e.peerSubs[ev.peerID][ev.channelID] = struct{}{}
-			e.enrolPeerToChannel(p, ev.channelID)
-			e.config.Observer.OnPeerSubscribed(ev.peerID, ev.channelID)
-		}
+	p.announced = slices.Collect(maps.Keys(e.channels))
+	e.wg.Go(p.Run)
+	return p
+}
 
-	case evPeerUnsubscribed:
-		if subs := e.peerSubs[ev.peerID]; subs != nil {
-			delete(subs, ev.channelID)
-		}
-		if p, ok := e.peers[ev.peerID]; ok {
-			p.UnbindChannel(ev.channelID)
-			e.config.Observer.OnPeerUnsubscribed(ev.peerID, ev.channelID)
-		}
-		if t := e.channels[ev.channelID]; t != nil && t.inbox != nil {
-			select {
-			case t.inbox <- channelPeerChange{peerID: ev.peerID}:
-			case <-e.ctx.Done():
-			}
+func (e *Engine) handleStreamEvent(event ethp2p.Event) {
+	if e.ctx.Err() != nil {
+		event.Cancel(wire.Unspecified)
+		return
+	}
+	if _, ok := event.Stream.(ethp2p.Stream); ok {
+		// Broadcast's wire protocols use unidirectional streams. A bidi
+		// event is a routing mismatch; cancel both halves before dropping it.
+		event.Reject()
+		return
+	}
+	p := e.bindings[event.Peer]
+	if p == nil {
+		event.Reject()
+		return
+	}
+	p.enqueueStream(event.Protocol, event.Stream)
+}
+
+func (e *Engine) handlePeerHandshake(p *PeerConn, channels []ChannelID) {
+	// PeerDown closes p, so a handshake that finishes after it fails this
+	// check. The stack delivers an ID's PeerDown before the next PeerUp, so
+	// an earlier binding for p.id has already left e.peers.
+	if p.ctx.Err() != nil {
+		return
+	}
+	e.peers[p.id] = p
+	p.ctrlState.announceInitial(p.announced)
+	// Channel changes reach only peers in e.peers, and our Hello listed the
+	// channels at bind time; announce what changed in between.
+	for id := range e.channels {
+		if !slices.Contains(p.announced, id) {
+			p.ctrlState.announce(id, true)
 		}
 	}
+	for _, id := range p.announced {
+		if _, ok := e.channels[id]; !ok {
+			p.ctrlState.announce(id, false)
+		}
+	}
+	subs := make(map[ChannelID]struct{}, len(channels))
+	for _, channelID := range channels {
+		if _, exists := subs[channelID]; exists {
+			continue
+		}
+		subs[channelID] = struct{}{}
+		e.enrolPeerToChannel(p, channelID)
+	}
+	p.subs = subs
+	close(p.handshakeDone)
+	e.config.Observer.OnPeerHandshook(p.id, channels)
+	for _, channelID := range channels {
+		e.config.Observer.OnPeerSubscribed(p.id, channelID)
+	}
+}
+
+func (e *Engine) handlePeerGone(p *PeerConn) {
+	// A binding may finish after a reconnect has already installed a new
+	// PeerConn for the same authenticated ID. Only the current binding can
+	// remove the peer and notify channels.
+	e.removePeer(p)
+	p.Close()
+}
+
+func (e *Engine) removePeer(p *PeerConn) {
+	if e.peers[p.id] != p {
+		return
+	}
+	delete(e.peers, p.id)
+	for channelID := range p.subs {
+		e.unenrolPeerFromChannel(p, channelID)
+	}
+	e.config.Observer.OnPeerGone(p.id)
 }
 
 func (e *Engine) enrolPeerToChannel(p *PeerConn, channelID ChannelID) {
 	t, ok := e.channels[channelID]
-	if !ok || t.inbox == nil {
+	if !ok {
 		return
 	}
-	p.BindChannel(channelID, t.inbox)
+	p.BindChannel(channelID, t)
 	select {
 	case t.inbox <- channelPeerChange{peerID: p.id, peerRef: p}:
+	case <-t.done:
 	case <-e.ctx.Done():
 	}
 }
 
-func (e *Engine) shutdown() {
-	// Phase 1: close all peers and wait for their goroutines to exit.
-	for _, p := range e.peers {
-		p.Close()
-	}
-
-	// Phase 2: drain unprocessed peer events.
-	for {
+func (e *Engine) unenrolPeerFromChannel(p *PeerConn, channelID ChannelID) {
+	p.UnbindChannel(channelID)
+	if t := e.channels[channelID]; t != nil {
 		select {
-		case ev := <-e.eventCh:
-			switch ev.kind {
-			case evPeerConnected:
-				ev.conn.Close()
-			case evPeerHandshake:
-				ev.peer.Close()
-			default:
-				// Reply-bearing events: callers escape via ctx.Done().
-			}
-		default:
-			goto waitChannels
+		case t.inbox <- channelPeerChange{peerID: p.id}:
+		case <-t.done:
+		case <-e.ctx.Done():
+		}
+	}
+}
+
+func (e *Engine) shutdown() {
+	if family := e.family; family != nil {
+		for event, ok := family.Next(); ok; event, ok = family.Next() {
+			event.Cancel(wire.Unspecified)
 		}
 	}
 
-waitChannels:
-	// Phase 3: wait for channel goroutines to exit.
+	// Every live PeerConn keeps its binding until PeerDown closes it, so this
+	// also closes every peer with a handshake event still queued. Senders of
+	// unprocessed events escape through ctx.Done().
+	for _, p := range e.bindings {
+		p.Close()
+	}
+
 	for _, th := range e.channels {
-		if th.done != nil {
-			<-th.done
+		<-th.done
+	}
+}
+
+func (e *Engine) handleDelivery(event ethp2p.Event) {
+	switch event.Kind {
+	case ethp2p.PeerUp:
+		e.bindPeer(event.Peer)
+	case ethp2p.StreamIn:
+		e.handleStreamEvent(event)
+	case ethp2p.PeerDown:
+		if p := e.bindings[event.Peer]; p != nil {
+			delete(e.bindings, event.Peer)
+			e.handlePeerGone(p)
 		}
 	}
 }

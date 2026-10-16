@@ -27,12 +27,11 @@ func TestTraceWriter_RoundTrip(t *testing.T) {
 	}
 	config := json.RawMessage(`{"strategy":"rs"}`)
 
-	tw, err := NewTraceWriter(&buf, t0, nodes, topo, config)
+	tw, err := NewTraceWriterWithOptions(&buf, t0, nodes, topo, config, TraceHeaderOptions{DecoderName: "test-decoder", PeerIDs: []string{"peer-a", "peer-b", "peer-c"}})
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	// Write 4 events with increasing timestamps.
 	tw.WriteEvent(t0.Add(100*time.Microsecond), 0, "ss", "broadcast", "msg-0", 0)
 	tw.WriteEvent(t0.Add(200*time.Microsecond), 0, "cs", "1", "broadcast", "msg-0", 1420)
 	tw.WriteEvent(t0.Add(500*time.Microsecond), 1, "cr", "0", "broadcast", "msg-0", 0)
@@ -47,7 +46,6 @@ func TestTraceWriter_RoundTrip(t *testing.T) {
 		t.Fatalf("expected 6 lines, got %d:\n%s", len(lines), buf.String())
 	}
 
-	// Verify header.
 	var hdr traceHeader
 	if err := json.Unmarshal([]byte(lines[0]), &hdr); err != nil {
 		t.Fatalf("parse header: %v", err)
@@ -58,8 +56,10 @@ func TestTraceWriter_RoundTrip(t *testing.T) {
 	if len(hdr.Nodes) != 3 {
 		t.Fatalf("expected 3 nodes, got %d", len(hdr.Nodes))
 	}
+	if hdr.DecoderName != "test-decoder" || len(hdr.PeerIDs) != 3 || hdr.PeerIDs[1] != "peer-b" {
+		t.Fatalf("header options = decoder %q peer IDs %v", hdr.DecoderName, hdr.PeerIDs)
+	}
 
-	// Verify first event is a JSON array with correct event code.
 	var ev []any
 	if err := json.Unmarshal([]byte(lines[1]), &ev); err != nil {
 		t.Fatalf("parse event: %v", err)
@@ -75,7 +75,6 @@ func TestTraceWriter_RoundTrip(t *testing.T) {
 		t.Fatalf("expected ts=100, got %v", ev[0])
 	}
 
-	// Verify footer.
 	var ftr traceFooter
 	if err := json.Unmarshal([]byte(lines[5]), &ftr); err != nil {
 		t.Fatalf("parse footer: %v", err)

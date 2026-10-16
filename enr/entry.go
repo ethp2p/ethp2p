@@ -156,3 +156,13 @@ func unmarshalPort(raw []byte, dst *uint16) error {
 	*dst = port
 	return nil
 }
+
+// EndpointEntries returns the entries advertising endpoint: ip/quic for an
+// IPv4 endpoint (an IPv4-mapped IPv6 address unmaps to one), ip6/quic6 for an
+// IPv6 one.
+func EndpointEntries(endpoint netip.AddrPort) []Entry {
+	if addr := endpoint.Addr().Unmap(); addr.Is6() {
+		return []Entry{EntryIP6(addr), EntryQUIC6(endpoint.Port())}
+	}
+	return []Entry{EntryIP(endpoint.Addr()), EntryQUIC(endpoint.Port())}
+}

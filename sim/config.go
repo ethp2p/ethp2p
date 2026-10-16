@@ -5,11 +5,9 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
-	"net"
 	"os"
 	"time"
 
-	"github.com/ethp2p/ethp2p/broadcast"
 	"github.com/ethp2p/ethp2p/broadcast/rs"
 	"gopkg.in/yaml.v3"
 )
@@ -17,7 +15,7 @@ import (
 // RunConfig is the unified YAML configuration for a simulation run.
 type RunConfig struct {
 	Simulation SimulationConfig `yaml:"simulation"`
-	Strategy   StrategyConfig   `yaml:"strategy"`
+	Strategy   Strategy         `yaml:"strategy"`
 	Workload   WorkloadConfig   `yaml:"workload"`
 	Topology   TopologyConfig   `yaml:"topology"`
 }
@@ -38,63 +36,9 @@ type TopologyGenerate struct {
 	SuperNodeFraction float64 `yaml:"super_node_fraction"`
 }
 
-// StrategyConfig uses custom UnmarshalYAML to dispatch by name into the
-// correct typed config. Only the matching strategy pointer is non-nil.
-type StrategyConfig struct {
-	Name string
-	RS   *RSStrategyConfig
-}
-
-// strategyRaw is used for two-pass YAML decoding: first read the name,
-// then decode strategy-specific fields into the correct typed struct.
-type strategyRaw struct {
-	Name string `yaml:"name"`
-}
-
-func (sc *StrategyConfig) UnmarshalYAML(value *yaml.Node) error {
-	var raw strategyRaw
-	if err := value.Decode(&raw); err != nil {
-		return fmt.Errorf("decode strategy name: %w", err)
-	}
-	sc.Name = raw.Name
-	switch raw.Name {
-	case "RS", "RS-ChunkLen":
-		var cfg RSStrategyConfig
-		if err := value.Decode(&cfg); err != nil {
-			return fmt.Errorf("decode RS strategy config: %w", err)
-		}
-		sc.RS = &cfg
-	case "gossipsub":
-		// no config
-	default:
-		return fmt.Errorf("unknown strategy: %s", raw.Name)
-	}
-	return nil
-}
-
-// RSStrategyConfig holds RS-specific parameters.
-type RSStrategyConfig struct {
-	DataShards        int  `yaml:"data_shards"`
-	ParityShards      int  `yaml:"parity_shards"`
-	ChunkLen          int  `yaml:"chunk_len"`
-	ForwardMultiplier int  `yaml:"forward_multiplier"`
-	EnableBitmaps     bool `yaml:"enable_bitmaps"`
-	BitmapThreshold   int  `yaml:"bitmap_threshold"`
-}
-
-func (c *RSStrategyConfig) broadcastConfig() rs.Config {
-	cfg := rs.Config{
-		DataShards:        c.DataShards,
-		ParityShards:      c.ParityShards,
-		ChunkLen:          c.ChunkLen,
-		ForwardMultiplier: c.ForwardMultiplier,
-		DisableBitmap:     !c.EnableBitmaps,
-		BitmapThreshold:   c.BitmapThreshold,
-	}
-	if cfg.ForwardMultiplier == 0 {
-		cfg.ForwardMultiplier = 4
-	}
-	return cfg
+type Strategy struct {
+	Name string    `yaml:"name"`
+	RS   rs.Config `yaml:",inline"`
 }
 
 // SimulationConfig holds runtime/infrastructure settings.
@@ -132,9 +76,18 @@ func LoadRunConfig(path string) (*RunConfig, error) {
 	if err != nil {
 		return nil, fmt.Errorf("read config: %w", err)
 	}
-	var rc RunConfig
+	rc := RunConfig{Strategy: Strategy{RS: rs.DefaultConfig()}}
 	if err := yaml.Unmarshal(data, &rc); err != nil {
 		return nil, fmt.Errorf("parse config: %w", err)
+	}
+	switch rc.Strategy.Name {
+	case "RS":
+		if err := rc.Strategy.RS.Validate(); err != nil {
+			return nil, fmt.Errorf("invalid RS strategy config: %w", err)
+		}
+	case "gossipsub":
+	default:
+		return nil, fmt.Errorf("unknown strategy: %s", rc.Strategy.Name)
 	}
 	return &rc, nil
 }
@@ -159,38 +112,6 @@ func (rc *RunConfig) LoadTopology() (Topology, error) {
 	return topo, nil
 }
 
-// StrategyFunc creates a simulation node.
-type StrategyFunc func(nodeNum int, conn net.PacketConn, logger *slog.Logger, obs broadcast.Observer, tw *TraceWriter) (Node, error)
-
-// ECStrategy returns a StrategyFunc that creates broadcast nodes using
-// the given erasure coding scheme. Engine, channel, and subscription setup
-// are handled here; the scheme is the only varying part.
-func ECStrategy[CI broadcast.ChunkIdent, R broadcast.Wire, P broadcast.Wire](scheme broadcast.Scheme[CI, R, P]) StrategyFunc {
-	return func(nodeNum int, conn net.PacketConn, logger *slog.Logger, obs broadcast.Observer, tw *TraceWriter) (Node, error) {
-		engine := broadcast.NewEngine(broadcast.EngineConfig{Observer: obs})
-		channel := broadcast.AttachChannel(engine, "broadcast", scheme)
-		recvCh := make(chan broadcast.FullMessage, 64)
-		if err := channel.Subscribe(recvCh); err != nil {
-			engine.Close()
-			return nil, fmt.Errorf("failed to subscribe: %w", err)
-		}
-		return newBroadcastNode(
-			engine,
-			func(mid broadcast.MessageID, data []byte) error { return channel.Publish(mid, data) },
-			channel.Stop,
-			recvCh,
-			conn, nodeNum, logger,
-		)
-	}
-}
-
-// GossipsubStrategy returns a StrategyFunc that creates gossipsub nodes.
-func GossipsubStrategy() StrategyFunc {
-	return func(nodeNum int, conn net.PacketConn, logger *slog.Logger, obs broadcast.Observer, tw *TraceWriter) (Node, error) {
-		return NewGossipsubNode(conn, nodeNum, logger, tw)
-	}
-}
-
 func (rc *RunConfig) BuildTraceHeaderOptions(topo Topology) (TraceHeaderOptions, error) {
 	opts := TraceHeaderOptions{}
 	switch rc.Strategy.Name {
@@ -204,21 +125,22 @@ func (rc *RunConfig) BuildTraceHeaderOptions(topo Topology) (TraceHeaderOptions,
 			}
 			opts.PeerIDs[i] = pid.String()
 		}
-	default:
+	case "RS":
 		opts.DecoderName = "ethp2p"
+		// ethp2p peer IDs are transport identities, not node numbers, so the
+		// header must carry the mapping for consumers to resolve events to nodes.
+		opts.PeerIDs = make([]string, len(topo.Nodes))
+		for i, ns := range topo.Nodes {
+			_, peerID, err := nodeIdentity(ns.Num)
+			if err != nil {
+				return TraceHeaderOptions{}, fmt.Errorf("derive ethp2p peer id for node %d: %w", ns.Num, err)
+			}
+			opts.PeerIDs[i] = string(peerID)
+		}
+	default:
+		return TraceHeaderOptions{}, fmt.Errorf("unknown strategy: %s", rc.Strategy.Name)
 	}
 	return opts, nil
-}
-
-func (rc *RunConfig) strategyFunc() (StrategyFunc, error) {
-	switch rc.Strategy.Name {
-	case "RS", "RS-ChunkLen":
-		return ECStrategy(rs.NewScheme(rc.Strategy.RS.broadcastConfig())), nil
-	case "gossipsub":
-		return GossipsubStrategy(), nil
-	default:
-		return nil, fmt.Errorf("unknown strategy: %s", rc.Strategy.Name)
-	}
 }
 
 // NewScenario builds a Scenario from this config, selecting the
@@ -231,10 +153,6 @@ func (rc *RunConfig) NewScenario(driver string, logger *slog.Logger) (*Scenario,
 		return nil, fmt.Errorf("no driver specified: set simulation.driver in config or pass driver argument")
 	}
 
-	newNode, err := rc.strategyFunc()
-	if err != nil {
-		return nil, err
-	}
 	topo, err := rc.LoadTopology()
 	if err != nil {
 		return nil, err
@@ -243,9 +161,9 @@ func (rc *RunConfig) NewScenario(driver string, logger *slog.Logger) (*Scenario,
 	var drv Driver
 	switch driver {
 	case "shadow":
-		drv = &ShadowDriver{Strategy: newNode}
+		drv = &ShadowDriver{Strategy: rc.Strategy}
 	case "simnet":
-		sd := &SimnetDriver{Strategy: newNode, Topology: topo}
+		sd := &SimnetDriver{Strategy: rc.Strategy, Topology: topo}
 		if rc.Simulation.TraceFile != "" {
 			f, err := os.Create(rc.Simulation.TraceFile)
 			if err != nil {

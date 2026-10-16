@@ -2,82 +2,66 @@ package broadcast
 
 import (
 	"context"
+	"time"
+
+	ethp2p "github.com/ethp2p/ethp2p"
 
 	bcastpb "github.com/ethp2p/ethp2p/broadcast/pb"
-	"github.com/ethp2p/ethp2p/legacy/transport"
+	"github.com/ethp2p/ethp2p/identity"
 )
-
-// ---------------------------------------------------------------------------
-// Engine events
-// ---------------------------------------------------------------------------
-
-type engineEventKind uint8
-
-const (
-	evChannelCreated engineEventKind = iota + 1
-	evChannelRemoved
-	evPeerConnected
-	evPeerHandshake
-	evPeerGone
-	evPeerSubscribed
-	evPeerUnsubscribed
-)
-
-type engineEvent struct {
-	kind      engineEventKind
-	channelID ChannelID
-	peerID    PeerID
-	conn      transport.Conn      // evPeerConnected
-	peer      *PeerConn           // evPeerHandshake
-	channels  []ChannelID         // evPeerHandshake
-	err       error               // evPeerHandshake
-	inbox     chan<- channelEvent // evChannelCreated
-	done      <-chan struct{}     // evChannelCreated
-	cancel    func()              // evChannelCreated: called on rejection
-}
-
-// ---------------------------------------------------------------------------
-// Channel events
-// ---------------------------------------------------------------------------
 
 // channelEvent is the marker interface for events sent to a Channel inbox.
 type channelEvent interface {
 	channelEvent()
 }
 
+// parkedGroup is one message's parked chunk streams and the first chunk's
+// arrival time, which bounds the group's TTL.
+type parkedGroup struct {
+	at      time.Time
+	streams []channelChunkStream
+}
+
 // channelChunkStream represents an inbound chunk stream. The frame carries
 // the wire metadata; the stream holds the unread payload.
+
 type channelChunkStream struct {
-	peerID PeerID
+	peerID identity.PeerID
 	frame  *bcastpb.Chunk_Header
-	stream transport.ReceiveStream
+	stream ethp2p.ReceiveStream
 }
 
 // channelChunkData is posted by a read goroutine (spawned by session) after
 // reading chunk data from a stream. Routes back through the channel inbox.
 type channelChunkData struct {
 	messageID MessageID
-	peerID    PeerID
+	peerID    identity.PeerID
 	chunkID   []byte
 	payload   []byte
 }
 
-// channelSessionOpen notifies Channel that a remote peer opened a session
-// control stream.
-type channelSessionOpen struct {
-	peerID PeerID
-	msg    *bcastpb.Sess_Open
+// channelReadDone wakes the actor after a payload reader frees its slot.
+// A late completion may wake a replacement session; drainReads is idempotent.
+type channelReadDone struct {
+	messageID MessageID
 }
 
-// channelSessionDisposed is sent by a session when it has no remaining work.
-type channelSessionDisposed struct {
-	messageID MessageID
+func (channelReadDone) channelEvent() {}
+
+// channelExpiry is posted by a session's or parked group's deadline timer.
+type channelExpiry struct{}
+
+func (channelExpiry) channelEvent() {}
+
+type channelSessionOpen struct {
+	peerID identity.PeerID
+	msg    *bcastpb.Sess_Open
 }
 
 // channelPeerChange notifies the channel of a topology mutation.
 // peerRef != nil means joined; nil means left.
 type channelPeerChange struct {
-	peerID  PeerID
+	peerID  identity.PeerID
 	peerRef *PeerConn // non-nil = joined, nil = left
 }
 
@@ -85,50 +69,50 @@ type channelPeerChange struct {
 // session close (nil bitmap routing update).
 type channelPeerReconstructed struct {
 	messageID MessageID
-	peerID    PeerID
+	peerID    identity.PeerID
 }
 
-type channelPublish struct {
+// channelPeerSessionEnded is sent by PeerConn when a peer's inbound SESS
+// stream for a message ends for any reason other than Reconstructed (clean
+// close, other reset, or read error) while the connection is still live. The
+// peer leaves that session only. peer identifies the connection that owned the
+// stream. The peer is not re-attached if it later opens the message again;
+// its initial_update is still applied.
+type channelPeerSessionEnded struct {
+	messageID MessageID
+	peerID    identity.PeerID
+	peer      *PeerConn
+}
+
+type channelPublish[CI ChunkIdent, R Wire] struct {
 	messageID    MessageID
-	strategy     any    // Strategy[CI, R] (type-erased; handlePublish asserts)
+	strategy     Strategy[CI, R]
 	preambleData []byte // pre-marshalled preamble
 	errCh        chan error
 }
 
-// channelChunkSent is sent by PeerConn after a chunk write completes.
 type channelChunkSent struct {
 	messageID MessageID
-	peerID    PeerID
+	peerID    identity.PeerID
 	handle    ChunkHandle
 	err       error
 	size      int
 }
 
-// channelRoutingUpdate is sent when a routing update arrives on a SESS stream.
 type channelRoutingUpdate struct {
-	peerID    PeerID
+	peerID    identity.PeerID
 	messageID MessageID
 	msg       *bcastpb.Sess_Update
 }
 
-// channelWork is sent by a watchWork goroutine when a
-// strategy's Work() channel fires (async production available).
-type channelWork struct {
-	messageID MessageID
-}
-
-// channelVerifyResult is sent by a watchVerified goroutine when an async
-// chunk verification completes.
 type channelVerifyResult struct {
 	messageID MessageID
-	peerID    PeerID
+	peerID    identity.PeerID
 	chunkID   []byte
 	payload   []byte
 	verdict   Verdict
 }
 
-// channelDecoded is sent by a session-owned decode worker when an async
-// decode task completes.
 type channelDecoded struct {
 	messageID MessageID
 	payload   []byte
@@ -139,18 +123,13 @@ func (channelChunkStream) channelEvent()       {}
 func (channelChunkData) channelEvent()         {}
 func (channelSessionOpen) channelEvent()       {}
 func (channelPeerChange) channelEvent()        {}
-func (channelPublish) channelEvent()           {}
-func (channelSessionDisposed) channelEvent()   {}
 func (channelChunkSent) channelEvent()         {}
 func (channelRoutingUpdate) channelEvent()     {}
 func (channelPeerReconstructed) channelEvent() {}
-func (channelWork) channelEvent()              {}
+func (channelPeerSessionEnded) channelEvent()  {}
 func (channelVerifyResult) channelEvent()      {}
 func (channelDecoded) channelEvent()           {}
-
-// ---------------------------------------------------------------------------
-// Peer control events (Session -> PeerConn outbound loop)
-// ---------------------------------------------------------------------------
+func (channelPublish[CI, R]) channelEvent()    {}
 
 // peerCtrlEvent is a control event from Session to PeerConn's outbound loop.
 type peerCtrlEvent interface {
@@ -162,7 +141,6 @@ type peerOpenSession struct {
 	messageID      MessageID
 	preamble       []byte
 	initialRouting []byte // embedded in SessionOpen proto message
-	channelInbox   chan<- channelEvent
 	chunkOutbox    <-chan peerSendChunk
 }
 
@@ -205,7 +183,7 @@ func (peerCloseStream) peerCtrlEvent()  {}
 // maintain a session-to-inbox map. handle is threaded back in
 // channelChunkSent for correlation; chunkID carries the wire bytes.
 type peerSendChunk struct {
-	peerID      PeerID
+	peerID      identity.PeerID
 	channelID   ChannelID
 	messageID   MessageID
 	handle      ChunkHandle

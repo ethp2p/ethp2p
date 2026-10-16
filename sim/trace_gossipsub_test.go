@@ -12,39 +12,6 @@ import (
 	"github.com/libp2p/go-libp2p/core/peer"
 )
 
-func TestTraceWriterWithOptions_WritesDecoderMetadata(t *testing.T) {
-	var buf bytes.Buffer
-	tw, err := NewTraceWriterWithOptions(
-		&buf,
-		time.Unix(0, 0),
-		[]string{"n0", "n1"},
-		Topology{},
-		json.RawMessage(`{"name":"gossipsub"}`),
-		TraceHeaderOptions{
-			DecoderName: "gossipsub",
-			PeerIDs:     []string{"peer-a", "peer-b"},
-		},
-	)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := tw.Close(); err != nil {
-		t.Fatal(err)
-	}
-
-	var hdr traceHeader
-	line := strings.Split(strings.TrimSpace(buf.String()), "\n")[0]
-	if err := json.Unmarshal([]byte(line), &hdr); err != nil {
-		t.Fatal(err)
-	}
-	if hdr.DecoderName != "gossipsub" {
-		t.Fatalf("decoderName = %q, want gossipsub", hdr.DecoderName)
-	}
-	if len(hdr.PeerIDs) != 2 || hdr.PeerIDs[1] != "peer-b" {
-		t.Fatalf("peer_ids = %v", hdr.PeerIDs)
-	}
-}
-
 func TestGossipsubTrace_ProducesExpectedEvents(t *testing.T) {
 	var buf bytes.Buffer
 	t0 := time.Now()

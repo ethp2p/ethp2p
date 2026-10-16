@@ -3,8 +3,6 @@ package sim
 import (
 	"context"
 	"fmt"
-	"log/slog"
-	"net"
 	"testing"
 	"testing/synctest"
 	"time"
@@ -12,29 +10,6 @@ import (
 	"github.com/ethp2p/ethp2p/broadcast/rs"
 	"github.com/stretchr/testify/require"
 )
-
-type addressOnlyDriver struct {
-	addrs map[int]net.Addr
-}
-
-func (*addressOnlyDriver) NewNode(int, *slog.Logger) (Node, error) { return nil, nil }
-func (d *addressOnlyDriver) NodeAddr(nodeNum int) net.Addr         { return d.addrs[nodeNum] }
-func (*addressOnlyDriver) Start()                                  {}
-func (*addressOnlyDriver) Close() error                            { return nil }
-
-func TestScenarioPeerAddressesIncludeInboundTopologyNeighbors(t *testing.T) {
-	node0 := &net.UDPAddr{IP: net.IPv4(10, 0, 0, 1), Port: DefaultListenPort}
-	node1 := &net.UDPAddr{IP: net.IPv4(10, 0, 0, 2), Port: DefaultListenPort}
-	scenario := &Scenario{
-		Driver: &addressOnlyDriver{addrs: map[int]net.Addr{0: node0, 1: node1}},
-		topology: Topology{Edges: []EdgeSpec{
-			{Source: 0, Target: 1},
-		}},
-	}
-
-	peers := scenario.peerAddresses(1, nil)
-	require.Equal(t, map[int]net.Addr{0: node0}, peers)
-}
 
 func TestNetwork(t *testing.T) {
 	tests := []Topology{
@@ -83,36 +58,23 @@ func TestNetwork(t *testing.T) {
 					NumMessages: 1,
 					MessageSize: 10 * 1024,
 					Driver: &SimnetDriver{
-						Strategy: ECStrategy(rs.NewScheme(rs.Config{
+						Strategy: Strategy{Name: "RS", RS: rs.Config{
 							DataShards:   16,
 							ParityShards: 16,
-						})),
+						}},
 						Topology: tt,
 					},
 				},
 			},
 			{
-				Name: "RS-ChunkLen",
+				Name: "RS chunk length",
 				Scenario: &Scenario{
 					NumMessages: 10,
 					MessageSize: 10 * 1024,
 					Driver: &SimnetDriver{
-						Strategy: ECStrategy(rs.NewScheme(rs.Config{
+						Strategy: Strategy{Name: "RS", RS: rs.Config{
 							ChunkLen: 16 << 10,
-						})),
-						Topology: tt,
-					},
-				},
-			},
-			{
-				Name: "RS-ChunkLen-2",
-				Scenario: &Scenario{
-					NumMessages: 10,
-					MessageSize: 10 * 1024,
-					Driver: &SimnetDriver{
-						Strategy: ECStrategy(rs.NewScheme(rs.Config{
-							ChunkLen: 16 << 10,
-						})),
+						}},
 						Topology: tt,
 					},
 				},
@@ -123,7 +85,7 @@ func TestNetwork(t *testing.T) {
 					NumMessages: 30,
 					MessageSize: 10 * 1024,
 					Driver: &SimnetDriver{
-						Strategy: GossipsubStrategy(),
+						Strategy: Strategy{Name: "gossipsub"},
 						Topology: tt,
 					},
 				},

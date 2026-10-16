@@ -15,7 +15,6 @@ jobs:
       - name: Lint specs
         uses: rvben/rumdl@v0
         with:
-          version: "0.2.78"
           path: specs/
           report-type: annotations
 
@@ -32,7 +31,7 @@ jobs:
         run: go vet ./...
 
       - name: Install staticcheck
-        run: go install honnef.co/go/tools/cmd/staticcheck@v0.8.1
+        run: go install honnef.co/go/tools/cmd/staticcheck@latest
 
       - name: Run staticcheck
         run: staticcheck ./...
@@ -46,8 +45,21 @@ jobs:
         with:
           go-version-file: go.mod
 
-      - name: Run unit tests
-        run: go test -race -v ./broadcast/...
+      - name: Run tests
+        run: go test -race $(go list ./... | grep -v '/sim$')
+
+      - name: Run sim trace tests
+        run: go test -race -run 'TestTraceWriter|TestTracingObserver|TestGossipsubTrace|TestBuildTraceHeaderOptions|TestNodeIdentity' ./sim/...
+
+  sim-cli-python:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v6
+
+      - name: Run sim CLI tests
+        run: cd sim/cli && uv sync && uv run python -m unittest discover -s tests
 
   simnet-rs:
     runs-on: ubuntu-latest

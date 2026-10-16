@@ -160,7 +160,7 @@ func TestStreamHeadersRoundTrip(t *testing.T) {
 		selector Selector
 		wire     []byte
 	}{
-		{name: "zero", selector: Selector{}, wire: []byte{0x00, 0x00}},
+		{name: "control", selector: Selector{Family: 0, Protocol: 0}, wire: []byte{0x00, 0x00}},
 		{name: "chunk", selector: Selector{Family: 1, Protocol: 3}, wire: []byte{0x01, 0x03}},
 		{name: "slash", selector: Selector{Family: 1, Protocol: '/'}, wire: []byte{0x01, 0x2f}},
 		{name: "two-byte fields", selector: Selector{Family: 128, Protocol: 300}, wire: []byte{0x80, 0x01, 0xac, 0x02}},
