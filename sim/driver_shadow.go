@@ -25,7 +25,18 @@ func (s *ShadowDriver) Close() error {
 
 // NewNode creates a node for Shadow simulation.
 func (s *ShadowDriver) NewNode(nodeNum int, logger *slog.Logger) (Node, error) {
-	conn, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4zero, Port: DefaultListenPort})
+	// Bind to this host's Shadow IP rather than the wildcard address:
+	// the node's ENR record is built from LocalAddr and rejects
+	// unspecified addresses.
+	hostname := fmt.Sprintf("node%d", nodeNum)
+	addrs, err := net.LookupHost(hostname)
+	if err != nil {
+		return nil, fmt.Errorf("resolve own Shadow hostname %s: %w", hostname, err)
+	}
+	if len(addrs) == 0 {
+		return nil, fmt.Errorf("no addresses for own Shadow hostname %s", hostname)
+	}
+	conn, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.ParseIP(addrs[0]), Port: DefaultListenPort})
 	if err != nil {
 		return nil, err
 	}
