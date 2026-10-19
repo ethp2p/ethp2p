@@ -27,6 +27,10 @@ def merge_shadow_traces(
         raise FileNotFoundError(f"Shadow hosts directory not found: {hosts_dir}")
 
     all_events: list[list] = []
+    # Each node writes the same header, so the first one seen carries the
+    # run-wide metadata. Lifting it here avoids re-deriving peer IDs in Python,
+    # which would duplicate the Go identity derivation and could drift from it.
+    node_header: dict | None = None
 
     for node in topology.nodes:
         events_path = hosts_dir / f"node{node.num}" / "events.ndjson"
@@ -43,8 +47,11 @@ def merge_shadow_traces(
                 except json.JSONDecodeError:
                     continue
                 # Event lines are arrays: [timestamp_us, node_idx, code, ...]
-                # Skip header (dict with "v" key) and footer (dict with "end" key)
-                if isinstance(parsed, list) and len(parsed) >= 3:
+                # Header is the dict with a "v" key; footer has "end".
+                if isinstance(parsed, dict) and "v" in parsed:
+                    if node_header is None:
+                        node_header = parsed
+                elif isinstance(parsed, list) and len(parsed) >= 3:
                     all_events.append(parsed)
 
     all_events.sort(key=lambda ev: ev[0])
@@ -60,6 +67,13 @@ def merge_shadow_traces(
         "topology": topo_dict,
         "cfg": strat_dict,
     }
+
+    # Preserve the decoder and peer-ID mapping so consumers can resolve event
+    # peer IDs back to nodes. ethp2p peer IDs are transport identities rather
+    # than node numbers, so without this the events are unresolvable.
+    for key in ("decoderName", "peer_ids"):
+        if node_header and node_header.get(key):
+            header[key] = node_header[key]
 
     with open(output, "w") as f:
         f.write(json.dumps(header) + "\n")

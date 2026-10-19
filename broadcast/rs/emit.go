@@ -58,7 +58,6 @@ func (h *emitPlanner) Pop() any {
 	return ec
 }
 
-// Insert adds a new entry or updates an existing one.
 func (h *emitPlanner) Insert(ec emitEntry) {
 	if idx, ok := h.idToIndex[ec.Idx]; ok {
 		h.entries[idx] = ec
@@ -68,8 +67,6 @@ func (h *emitPlanner) Insert(ec emitEntry) {
 	heap.Push(h, ec)
 }
 
-// Top returns the entry with the lowest Count without removing it.
-// Returns zero value and false if the heap is empty.
 func (h *emitPlanner) Top() (emitEntry, bool) {
 	if len(h.entries) == 0 {
 		return emitEntry{}, false
@@ -77,12 +74,10 @@ func (h *emitPlanner) Top() (emitEntry, bool) {
 	return h.entries[0], true
 }
 
-// PopFront removes and returns the entry with the lowest Count.
 func (h *emitPlanner) PopFront() emitEntry {
 	return heap.Pop(h).(emitEntry)
 }
 
-// Increment increases the Count of the entry with the given ID by one.
 func (h *emitPlanner) Increment(id int) {
 	idx, ok := h.idToIndex[id]
 	if !ok {
@@ -92,13 +87,20 @@ func (h *emitPlanner) Increment(id int) {
 	heap.Fix(h, idx)
 }
 
-// Contains reports whether the heap has an entry with the given ID.
+func (h *emitPlanner) Decrement(id int) {
+	idx, ok := h.idToIndex[id]
+	if !ok {
+		return
+	}
+	h.entries[idx].Times--
+	heap.Fix(h, idx)
+}
+
 func (h *emitPlanner) Contains(id int) bool {
 	_, ok := h.idToIndex[id]
 	return ok
 }
 
-// Delete removes the entry with the given ID.
 func (h *emitPlanner) Delete(id int) {
 	idx, ok := h.idToIndex[id]
 	if !ok {
@@ -107,8 +109,6 @@ func (h *emitPlanner) Delete(id int) {
 	heap.Remove(h, idx)
 }
 
-// GetSent returns the Sent count for the given chunk ID.
-// Returns 0, false if the entry does not exist.
 func (h *emitPlanner) GetSent(id int) (int, bool) {
 	idx, ok := h.idToIndex[id]
 	if !ok {
@@ -117,8 +117,6 @@ func (h *emitPlanner) GetSent(id int) (int, bool) {
 	return h.entries[idx].Sent, true
 }
 
-// AddSent adjusts the Sent count for the given chunk ID by delta.
-// Sent does not affect heap ordering, so no reordering is performed.
 func (h *emitPlanner) AddSent(id int, delta int) {
 	idx, ok := h.idToIndex[id]
 	if !ok {

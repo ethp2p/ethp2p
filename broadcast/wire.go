@@ -1,52 +1,72 @@
 package broadcast
 
 import (
-	"encoding/binary"
 	"errors"
 	"fmt"
 	"io"
 
+	"github.com/ethp2p/ethp2p/wire"
 	"google.golang.org/protobuf/proto"
 )
 
-const MaxFrameSize = 1 << 20 // 1MB
+// maxBroadcastFrame is the largest payload of a BCAST, SESS or CHUNK frame.
+const maxBroadcastFrame = 1 << 20
 
-var ErrFrameTooLarge = errors.New("frame too large")
-
-// WriteFrame writes a length-prefixed protobuf message to w.
-// The 4-byte big-endian length and serialized payload are coalesced
-// into a single Write call.
-func WriteFrame(w io.Writer, msg proto.Message) error {
+// writeFrame writes msg as one frame of type typ to w in one Write call.
+func writeFrame(w io.Writer, typ wire.FrameType, msg proto.Message) error {
 	data, err := proto.Marshal(msg)
 	if err != nil {
 		return fmt.Errorf("marshal %T: %w", msg, err)
 	}
 
-	buf := make([]byte, 4+len(data))
-	binary.BigEndian.PutUint32(buf, uint32(len(data)))
-	copy(buf[4:], data)
-
-	_, err = w.Write(buf)
+	// io.Writer returns an error for any short write.
+	_, err = w.Write(wire.AppendFrame(nil, typ, data))
 	return err
 }
 
-// ReadFrame reads a length-prefixed protobuf message from r.
-func ReadFrame(r io.Reader, msg proto.Message) error {
-	var lenBuf [4]byte
-	if _, err := io.ReadFull(r, lenBuf[:]); err != nil {
+// readFrame reads one frame of type want into msg without consuming bytes after
+// the frame. A frame of another type is errUnexpectedFrame; FIN before the
+// frame is io.EOF.
+func readFrame(r io.Reader, want wire.FrameType, msg proto.Message) error {
+	typ, data, err := wire.ReadFrame(r, maxBroadcastFrame)
+	if err != nil {
 		return err
 	}
-	length := binary.BigEndian.Uint32(lenBuf[:])
-	if length > MaxFrameSize {
-		return ErrFrameTooLarge
+	if typ != want {
+		return errUnexpectedFrame
 	}
-	data := make([]byte, length)
-	if _, err := io.ReadFull(r, data); err != nil {
-		return err
-	}
+	return unmarshalFrame(data, msg)
+}
+
+func unmarshalFrame(data []byte, msg proto.Message) error {
 	if err := proto.Unmarshal(data, msg); err != nil {
 		return fmt.Errorf("unmarshal %T: %w", msg, err)
 	}
 	return nil
 }
 
+// readChunkData reads the DATA frame that follows a CHUNK stream's HEADER, then
+// the stream's FIN. The frame must be DATA with exactly dataLen bytes and the
+// only frame after HEADER; otherwise the error is errUnexpectedFrame. dataLen
+// bounds the allocation, so the caller admits it first.
+func readChunkData(r io.Reader, dataLen uint32) ([]byte, error) {
+	typ, data, err := wire.ReadFrame(r, int(dataLen))
+	switch {
+	case errors.Is(err, io.EOF), errors.Is(err, wire.ErrFrameTooLarge):
+		// FIN where DATA belongs, or a DATA longer than announced.
+		return nil, errUnexpectedFrame
+	case err != nil:
+		return nil, err
+	case typ != dataFrame || len(data) != int(dataLen):
+		return nil, errUnexpectedFrame
+	}
+	var next [1]byte
+	switch _, err := io.ReadFull(r, next[:]); {
+	case errors.Is(err, io.EOF):
+		return data, nil
+	case err == nil:
+		return nil, errUnexpectedFrame
+	default:
+		return nil, err
+	}
+}

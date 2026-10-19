@@ -21,16 +21,10 @@ const (
 	_ = protoimpl.EnforceVersion(protoimpl.MaxVersion - 20)
 )
 
-// Bcast is the control frame exchanged on the per-peer BCAST stream.
-// Carries handshake, subscribe, and unsubscribe messages.
+// Bcast is the protocol namespace for BCAST streams: a HANDSHAKE frame, then
+// any number of SUBSCRIBE and UNSUBSCRIBE frames.
 type Bcast struct {
-	state protoimpl.MessageState `protogen:"open.v1"`
-	// Types that are valid to be assigned to Message:
-	//
-	//	*Bcast_PeerHandshake
-	//	*Bcast_ChannelSubscribe
-	//	*Bcast_ChannelUnsubscribe
-	Message       isBcast_Message `protobuf_oneof:"message"`
+	state         protoimpl.MessageState `protogen:"open.v1"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -65,72 +59,10 @@ func (*Bcast) Descriptor() ([]byte, []int) {
 	return file_broadcast_pb_broadcast_proto_rawDescGZIP(), []int{0}
 }
 
-func (x *Bcast) GetMessage() isBcast_Message {
-	if x != nil {
-		return x.Message
-	}
-	return nil
-}
-
-func (x *Bcast) GetPeerHandshake() *Bcast_Handshake {
-	if x != nil {
-		if x, ok := x.Message.(*Bcast_PeerHandshake); ok {
-			return x.PeerHandshake
-		}
-	}
-	return nil
-}
-
-func (x *Bcast) GetChannelSubscribe() *Bcast_Subscribe {
-	if x != nil {
-		if x, ok := x.Message.(*Bcast_ChannelSubscribe); ok {
-			return x.ChannelSubscribe
-		}
-	}
-	return nil
-}
-
-func (x *Bcast) GetChannelUnsubscribe() *Bcast_Unsubscribe {
-	if x != nil {
-		if x, ok := x.Message.(*Bcast_ChannelUnsubscribe); ok {
-			return x.ChannelUnsubscribe
-		}
-	}
-	return nil
-}
-
-type isBcast_Message interface {
-	isBcast_Message()
-}
-
-type Bcast_PeerHandshake struct {
-	PeerHandshake *Bcast_Handshake `protobuf:"bytes,1,opt,name=peer_handshake,json=peerHandshake,proto3,oneof"`
-}
-
-type Bcast_ChannelSubscribe struct {
-	ChannelSubscribe *Bcast_Subscribe `protobuf:"bytes,2,opt,name=channel_subscribe,json=channelSubscribe,proto3,oneof"`
-}
-
-type Bcast_ChannelUnsubscribe struct {
-	ChannelUnsubscribe *Bcast_Unsubscribe `protobuf:"bytes,3,opt,name=channel_unsubscribe,json=channelUnsubscribe,proto3,oneof"`
-}
-
-func (*Bcast_PeerHandshake) isBcast_Message() {}
-
-func (*Bcast_ChannelSubscribe) isBcast_Message() {}
-
-func (*Bcast_ChannelUnsubscribe) isBcast_Message() {}
-
-// Sess is the frame type carried on per-session SESS streams.
-// The first frame MUST be Open (which may carry initial routing
-// state inline); subsequent frames are Update.
+// Sess is the protocol namespace for SESS streams: an OPEN frame, then any
+// number of UPDATE frames.
 type Sess struct {
-	state protoimpl.MessageState `protogen:"open.v1"`
-	// Types that are valid to be assigned to Frame:
-	//
-	//	*Sess_SessionOpen
-	//	*Sess_RoutingUpdate
-	Frame         isSess_Frame `protobuf_oneof:"frame"`
+	state         protoimpl.MessageState `protogen:"open.v1"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -165,48 +97,8 @@ func (*Sess) Descriptor() ([]byte, []int) {
 	return file_broadcast_pb_broadcast_proto_rawDescGZIP(), []int{1}
 }
 
-func (x *Sess) GetFrame() isSess_Frame {
-	if x != nil {
-		return x.Frame
-	}
-	return nil
-}
-
-func (x *Sess) GetSessionOpen() *Sess_Open {
-	if x != nil {
-		if x, ok := x.Frame.(*Sess_SessionOpen); ok {
-			return x.SessionOpen
-		}
-	}
-	return nil
-}
-
-func (x *Sess) GetRoutingUpdate() *Sess_Update {
-	if x != nil {
-		if x, ok := x.Frame.(*Sess_RoutingUpdate); ok {
-			return x.RoutingUpdate
-		}
-	}
-	return nil
-}
-
-type isSess_Frame interface {
-	isSess_Frame()
-}
-
-type Sess_SessionOpen struct {
-	SessionOpen *Sess_Open `protobuf:"bytes,1,opt,name=session_open,json=sessionOpen,proto3,oneof"`
-}
-
-type Sess_RoutingUpdate struct {
-	RoutingUpdate *Sess_Update `protobuf:"bytes,2,opt,name=routing_update,json=routingUpdate,proto3,oneof"`
-}
-
-func (*Sess_SessionOpen) isSess_Frame() {}
-
-func (*Sess_RoutingUpdate) isSess_Frame() {}
-
-// Chunk is the protocol namespace for chunk streams.
+// Chunk is the protocol namespace for CHUNK streams: a HEADER frame, then one
+// DATA frame whose payload is the raw chunk data.
 type Chunk struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	unknownFields protoimpl.UnknownFields
@@ -243,7 +135,7 @@ func (*Chunk) Descriptor() ([]byte, []int) {
 	return file_broadcast_pb_broadcast_proto_rawDescGZIP(), []int{2}
 }
 
-// Handshake is the first message exchanged on a BCAST stream.
+// Handshake is the payload of the HANDSHAKE frame.
 type Bcast_Handshake struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Version       uint32                 `protobuf:"varint,1,opt,name=version,proto3" json:"version,omitempty"`
@@ -386,11 +278,11 @@ func (x *Bcast_Unsubscribe) GetChannel() string {
 	return ""
 }
 
-// Open is the first frame on a SESS stream, establishing the session.
+// Open is the payload of the OPEN frame, which establishes the session.
 type Sess_Open struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Channel       string                 `protobuf:"bytes,1,opt,name=channel,proto3" json:"channel,omitempty"`
-	MessageId     string                 `protobuf:"bytes,2,opt,name=message_id,json=messageId,proto3" json:"message_id,omitempty"`
+	ObjectId      string                 `protobuf:"bytes,2,opt,name=object_id,json=objectId,proto3" json:"object_id,omitempty"`
 	Preamble      []byte                 `protobuf:"bytes,3,opt,name=preamble,proto3" json:"preamble,omitempty"`
 	InitialUpdate []byte                 `protobuf:"bytes,4,opt,name=initial_update,json=initialUpdate,proto3" json:"initial_update,omitempty"`
 	unknownFields protoimpl.UnknownFields
@@ -434,9 +326,9 @@ func (x *Sess_Open) GetChannel() string {
 	return ""
 }
 
-func (x *Sess_Open) GetMessageId() string {
+func (x *Sess_Open) GetObjectId() string {
 	if x != nil {
-		return x.MessageId
+		return x.ObjectId
 	}
 	return ""
 }
@@ -455,7 +347,8 @@ func (x *Sess_Open) GetInitialUpdate() []byte {
 	return nil
 }
 
-// Update carries an opaque routing state update (e.g. bitmap, have list).
+// Update is the payload of an UPDATE frame: an opaque routing state update
+// (e.g. bitmap, have list).
 type Sess_Update struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Data          []byte                 `protobuf:"bytes,1,opt,name=data,proto3" json:"data,omitempty"`
@@ -500,12 +393,12 @@ func (x *Sess_Update) GetData() []byte {
 	return nil
 }
 
-// Header prefixes each chunk on a CHUNK stream. The receiver reads
-// data_length raw bytes from the stream immediately after the header.
+// Header is the payload of the HEADER frame. data_length announces the
+// payload length of the DATA frame that follows.
 type Chunk_Header struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Channel       string                 `protobuf:"bytes,1,opt,name=channel,proto3" json:"channel,omitempty"`
-	MessageId     string                 `protobuf:"bytes,2,opt,name=message_id,json=messageId,proto3" json:"message_id,omitempty"`
+	ObjectId      string                 `protobuf:"bytes,2,opt,name=object_id,json=objectId,proto3" json:"object_id,omitempty"`
 	ChunkId       []byte                 `protobuf:"bytes,3,opt,name=chunk_id,json=chunkId,proto3" json:"chunk_id,omitempty"`
 	DataLength    uint32                 `protobuf:"varint,4,opt,name=data_length,json=dataLength,proto3" json:"data_length,omitempty"`
 	unknownFields protoimpl.UnknownFields
@@ -549,9 +442,9 @@ func (x *Chunk_Header) GetChannel() string {
 	return ""
 }
 
-func (x *Chunk_Header) GetMessageId() string {
+func (x *Chunk_Header) GetObjectId() string {
 	if x != nil {
-		return x.MessageId
+		return x.ObjectId
 	}
 	return ""
 }
@@ -574,36 +467,27 @@ var File_broadcast_pb_broadcast_proto protoreflect.FileDescriptor
 
 const file_broadcast_pb_broadcast_proto_rawDesc = "" +
 	"\n" +
-	"\x1cbroadcast/pb/broadcast.proto\x12\x10ethp2p.broadcast\"\x9b\x03\n" +
-	"\x05Bcast\x12J\n" +
-	"\x0epeer_handshake\x18\x01 \x01(\v2!.ethp2p.broadcast.Bcast.HandshakeH\x00R\rpeerHandshake\x12P\n" +
-	"\x11channel_subscribe\x18\x02 \x01(\v2!.ethp2p.broadcast.Bcast.SubscribeH\x00R\x10channelSubscribe\x12V\n" +
-	"\x13channel_unsubscribe\x18\x03 \x01(\v2#.ethp2p.broadcast.Bcast.UnsubscribeH\x00R\x12channelUnsubscribe\x1aA\n" +
+	"\x1cbroadcast/pb/broadcast.proto\x12\x10ethp2p.broadcast\"\x9a\x01\n" +
+	"\x05Bcast\x1aA\n" +
 	"\tHandshake\x12\x18\n" +
 	"\aversion\x18\x01 \x01(\rR\aversion\x12\x1a\n" +
 	"\bchannels\x18\x02 \x03(\tR\bchannels\x1a%\n" +
 	"\tSubscribe\x12\x18\n" +
 	"\achannel\x18\x01 \x01(\tR\achannel\x1a'\n" +
 	"\vUnsubscribe\x12\x18\n" +
-	"\achannel\x18\x01 \x01(\tR\achannelB\t\n" +
-	"\amessage\"\xbc\x02\n" +
-	"\x04Sess\x12@\n" +
-	"\fsession_open\x18\x01 \x01(\v2\x1b.ethp2p.broadcast.Sess.OpenH\x00R\vsessionOpen\x12F\n" +
-	"\x0erouting_update\x18\x02 \x01(\v2\x1d.ethp2p.broadcast.Sess.UpdateH\x00R\rroutingUpdate\x1a\x82\x01\n" +
+	"\achannel\x18\x01 \x01(\tR\achannel\"\xa7\x01\n" +
+	"\x04Sess\x1a\x80\x01\n" +
 	"\x04Open\x12\x18\n" +
-	"\achannel\x18\x01 \x01(\tR\achannel\x12\x1d\n" +
-	"\n" +
-	"message_id\x18\x02 \x01(\tR\tmessageId\x12\x1a\n" +
+	"\achannel\x18\x01 \x01(\tR\achannel\x12\x1b\n" +
+	"\tobject_id\x18\x02 \x01(\tR\bobjectId\x12\x1a\n" +
 	"\bpreamble\x18\x03 \x01(\fR\bpreamble\x12%\n" +
 	"\x0einitial_update\x18\x04 \x01(\fR\rinitialUpdate\x1a\x1c\n" +
 	"\x06Update\x12\x12\n" +
-	"\x04data\x18\x01 \x01(\fR\x04dataB\a\n" +
-	"\x05frame\"\x86\x01\n" +
-	"\x05Chunk\x1a}\n" +
+	"\x04data\x18\x01 \x01(\fR\x04data\"\x84\x01\n" +
+	"\x05Chunk\x1a{\n" +
 	"\x06Header\x12\x18\n" +
-	"\achannel\x18\x01 \x01(\tR\achannel\x12\x1d\n" +
-	"\n" +
-	"message_id\x18\x02 \x01(\tR\tmessageId\x12\x19\n" +
+	"\achannel\x18\x01 \x01(\tR\achannel\x12\x1b\n" +
+	"\tobject_id\x18\x02 \x01(\tR\bobjectId\x12\x19\n" +
 	"\bchunk_id\x18\x03 \x01(\fR\achunkId\x12\x1f\n" +
 	"\vdata_length\x18\x04 \x01(\rR\n" +
 	"dataLengthB'Z%github.com/ethp2p/ethp2p/broadcast/pbb\x06proto3"
@@ -633,31 +517,17 @@ var file_broadcast_pb_broadcast_proto_goTypes = []any{
 	(*Chunk_Header)(nil),      // 8: ethp2p.broadcast.Chunk.Header
 }
 var file_broadcast_pb_broadcast_proto_depIdxs = []int32{
-	3, // 0: ethp2p.broadcast.Bcast.peer_handshake:type_name -> ethp2p.broadcast.Bcast.Handshake
-	4, // 1: ethp2p.broadcast.Bcast.channel_subscribe:type_name -> ethp2p.broadcast.Bcast.Subscribe
-	5, // 2: ethp2p.broadcast.Bcast.channel_unsubscribe:type_name -> ethp2p.broadcast.Bcast.Unsubscribe
-	6, // 3: ethp2p.broadcast.Sess.session_open:type_name -> ethp2p.broadcast.Sess.Open
-	7, // 4: ethp2p.broadcast.Sess.routing_update:type_name -> ethp2p.broadcast.Sess.Update
-	5, // [5:5] is the sub-list for method output_type
-	5, // [5:5] is the sub-list for method input_type
-	5, // [5:5] is the sub-list for extension type_name
-	5, // [5:5] is the sub-list for extension extendee
-	0, // [0:5] is the sub-list for field type_name
+	0, // [0:0] is the sub-list for method output_type
+	0, // [0:0] is the sub-list for method input_type
+	0, // [0:0] is the sub-list for extension type_name
+	0, // [0:0] is the sub-list for extension extendee
+	0, // [0:0] is the sub-list for field type_name
 }
 
 func init() { file_broadcast_pb_broadcast_proto_init() }
 func file_broadcast_pb_broadcast_proto_init() {
 	if File_broadcast_pb_broadcast_proto != nil {
 		return
-	}
-	file_broadcast_pb_broadcast_proto_msgTypes[0].OneofWrappers = []any{
-		(*Bcast_PeerHandshake)(nil),
-		(*Bcast_ChannelSubscribe)(nil),
-		(*Bcast_ChannelUnsubscribe)(nil),
-	}
-	file_broadcast_pb_broadcast_proto_msgTypes[1].OneofWrappers = []any{
-		(*Sess_SessionOpen)(nil),
-		(*Sess_RoutingUpdate)(nil),
 	}
 	type x struct{}
 	out := protoimpl.TypeBuilder{
