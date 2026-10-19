@@ -1,0 +1,27 @@
+# Minimal Shadow smoke config: 4 nodes, one RS message.
+# Derived from 4n-100kb-rs-rlnc-gossipsub.yaml, trimmed for CI:
+# a single strategy (RS) and a 5-minute simulated stop time. The node's
+# virtual timeline needs ~2.5 min (10s start + 2min pre-publish wait +
+# delivery), so 5 min bounds a failed-delivery run without cutting off
+# a successful one.
+simulation:
+  driver: shadow
+  log_level: info
+
+strategies:
+  - name: RS
+    data_shards: 16
+    parity_shards: 16
+
+workload:
+  num_messages: 1
+  message_size: 100000
+  publish_wait_seconds: 5.0
+  stop_time_minutes: 5.0
+
+topology:
+  generate:
+    num_nodes: 4
+    degree: 2
+    type: random
+    seed: 42
