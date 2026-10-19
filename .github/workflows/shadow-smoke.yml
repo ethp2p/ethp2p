@@ -1,0 +1,80 @@
+name: Shadow smoke
+
+# Shadow is built from source (upstream publishes no binaries), which is
+# far too expensive for every PR. Run manually or weekly instead; the
+# built Shadow installation is cached between runs.
+on:
+  workflow_dispatch:
+  schedule:
+    # Mondays 06:00 UTC
+    - cron: "0 6 * * 1"
+
+jobs:
+  shadow-smoke:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - uses: astral-sh/setup-uv@v6
+
+      # Shadow build dependencies (shadow.github.io/docs/guide/install_dependencies)
+      - name: Install Shadow build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            cmake findutils gcc g++ libc-dbg libclang-dev \
+            libglib2.0-0 libglib2.0-dev make netbase pkg-config \
+            python3 python3-networkx python3-yaml util-linux xz-utils
+
+      - name: Cache Shadow installation
+        id: shadow-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/shadow-install
+          key: shadow-v3.3.0-ubuntu-24.04-${{ runner.arch }}
+
+      - name: Build Shadow v3.3.0 from source
+        if: steps.shadow-cache.outputs.cache-hit != 'true'
+        run: |
+          rustup update stable
+          git clone --depth 1 --branch v3.3.0 https://github.com/shadow/shadow.git ~/shadow-src
+          cd ~/shadow-src
+          ./setup build -j4 --prefix "$HOME/shadow-install"
+          ./setup install
+          rm -rf ~/shadow-src
+
+      - name: Show Shadow version
+        run: |
+          echo "$HOME/shadow-install/bin" >> "$GITHUB_PATH"
+          "$HOME/shadow-install/bin/shadow" --version
+
+      - name: Run 4-node Shadow smoke simulation
+        timeout-minutes: 20
+        run: |
+          export PATH="$HOME/shadow-install/bin:$PATH"
+          cd sim/cli
+          uv sync
+          uv run simctl run ../configs/ci-shadow-smoke.yaml --output-dir="$GITHUB_WORKSPACE/shadow-smoke-runs"
+
+      # simctl only propagates Shadow's exit code; a node that never
+      # receives the message still exits cleanly at the stop time.
+      # Assert all 3 non-origin nodes actually received it.
+      - name: Verify message delivery to all nodes
+        run: |
+          receivers=$(grep -rl 'msg="Received Message"' shadow-smoke-runs | wc -l)
+          echo "Nodes that received the message: $receivers (expected 3)"
+          grep -rh 'msg="message stats"' shadow-smoke-runs || true
+          test "$receivers" -eq 3
+
+      - name: Upload simulation logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: shadow-smoke-logs
+          path: shadow-smoke-runs
+          if-no-files-found: ignore
