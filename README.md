@@ -22,16 +22,11 @@ Layering is the bread and butter of networking stacks, and ethp2p couldn't break
 
 The first priority is the broadcast layer: an erasure-coded broadcast engine with Ethereum-optimized schemes, a minimal QUIC-based transport, a simulation framework, and a high-performance graphical visualizer.
 
-The transport, peering, and control layers follow. In parallel, we are researching privacy and scrutinizing design decisions to ensure we only advance. See [001-ethp2p](specs/001-ethp2p.md) for the full architecture and design rationale.
+The transport, peering, and control layers follow. In parallel, we are researching privacy and scrutinizing design decisions to ensure we only advance. See the [Overview](specs/00-foundations/01-overview.md) for the layers and design principles.
 
 ## Specs
 
-| Spec                                                     | Description                                                              |
-| -------------------------------------------------------- | ------------------------------------------------------------------------ |
-| [ethp2p](specs/001-ethp2p.md)                            | Architecture, design rationale, layer responsibilities                   |
-| [Broadcast framework](specs/002-ec-broadcast.md)         | Wire protocol, session lifecycle, stream types, Strategy interface       |
-| [Reed-Solomon strategy](specs/003-ec-broadcast-rs.md)    | Per-chunk hash verification, bitmap routing, consistent-hash relay dedup |
-| [RLNC strategy](specs/004-ec-broadcast-rlnc.md)          | Ristretto255 arithmetic, rank-based routing, subspace fingerprinting     |
+The specs live in [`specs/`](specs/README.md), one topic per file, grouped by area: foundations, transport, peering, broadcast, privacy, control, adoption, and a roadmap of ideas. Each spec's front matter records whether it is implemented, proposed, or an idea. The site in [`site/`](site/) renders them as a map of the stack.
 
 When working on specs, run:
 

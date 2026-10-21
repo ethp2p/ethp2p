@@ -1,0 +1,120 @@
+@import "tailwindcss";
+@import "@fontsource-variable/inter";
+@import "./typeset.css";
+
+@theme {
+  --font-sans: "Inter Variable", ui-sans-serif, system-ui, sans-serif;
+  /* Typeset sets h1–h6 in --font-heading; spec headings stay sans. */
+  --font-heading: var(--font-sans);
+  /* The wordmark is the only serif. */
+  --font-display: Georgia, ui-serif, serif;
+  --font-mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+
+  /* Map scale: group ≈ 1.27× leaf, wordmark ≈ 1.5× group. */
+  --text-leaf: 0.9375rem;
+  --text-group: 1.1875rem;
+  --text-wordmark: 1.75rem;
+}
+
+/* Outside any layer, so these beat typeset.css's @layer components. */
+.typeset {
+  --typeset-size: 0.9375em;
+  --typeset-leading: 1.6;
+  --typeset-flow: 1em;
+  --color-foreground: var(--color-neutral-800);
+}
+.typeset :where(h1, h2, h3, h4) {
+  color: var(--color-neutral-950);
+}
+/* Specs backtick identifiers mid-sentence; Typeset's 0.85em reads as shrunken there. */
+.typeset :where(:not(pre) > code) {
+  font-size: 0.9em;
+}
+
+/* highlight.js token colors. No theme import: themes paint .hljs's
+   background, which would cover Typeset's pre background. */
+.hljs-keyword,
+.hljs-built_in,
+.hljs-type {
+  color: var(--color-violet-700);
+}
+.hljs-string,
+.hljs-symbol {
+  color: var(--color-emerald-700);
+}
+.hljs-number,
+.hljs-literal {
+  color: var(--color-amber-700);
+}
+.hljs-title,
+.hljs-attr {
+  color: var(--color-sky-700);
+}
+.hljs-comment {
+  color: var(--color-neutral-500);
+}
+.hljs-operator,
+.hljs-punctuation {
+  color: var(--color-neutral-600);
+}
+
+/* Map tree hairlines. Each li draws its own piece of the parent's vertical
+   line (::before) and its elbow into its row (::after); the last child's
+   vertical stops at its elbow. --mid is the distance from the li's top to the
+   centre of its first row, so it must track the row's padding-top and
+   line-height set below and in Map.tsx (leading-7 groups, leading-6 leaves). */
+.tree {
+  --tree-line: var(--color-neutral-300);
+  --elbow: 1.125rem;
+  --dot: 7px;
+}
+.tree li {
+  position: relative;
+}
+.tree-trunk > li,
+.tree-children > li {
+  padding-left: var(--elbow);
+}
+.tree-trunk > li::before,
+.tree-children > li::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  border-left: 1px solid var(--tree-line);
+}
+.tree-trunk > li:last-child::before,
+.tree-children > li:last-child::before {
+  bottom: auto;
+  height: var(--mid);
+}
+.tree-trunk > li::after,
+.tree-children > li::after {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: var(--mid);
+  width: calc(var(--elbow) - 5px);
+  border-top: 1px solid var(--tree-line);
+}
+.tree-group {
+  padding-top: 1rem;
+  --mid: calc(1rem + 14px);
+}
+.tree-leaf {
+  padding-top: 2px;
+  --mid: calc(2px + 12px);
+}
+/* Children hang from the centre of their parent's dot. */
+.tree-children {
+  margin-left: calc(var(--dot) / 2 - 0.5px);
+}
+/* The trunk drops from under the wordmark's first letter. */
+.tree-trunk {
+  margin-left: 0.3rem;
+  margin-top: 0.5rem;
+}
+.tree-detached {
+  margin-top: 0.5rem;
+}
