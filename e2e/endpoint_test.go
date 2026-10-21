@@ -41,7 +41,7 @@ func TestEndpointBroadcastRoundTrip(t *testing.T) {
 		}
 		defer out.Close()
 		// A multistream-select header: varint length 19, then the protocol line.
-		// No ethp2p stream header begins with 0x13, because family 19 is
+		// No ethp2p stream header begins with 0x13, because protocol 19 is
 		// reserved, so the endpoint routes the stream to the libp2p view.
 		frame := append([]byte{19}, "/multistream/1.0.0\n"...)
 		if _, err := out.Write(frame); err != nil {

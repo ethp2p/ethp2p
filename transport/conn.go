@@ -280,7 +280,7 @@ func (c *Conn) drainBidi() {
 					if peerReset(err) {
 						accepted.CancelWrite(quicCode(wire.Unspecified))
 					} else {
-						resetBi(accepted, wire.TimeoutOr(err, wire.BadSelector))
+						resetBi(accepted, wire.TimeoutOr(err, wire.BadHeader))
 					}
 				}
 				return
@@ -310,7 +310,7 @@ func (c *Conn) drainBidi() {
 
 // multistreamFirstByte begins every multistream-select header: it is the
 // length of "/multistream/1.0.0\n". No ethp2p stream header begins with it,
-// because family 19 is reserved.
+// because protocol 19 is reserved.
 const multistreamFirstByte = 0x13
 
 // classifyBi peeks a bidirectional stream's first byte within timeout,

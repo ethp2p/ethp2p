@@ -13,14 +13,23 @@ func TestClassifiedStreamsWaitWithoutOverload(t *testing.T) {
 	pair := newViewPair(t, 64)
 	server := pair.serverEth
 	const count = 20
+	// Protocol values skip 19: as a first byte it is libp2p's
+	// multistream-select prefix, not an ethp2p header.
+	protocolAt := func(i int) wire.Protocol {
+		p := wire.Protocol(i + 1)
+		if p >= 19 {
+			p++
+		}
+		return p
+	}
 	for i := range count {
 		bi, err := pair.clientEth.OpenStream(ctx)
 		if err != nil {
 			t.Fatal(err)
 		}
-		// A selector keeps payload 0x13 from being mistaken for libp2p's
+		// A protocol header keeps payload 0x13 from being mistaken for libp2p's
 		// multistream-select prefix during bidirectional classification.
-		head := wire.AppendSelector(nil, testSelector(wire.Protocol(i+1)))
+		head := wire.AppendHeader(nil, protocolAt(i))
 		if _, err := bi.Write(append(head, byte(i))); err != nil {
 			t.Fatal(err)
 		}
@@ -34,7 +43,7 @@ func TestClassifiedStreamsWaitWithoutOverload(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		head = wire.AppendSelector(nil, testSelector(wire.Protocol(i+1)))
+		head = wire.AppendHeader(nil, protocolAt(i))
 		if _, err := uni.Write(append(head, byte(i))); err != nil {
 			t.Fatal(err)
 		}
@@ -50,9 +59,9 @@ func TestClassifiedStreamsWaitWithoutOverload(t *testing.T) {
 		if !ok {
 			t.Fatal("bidirectional stream is not a *quic.Stream")
 		}
-		sel, err := wire.ReadSelector(bi)
-		if err != nil || sel != testSelector(wire.Protocol(i+1)) {
-			t.Fatalf("bidi selector = %v, %v; want %v", sel, err, testSelector(wire.Protocol(i+1)))
+		sel, err := wire.ReadHeader(bi)
+		if err != nil || sel != protocolAt(i) {
+			t.Fatalf("bidi protocol = %v, %v; want %v", sel, err, protocolAt(i))
 		}
 		data, err := io.ReadAll(bi)
 		if err != nil || len(data) != 1 || data[0] != byte(i) {
@@ -63,9 +72,9 @@ func TestClassifiedStreamsWaitWithoutOverload(t *testing.T) {
 		if _, ok := any(uni).(*quic.Stream); ok {
 			t.Fatal("unidirectional stream is a *quic.Stream")
 		}
-		sel, err = wire.ReadSelector(uni)
-		if err != nil || sel != testSelector(wire.Protocol(i+1)) {
-			t.Fatalf("uni selector = %v, %v; want %v", sel, err, testSelector(wire.Protocol(i+1)))
+		sel, err = wire.ReadHeader(uni)
+		if err != nil || sel != protocolAt(i) {
+			t.Fatalf("uni protocol = %v, %v; want %v", sel, err, protocolAt(i))
 		}
 		data, err = io.ReadAll(uni)
 		if err != nil || len(data) != 1 || data[0] != byte(i) {

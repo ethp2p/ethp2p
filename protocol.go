@@ -16,30 +16,19 @@ import (
 	"github.com/quic-go/quic-go"
 )
 
-// ProtocolSpec registers one protocol of a Family.
-type ProtocolSpec struct {
-	Protocol wire.Protocol
-	// MaxQueued bounds, per peer, the incoming streams classified but not yet
-	// returned by Next. It is local and never advertised; it must be at least 1.
-	MaxQueued int
+// Protocol is one registered protocol: its number, event queue and wake
+// channel. It is shared with a peer when the peer's Hello lists its number.
+type Protocol struct {
+	id    wire.Protocol
+	wake  chan<- struct{}
+	mu    sync.Mutex
+	ready list.List // round-robin ring of *peerDelivery, at most one entry per peer
 }
 
-// Family is a set of protocols registered together under one family code,
-// sharing one event queue and wake channel. It is shared with a peer when the
-// peer's Hello lists its code.
-type Family struct {
-	code      wire.Family
-	protocols []ProtocolSpec // ascending by Protocol; immutable after Register
-	wake      chan<- struct{}
-	mu        sync.Mutex
-	ready     list.List // round-robin ring of *peerDelivery, at most one entry per peer
-}
-
-// Register assigns a set of protocols, strictly ascending by number, to the
-// family with code, and gives it its wake channel. The code must not be the
-// control family, the reserved family, or one already registered. Invalid
+// Register assigns wake to the protocol numbered id. id must not be the
+// control protocol, the reserved number, or one already registered. Invalid
 // registrations leave the stack unchanged. All setup must finish before Start.
-func (s *Stack) Register(code wire.Family, protocols []ProtocolSpec, wake chan<- struct{}) (*Family, error) {
+func (s *Stack) Register(id wire.Protocol, wake chan<- struct{}) (*Protocol, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.ctx.Err() != nil {
@@ -48,41 +37,30 @@ func (s *Stack) Register(code wire.Family, protocols []ProtocolSpec, wake chan<-
 	if s.helloBytes != nil {
 		return nil, errors.New("stack registration is closed")
 	}
-	if len(protocols) == 0 {
-		return nil, errors.New("family needs at least one protocol")
-	}
 	if wake == nil || cap(wake) == 0 {
 		return nil, errors.New("wake channel must have capacity at least one")
 	}
-	if code == control.ControlFamily || code == wire.ReservedFamily {
-		return nil, fmt.Errorf("family %d cannot be registered", code)
+	if id == control.ControlProtocol || id == wire.ReservedProtocol {
+		return nil, fmt.Errorf("protocol %d cannot be registered", id)
 	}
-	if len(s.families) == control.MaxFamilies {
-		return nil, fmt.Errorf("too many families: limit %d", control.MaxFamilies)
+	if len(s.protocols) == control.MaxProtocols {
+		return nil, fmt.Errorf("too many protocols: limit %d", control.MaxProtocols)
 	}
-	for _, family := range s.families {
-		if family.code == code {
-			return nil, fmt.Errorf("family %d already registered", code)
+	for _, protocol := range s.protocols {
+		if protocol.id == id {
+			return nil, fmt.Errorf("protocol %d already registered", id)
 		}
 	}
-	for i, spec := range protocols {
-		if i > 0 && spec.Protocol <= protocols[i-1].Protocol {
-			return nil, errors.New("protocols must be strictly ascending")
-		}
-		if spec.MaxQueued < 1 {
-			return nil, fmt.Errorf("protocol %d needs MaxQueued at least 1", spec.Protocol)
-		}
-	}
-	family := &Family{code: code, protocols: slices.Clone(protocols), wake: wake}
-	s.families = append(s.families, family)
-	return family, nil
+	protocol := &Protocol{id: id, wake: wake}
+	s.protocols = append(s.protocols, protocol)
+	return protocol, nil
 }
 
 // Next returns one pending event without blocking. Peers take turns, and each
 // peer delivers PeerUp, its streams in FIFO order, then PeerDown. A returned
-// StreamIn stops counting against its protocol's MaxQueued. Streams still
-// queued on peer closure are cancelled by the stack and are never returned.
-func (f *Family) Next() (Event, bool) {
+// Streams still queued on peer closure are cancelled by the stack and are
+// never returned.
+func (f *Protocol) Next() (Event, bool) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	front := f.ready.Front()
@@ -98,15 +76,14 @@ func (f *Family) Next() (Event, bool) {
 		d.up = true
 		event.Kind = PeerUp
 	case len(d.streams) != 0:
-		pending := d.streams[0]
-		d.streams[0] = pendingStream{}
+		stream := d.streams[0]
+		d.streams[0] = nil
 		d.streams = d.streams[1:]
 		if len(d.streams) == 0 {
 			d.streams = nil
 		}
-		d.queued[pending.protocol]--
-		event.Kind, event.Protocol = StreamIn, pending.protocol
-		event.Stream = wrapReceiveStream(pending.stream)
+		event.Kind = StreamIn
+		event.Stream = wrapReceiveStream(stream)
 	default:
 		event.Kind, event.Code = PeerDown, d.code
 		return event, true
@@ -117,44 +94,33 @@ func (f *Family) Next() (Event, bool) {
 	return event, true
 }
 
-// maxQueued returns the queue limit for a protocol the family owns, and 0 for
-// any other protocol: Register requires every limit to be at least 1.
-func (f *Family) maxQueued(protocol wire.Protocol) int {
-	for _, spec := range f.protocols {
-		if spec.Protocol == protocol {
-			return spec.MaxQueued
-		}
-	}
-	return 0
-}
-
-// sharedWith reports whether the family's code is in the peer's families,
+// sharedWith reports whether the protocol's number is in the peer's protocols,
 // which readHello validated as strictly ascending.
-func (f *Family) sharedWith(families []wire.Family) bool {
-	_, found := slices.BinarySearch(families, f.code)
+func (f *Protocol) sharedWith(protocols []wire.Protocol) bool {
+	_, found := slices.BinarySearch(protocols, f.id)
 	return found
 }
 
 // addPeer queues a PeerUp for a new handle. The caller fills in
 // peer.delivery from the result.
-func (f *Family) addPeer(p *Peer) *peerDelivery {
+func (f *Protocol) addPeer(p *Peer) *peerDelivery {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	d := &peerDelivery{family: f, peer: p, queued: make(map[wire.Protocol]int)}
+	d := &peerDelivery{protocol: f, peer: p}
 	d.schedule()
 	return d
 }
 
 // signal wakes the consumer without blocking. The consumer drains until Next
 // reports empty before waiting, so no wake is ever lost.
-func (f *Family) signal() {
+func (f *Protocol) signal() {
 	select {
 	case f.wake <- struct{}{}:
 	default:
 	}
 }
 
-// EventKind identifies a family delivery.
+// EventKind identifies a protocol delivery.
 type EventKind uint8
 
 const (
@@ -166,13 +132,12 @@ const (
 	PeerDown
 )
 
-// Event is one delivery to a family.
+// Event is one delivery to a protocol.
 type Event struct {
-	Kind     EventKind
-	Peer     *Peer
-	Protocol wire.Protocol // StreamIn only; a protocol of the receiving family.
-	Stream   ReceiveStream // StreamIn only; bidirectional streams also implement Stream.
-	Code     wire.Code     // PeerDown only.
+	Kind   EventKind
+	Peer   *Peer
+	Stream ReceiveStream // StreamIn only; bidirectional streams also implement Stream.
+	Code   wire.Code     // PeerDown only.
 }
 
 // Cancel cancels every applicable side of StreamIn; other events are unchanged.
@@ -189,14 +154,14 @@ func (e Event) Cancel(code wire.Code) {
 // Reject refuses a StreamIn event. Other events are unchanged.
 func (e Event) Reject() { e.Cancel(wire.Refused) }
 
-// Peer is one Family's handle for one view. A new view gets a new handle.
-// Its context ends before the family can receive PeerDown.
+// Peer is one Protocol's handle for one view. A new view gets a new handle.
+// Its context ends before the protocol can receive PeerDown.
 type Peer struct {
 	ctx      context.Context
 	cancel   context.CancelFunc
 	id       identity.PeerID
 	sup      *peerSupervisor // Record source; receives Close notifications
-	family   *Family
+	protocol *Protocol
 	conn     *transport.Conn
 	delivery *peerDelivery
 }
@@ -211,14 +176,10 @@ func (p *Peer) Record() *enr.Record { return p.sup.record.Load() }
 // Context ends when this handle ends.
 func (p *Peer) Context() context.Context { return p.ctx }
 
-// OpenUniStream opens a unidirectional stream of one of the family's
-// protocols and writes its stream header. On success, the caller owns the
-// stream and must close or cancel it. It panics for a protocol the
-// family does not own.
-func (p *Peer) OpenUniStream(ctx context.Context, protocol wire.Protocol) (SendStream, error) {
-	if p.family.maxQueued(protocol) == 0 {
-		panic(fmt.Sprintf("ethp2p: protocol %d not owned by family %d", protocol, p.family.code))
-	}
+// OpenUniStream opens a unidirectional stream for the handle's protocol and
+// writes its stream header. On success, the caller owns the stream and must
+// close or cancel it.
+func (p *Peer) OpenUniStream(ctx context.Context) (SendStream, error) {
 	if err := p.ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -234,7 +195,7 @@ func (p *Peer) OpenUniStream(ctx context.Context, protocol wire.Protocol) (SendS
 	}
 	// A fresh stream's first write of up to a packet is buffered without
 	// blocking in quic-go, so the context is checked once it returns.
-	err = wire.WriteSelector(stream, wire.Selector{Family: p.family.code, Protocol: protocol})
+	err = wire.WriteHeader(stream, p.protocol.id)
 	if err = errors.Join(err, ctx.Err()); err != nil {
 		stream.CancelWrite(streamCode(wire.TimeoutOr(err, wire.Unspecified)))
 		return nil, err
@@ -251,10 +212,7 @@ func (p *Peer) OpenUniStream(ctx context.Context, protocol wire.Protocol) (SendS
 
 // OpenStream opens a bidirectional stream like OpenUniStream. On success, the
 // caller owns the stream and must close or cancel each side with a code.
-func (p *Peer) OpenStream(ctx context.Context, protocol wire.Protocol) (Stream, error) {
-	if p.family.maxQueued(protocol) == 0 {
-		panic(fmt.Sprintf("ethp2p: protocol %d not owned by family %d", protocol, p.family.code))
-	}
+func (p *Peer) OpenStream(ctx context.Context) (Stream, error) {
 	if err := p.ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -265,7 +223,7 @@ func (p *Peer) OpenStream(ctx context.Context, protocol wire.Protocol) (Stream, 
 	if err != nil {
 		return nil, err
 	}
-	err = wire.WriteSelector(stream, wire.Selector{Family: p.family.code, Protocol: protocol})
+	err = wire.WriteHeader(stream, p.protocol.id)
 	if err = errors.Join(err, ctx.Err()); err != nil {
 		cancelReceived(stream, wire.TimeoutOr(err, wire.Unspecified))
 		return nil, err
@@ -278,54 +236,41 @@ func (p *Peer) OpenStream(ctx context.Context, protocol wire.Protocol) (Stream, 
 }
 
 // Close ends this handle: queued streams are reset, its context ends, and a
-// local PeerDown with code is queued. Other families keep using the view; when
-// no family holds it, the stack closes the view. Idempotent.
+// local PeerDown with code is queued. Other protocols keep using the view; when
+// no protocol holds it, the stack closes the view. Idempotent.
 func (p *Peer) Close(code wire.Code) {
-	if p.delivery.closePeer(code, wire.UnsupportedSelector) {
+	if p.delivery.closePeer(code, wire.UnsupportedProtocol) {
 		p.sup.post(p.sup.handleClosed)
 	}
 }
 
-type pendingStream struct {
-	protocol wire.Protocol
-	stream   receivedStream
-}
-
-// peerDelivery belongs to one family mutex. Keeping its terminal state even
+// peerDelivery belongs to one protocol mutex. Keeping its terminal state even
 // after removal lets an accidental late push reset its own stream.
 type peerDelivery struct {
-	family  *Family
-	peer    *Peer
-	up      bool
-	down    bool
-	code    wire.Code
-	streams []pendingStream
-	queued  map[wire.Protocol]int
+	protocol *Protocol
+	peer     *Peer
+	up       bool
+	down     bool
+	code     wire.Code
+	// streams is bounded by the view's QUIC stream limits: each holds stream
+	// credit until Next returns it or closePeer resets it.
+	streams []receivedStream
 	ready   *list.Element
 }
 
-// push queues a classified stream, or resets it when the handle has ended or
-// its protocol's local queue is full. Cancellation runs after releasing the
-// family mutex.
-func (d *peerDelivery) push(protocol wire.Protocol, stream receivedStream) {
-	family := d.family
-	family.mu.Lock()
+// push queues a routed stream, or resets it when the handle has ended.
+// Cancellation runs after releasing the protocol mutex.
+func (d *peerDelivery) push(stream receivedStream) {
+	protocol := d.protocol
+	protocol.mu.Lock()
 	if d.down {
-		family.mu.Unlock()
-		cancelReceived(stream, wire.UnsupportedSelector)
+		protocol.mu.Unlock()
+		cancelReceived(stream, wire.UnsupportedProtocol)
 		return
 	}
-	if d.queued[protocol] >= family.maxQueued(protocol) {
-		// Over the local bound: reset without a reason, so a peer cannot
-		// probe local queue state. The stream is never delivered.
-		family.mu.Unlock()
-		cancelReceived(stream, wire.Unspecified)
-		return
-	}
-	d.streams = append(d.streams, pendingStream{protocol, stream})
-	d.queued[protocol]++
+	d.streams = append(d.streams, stream)
 	d.schedule()
-	family.mu.Unlock()
+	protocol.mu.Unlock()
 }
 
 // closePeer ends the handle with code, resetting queued streams with
@@ -334,37 +279,36 @@ func (d *peerDelivery) push(protocol wire.Protocol, stream receivedStream) {
 // PeerUp was never returned produces no events at all. It reports whether this
 // call ended the handle.
 func (d *peerDelivery) closePeer(code, resetCode wire.Code) bool {
-	family := d.family
-	family.mu.Lock()
+	protocol := d.protocol
+	protocol.mu.Lock()
 	if d.down {
-		family.mu.Unlock()
+		protocol.mu.Unlock()
 		return false
 	}
 	d.down, d.code = true, code
 	d.peer.cancel()
 	streams := d.streams
 	d.streams = nil
-	clear(d.queued)
 	if !d.up {
 		if d.ready != nil {
-			family.ready.Remove(d.ready)
+			protocol.ready.Remove(d.ready)
 			d.ready = nil
 		}
 	} else {
 		d.schedule()
 	}
-	family.mu.Unlock()
-	for _, pending := range streams {
-		cancelReceived(pending.stream, resetCode)
+	protocol.mu.Unlock()
+	for _, stream := range streams {
+		cancelReceived(stream, resetCode)
 	}
 	return true
 }
 
 func (d *peerDelivery) schedule() {
 	if d.ready == nil {
-		d.ready = d.family.ready.PushBack(d)
+		d.ready = d.protocol.ready.PushBack(d)
 	}
-	d.family.signal()
+	d.protocol.signal()
 }
 
 // cancelReceived cancels the read side and, for bidirectional streams, the

@@ -1,18 +1,18 @@
 // Package ethp2p runs ethp2p protocols over a shared QUIC endpoint: it
-// registers protocol families, connects to peers, and delivers each family its
+// registers protocols, connects to peers, and delivers each protocol its
 // peers and streams as ordered events.
 //
 // # Specifications
 //
 // This package implements:
 //
-//   - Streams: [Stack.Register] declares a family by its code and protocols,
-//     the stack reads every incoming stream header and routes the stream,
-//     [Family.Next] delivers the streams routed to a family,
+//   - Streams: [Stack.Register] declares a protocol by its number, the
+//     stack reads every incoming stream header and routes the stream,
+//     [Protocol.Next] delivers the streams routed to a protocol,
 //     [Peer.OpenStream] and [Peer.OpenUniStream] open streams and write their
-//     headers, and [Peer.Close] stops serving a family to one peer.
+//     headers, and [Peer.Close] stops serving a protocol to one peer.
 //   - Control protocol: the stack opens each view's control stream and
-//     sends the registered family codes and [Config.Record] in HELLO, reads
+//     sends the registered protocol numbers and [Config.Record] in HELLO, reads
 //     the peer's HELLO and GOAWAY, and sends GOAWAY when it closes a view;
 //     [Peer.Record] returns the peer's record.
 //   - Connection lifecycle: [Stack.Connect] and the accept loop admit views
@@ -25,9 +25,9 @@
 //
 // Build the endpoint with transport.NewEndpoint, lend its libp2p transport
 // to the libp2p host, pass its ethp2p transport to [NewStack], register
-// every family with [Stack.Register], call Endpoint.Start, then
+// every protocol with [Stack.Register], call Endpoint.Start, then
 // [Stack.Start]. Registration freezes when Start begins. Start builds the
-// HELLO every view sends from the sorted codes of all registered families,
+// HELLO every view sends from the sorted numbers of all registered protocols,
 // plus [Config.Record] if set; it may be called once. Listener errors are
 // reported by Endpoint.Start, not by Start.
 //
@@ -61,9 +61,9 @@
 // times out resets the control stream and releases the view with wire.Timeout.
 //
 // Dialed and accepted views pass the same admission, in order: the HELLO
-// exchange, the record check, at least one shared family, an open stack, a dial not
+// exchange, the record check, at least one shared protocol, an open stack, a dial not
 // abandoned by Disconnect, and the duplicate rule. A view that passes gets a
-// [ConnID], and each shared family gets a [Peer] handle and a [PeerUp].
+// [ConnID], and each shared protocol gets a [Peer] handle and a [PeerUp].
 //
 // [Stack.Disconnect] cancels any dial to the peer, closes its view with
 // wire.Closing and returns once the view is released. It is not a ban: the
@@ -71,25 +71,25 @@
 // [Stack.Traffic] reports QUIC bytes, including libp2p bytes on shared
 // connections.
 //
-// # Families and events
+// # Protocols and events
 //
-// A family is registered with a wake channel of capacity at least one;
-// families may share one. Each [ProtocolSpec] names a protocol number within
-// the family and MaxQueued, the number of streams per peer that may wait for
-// [Family.Next]. Streams over it are reset with wire.Unspecified. MaxQueued is
-// never sent to the peer. A family is shared with a peer when the peer's HELLO
-// lists its code; a stream for a protocol the family did not register is reset
-// with wire.UnsupportedSelector.
+// A protocol is registered with a wake channel of capacity at least one;
+// protocols may share one. A protocol is shared with a peer when the peer's
+// HELLO lists its number; a stream for a protocol that is not shared is reset
+// with wire.UnsupportedProtocol. The stack reads only a stream's header and
+// forwards the rest unread: what the stream is for is the protocol's to read.
+// Streams wait per peer for [Protocol.Next]; the stack sets no bound of its
+// own, as the view's QUIC stream limits bound them.
 //
 // The stack signals the wake channel without blocking after every enqueue, so
-// a consumer must call [Family.Next] until it reports none before waiting.
+// a consumer must call [Protocol.Next] until it reports none before waiting.
 // Next serves peers in turn, one event per turn. For each handle it returns
 // [PeerUp] first, then [StreamIn] events in the order their stream headers
 // were read, then exactly one [PeerDown] carrying the view's close code or the
 // code passed to [Peer.Close]. A handle whose PeerUp was never returned yields
 // no events. The handle's context ends before its PeerDown is visible. Streams
 // still queued when a handle ends are reset and never returned: with
-// wire.Closing when the view closed, and with wire.UnsupportedSelector when the
+// wire.Closing when the view closed, and with wire.UnsupportedProtocol when the
 // handle was closed locally.
 //
 // [Event.Reject] refuses a StreamIn with wire.Refused, and [Event.Cancel]
@@ -100,13 +100,12 @@
 //
 // # Peer handles and streams
 //
-// A [Peer] belongs to one family and one view; a new view yields new handles.
+// A [Peer] belongs to one protocol and one view; a new view yields new handles.
 // [Peer.OpenStream] and [Peer.OpenUniStream] wait for stream credit and stop
 // at the caller's context or the handle's end. They never return a stream on
-// an ended handle, they panic for a protocol the family does not own, and they
-// do not wait on incoming delivery. [Peer.Close] resets the handle's queued
-// streams, ends its context, queues PeerDown, and closes the view with
-// wire.NoSharedProtocols once no family holds it. Streams already returned
+// an ended handle, and they do not wait on incoming delivery. [Peer.Close]
+// resets the handle's queued streams, ends its context, queues PeerDown, and
+// closes the view with wire.NoSharedProtocols once no protocol holds it. Streams already returned
 // stay the caller's.
 //
 // Streams never cancel themselves. Read, Write and Close return their error

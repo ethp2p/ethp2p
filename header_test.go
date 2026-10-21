@@ -92,12 +92,12 @@ func assertUniReset(t *testing.T, s *quic.SendStream, want wire.Code) {
 // the protocol intact, in both directions.
 func TestHeaderReadLeavesPayload(t *testing.T) {
 	p := newHelloedRawControlPeer(t)
-	head := wire.AppendSelector(nil, wire.Selector{Family: 1, Protocol: 1})
+	head := wire.AppendHeader(nil, 1)
 	_ = p.rawUni(t, append(slices.Clone(head), "uni payload"...)).Close()
 	_ = p.rawBi(t, append(slices.Clone(head), "bi payload"...)).Close()
 	got := make(map[bool]string)
 	for range 2 {
-		ev := awaitStreamEvent(t, p.fam, p.wake)
+		ev := awaitStreamEvent(t, p.prot, p.wake)
 		payload, err := io.ReadAll(ev.Stream)
 		if err != nil {
 			t.Fatal(err)
@@ -120,12 +120,10 @@ func TestHeaderErrors(t *testing.T) {
 		want       wire.Code
 		timeout    time.Duration
 	}{
-		{"nonminimal-family", []byte{0x80, 0x00, 0x01}, false, false, false, wire.BadSelector, 0},
-		{"nonminimal-protocol", []byte{0x01, 0x81, 0x00}, false, false, false, wire.BadSelector, 0},
-		{"family-above-32-bits", []byte{0x80, 0x80, 0x80, 0x80, 0x10, 0x01}, false, false, false, wire.BadSelector, 0},
-		{"protocol-above-32-bits", []byte{0x01, 0xff, 0xff, 0xff, 0xff, 0x1f}, false, false, false, wire.BadSelector, 0},
-		{"truncated-by-fin", []byte{0x01}, true, true, true, wire.BadSelector, 0},
-		{"slowloris", []byte{0x02}, false, false, true, wire.Timeout, 50 * time.Millisecond},
+		{"nonminimal-protocol", []byte{0x81, 0x00}, false, false, false, wire.BadHeader, 0},
+		{"protocol-above-32-bits", []byte{0xff, 0xff, 0xff, 0xff, 0x1f}, false, false, false, wire.BadHeader, 0},
+		{"truncated-by-fin", []byte{0x80}, true, true, true, wire.BadHeader, 0},
+		{"slowloris", []byte{0x80}, false, false, true, wire.Timeout, 50 * time.Millisecond},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if tc.timeout != 0 {
@@ -144,8 +142,8 @@ func TestHeaderErrors(t *testing.T) {
 				assertUniReset(t, uni, tc.want)
 			}
 			assertBiReset(t, bi, tc.want)
-			if ev, ok := p.fam.Next(); ok {
-				t.Fatalf("invalid header delivered family event: %+v", ev)
+			if ev, ok := p.prot.Next(); ok {
+				t.Fatalf("invalid header delivered protocol event: %+v", ev)
 			}
 			if !tc.recover {
 				return
@@ -153,7 +151,7 @@ func TestHeaderErrors(t *testing.T) {
 
 			// Header rejection must leave this admitted view usable in both
 			// directions, including after a timeout or a truncated FIN.
-			head := wire.AppendSelector(nil, wire.Selector{Family: 1, Protocol: 1})
+			head := wire.AppendHeader(nil, 1)
 			if err := p.rawUni(t, append(slices.Clone(head), "uni recovery payload"...)).Close(); err != nil {
 				t.Fatal(err)
 			}
@@ -162,9 +160,9 @@ func TestHeaderErrors(t *testing.T) {
 			}
 			got := make(map[bool]string)
 			for range 2 {
-				ev := awaitStreamEvent(t, p.fam, p.wake)
-				if ev.Peer != p.peer || ev.Protocol != 1 {
-					t.Fatalf("recovery event = %+v, want original peer and protocol 1", ev)
+				ev := awaitStreamEvent(t, p.prot, p.wake)
+				if ev.Peer != p.peer {
+					t.Fatalf("recovery event = %+v, want original peer", ev)
 				}
 				payload, err := io.ReadAll(ev.Stream)
 				if err != nil {
@@ -176,16 +174,16 @@ func TestHeaderErrors(t *testing.T) {
 			if got[false] != "uni recovery payload" || got[true] != "bi recovery payload" {
 				t.Fatalf("recovery payloads = %v", got)
 			}
-			if ev, ok := p.fam.Next(); ok {
-				t.Fatalf("unexpected family event after recovery: %+v", ev)
+			if ev, ok := p.prot.Next(); ok {
+				t.Fatalf("unexpected protocol event after recovery: %+v", ev)
 			}
 		})
 	}
-	// libp2p opens no unidirectional streams, so family 19 there is just an
+	// libp2p opens no unidirectional streams, so protocol 19 there is just an
 	// invalid header.
 	t.Run("multistream-head", func(t *testing.T) {
 		p := newHelloedRawControlPeer(t)
-		assertUniReset(t, p.rawUni(t, []byte{0x13, '/'}), wire.BadSelector)
+		assertUniReset(t, p.rawUni(t, []byte{0x13, '/'}), wire.BadHeader)
 	})
 }
 
@@ -193,25 +191,27 @@ func TestHeaderErrors(t *testing.T) {
 // side reset with Unspecified.
 func TestHeaderPeerResetOnBidirectionalStream(t *testing.T) {
 	p := newHelloedRawControlPeer(t)
-	out := p.rawBi(t, []byte{0x02})
+	out := p.rawBi(t, []byte{0x80})
 	out.CancelWrite(quic.StreamErrorCode(42))
 	assertBiReset(t, out, wire.Unspecified)
 }
 
 func TestLaterCompletedHeaderCanBeDeliveredFirst(t *testing.T) {
 	p := newHelloedRawControlPeer(t)
-	first := p.rawUni(t, []byte{0x01})
-	second := p.rawUni(t, wire.AppendSelector(nil, wire.Selector{Family: 1, Protocol: 1}))
+	first := p.rawUni(t, nil)
+	second := p.rawUni(t, append(wire.AppendHeader(nil, 1), "second"...))
 	_ = second.Close()
-	if ev := awaitStreamEvent(t, p.fam, p.wake); ev.Protocol != 1 {
-		t.Fatalf("completed protocol = %d; want 1", ev.Protocol)
+	ev := awaitStreamEvent(t, p.prot, p.wake)
+	if payload, err := io.ReadAll(ev.Stream); err != nil || string(payload) != "second" {
+		t.Fatalf("completed payload = %q, %v; want second", payload, err)
 	}
-	if _, err := first.Write([]byte{0x02}); err != nil {
+	if _, err := first.Write(append(wire.AppendHeader(nil, 1), "first"...)); err != nil {
 		t.Fatal(err)
 	}
 	_ = first.Close()
-	if ev := awaitStreamEvent(t, p.fam, p.wake); ev.Protocol != 2 {
-		t.Fatalf("first protocol = %d; want 2", ev.Protocol)
+	ev = awaitStreamEvent(t, p.prot, p.wake)
+	if payload, err := io.ReadAll(ev.Stream); err != nil || string(payload) != "first" {
+		t.Fatalf("first payload = %q, %v; want first", payload, err)
 	}
 }
 
@@ -226,19 +226,19 @@ func TestHeaderDirectionsAreIndependent(t *testing.T) {
 			id := p.peer.ID()
 			for range maxHeaderReads {
 				if stalled == uniDir {
-					p.rawUni(t, []byte{0x02})
+					p.rawUni(t, []byte{0x80})
 				} else {
-					p.rawBi(t, []byte{0x02})
+					p.rawBi(t, []byte{0x80})
 				}
 			}
 			waitHeaderReads(t, p.stack, id, stalled, maxHeaderReads)
-			head := append(wire.AppendSelector(nil, wire.Selector{Family: 1, Protocol: 1}), 0xaa)
+			head := append(wire.AppendHeader(nil, 1), 0xaa)
 			if stalled == uniDir {
 				_ = p.rawBi(t, head).Close()
 			} else {
 				_ = p.rawUni(t, head).Close()
 			}
-			ev := awaitStreamEvent(t, p.fam, p.wake)
+			ev := awaitStreamEvent(t, p.prot, p.wake)
 			_, bidi := ev.Stream.(Stream)
 			if bidi != (stalled == uniDir) {
 				t.Fatalf("delivered bidirectional = %t, want %t", bidi, stalled == uniDir)

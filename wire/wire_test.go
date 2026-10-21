@@ -19,8 +19,8 @@ func TestCodeWireMapping(t *testing.T) {
 		{name: "Unspecified", code: Unspecified, wire: 0, parsed: Unspecified},
 		{name: "Refused", code: Refused, wire: 2, parsed: Refused},
 		{name: "Timeout", code: Timeout, wire: 4, parsed: Timeout},
-		{name: "BadSelector", code: BadSelector, wire: 16, parsed: BadSelector},
-		{name: "UnsupportedSelector", code: UnsupportedSelector, wire: 18, parsed: UnsupportedSelector},
+		{name: "BadHeader", code: BadHeader, wire: 16, parsed: BadHeader},
+		{name: "UnsupportedProtocol", code: UnsupportedProtocol, wire: 18, parsed: UnsupportedProtocol},
 		{name: "Closing", code: Closing, wire: 20, parsed: Closing},
 		{name: "ControlViolation", code: ControlViolation, wire: 22, parsed: ControlViolation},
 		{name: "NoSharedProtocols", code: NoSharedProtocols, wire: 24, parsed: NoSharedProtocols},
@@ -135,12 +135,11 @@ func TestReadFrameRejectsTruncatedAndInvalidFrames(t *testing.T) {
 		{name: "truncated length", wire: []byte{1, 0x80}, want: io.ErrUnexpectedEOF},
 		{name: "empty truncated payload", wire: []byte{1, 2}, want: io.ErrUnexpectedEOF},
 		{name: "partial truncated payload", wire: []byte{1, 2, 0xaa}, want: io.ErrUnexpectedEOF},
-		{name: "non-minimal type", wire: []byte{0x81, 0x00, 0}, want: errFrameLength},
-		{name: "non-minimal zero length", wire: []byte{1, 0x80, 0x00}, want: errFrameLength},
-		{name: "non-minimal length", wire: []byte{1, 0x81, 0x00, 0xaa}, want: errFrameLength},
-		// encoding/binary reports the overflow with an unexported error.
-		{name: "overflowing type", wire: bytes.Repeat([]byte{0x80}, binary.MaxVarintLen64)},
-		{name: "overflowing length", wire: append([]byte{1}, bytes.Repeat([]byte{0x80}, binary.MaxVarintLen64)...)},
+		{name: "non-minimal type", wire: []byte{0x81, 0x00, 0}, want: ErrFrameEncoding},
+		{name: "non-minimal zero length", wire: []byte{1, 0x80, 0x00}, want: ErrFrameEncoding},
+		{name: "non-minimal length", wire: []byte{1, 0x81, 0x00, 0xaa}, want: ErrFrameEncoding},
+		{name: "overflowing type", wire: bytes.Repeat([]byte{0x80}, binary.MaxVarintLen64), want: ErrFrameEncoding},
+		{name: "overflowing length", wire: append([]byte{1}, bytes.Repeat([]byte{0x80}, binary.MaxVarintLen64)...), want: ErrFrameEncoding},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			_, _, err := ReadFrame(bytes.NewReader(test.wire), 32)
@@ -157,104 +156,100 @@ func TestReadFrameRejectsTruncatedAndInvalidFrames(t *testing.T) {
 func TestStreamHeadersRoundTrip(t *testing.T) {
 	for _, test := range []struct {
 		name     string
-		selector Selector
+		protocol Protocol
 		wire     []byte
 	}{
-		{name: "control", selector: Selector{Family: 0, Protocol: 0}, wire: []byte{0x00, 0x00}},
-		{name: "chunk", selector: Selector{Family: 1, Protocol: 3}, wire: []byte{0x01, 0x03}},
-		{name: "slash", selector: Selector{Family: 1, Protocol: '/'}, wire: []byte{0x01, 0x2f}},
-		{name: "two-byte fields", selector: Selector{Family: 128, Protocol: 300}, wire: []byte{0x80, 0x01, 0xac, 0x02}},
-		{name: "family 18", selector: Selector{Family: 18}, wire: []byte{0x12, 0x00}},
-		{name: "family 20", selector: Selector{Family: 20}, wire: []byte{0x14, 0x00}},
-		{name: "maximum", selector: Selector{Family: math.MaxUint32, Protocol: math.MaxUint32},
-			wire: []byte{0xff, 0xff, 0xff, 0xff, 0x0f, 0xff, 0xff, 0xff, 0xff, 0x0f}},
+		{name: "control", protocol: 0, wire: []byte{0x00}},
+		{name: "one", protocol: 1, wire: []byte{0x01}},
+		{name: "slash", protocol: '/', wire: []byte{0x2f}},
+		{name: "two-byte field", protocol: 300, wire: []byte{0xac, 0x02}},
+		{name: "protocol 18", protocol: 18, wire: []byte{0x12}},
+		{name: "protocol 20", protocol: 20, wire: []byte{0x14}},
+		{name: "maximum", protocol: math.MaxUint32,
+			wire: []byte{0xff, 0xff, 0xff, 0xff, 0x0f}},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			writer := new(recordingWriter)
-			if err := WriteSelector(writer, test.selector); err != nil {
-				t.Fatalf("WriteSelector(%v): %v", test.selector, err)
+			if err := WriteHeader(writer, test.protocol); err != nil {
+				t.Fatalf("WriteHeader(%v): %v", test.protocol, err)
 			}
 			if writer.calls != 1 {
-				t.Fatalf("WriteSelector made %d writes, want 1", writer.calls)
+				t.Fatalf("WriteHeader made %d writes, want 1", writer.calls)
 			}
 			if !bytes.Equal(writer.Bytes(), test.wire) {
 				t.Fatalf("stream header = %x, want %x", writer.Bytes(), test.wire)
 			}
 
 			reader := bytes.NewReader(append(bytes.Clone(test.wire), 0xaa))
-			got, err := ReadSelector(reader)
-			if err != nil || got != test.selector {
-				t.Fatalf("ReadSelector = (%v, %v), want (%v, nil)", got, err, test.selector)
+			got, err := ReadHeader(reader)
+			if err != nil || got != test.protocol {
+				t.Fatalf("ReadHeader = (%v, %v), want (%v, nil)", got, err, test.protocol)
 			}
 			if b, err := reader.ReadByte(); err != nil || b != 0xaa {
 				t.Fatalf("byte after header = (%x, %v), want 0xaa", b, err)
 			}
 
-			sel, n, err := ParseSelector(append(bytes.Clone(test.wire), 0xaa))
-			if err != nil || sel != test.selector || n != len(test.wire) {
-				t.Fatalf("ParseSelector = (%v, %d, %v), want (%v, %d, nil)", sel, n, err, test.selector, len(test.wire))
+			sel, n, err := ParseHeader(append(bytes.Clone(test.wire), 0xaa))
+			if err != nil || sel != test.protocol || n != len(test.wire) {
+				t.Fatalf("ParseHeader = (%v, %d, %v), want (%v, %d, nil)", sel, n, err, test.protocol, len(test.wire))
 			}
 			for i := range len(test.wire) {
-				if sel, n, err := ParseSelector(test.wire[:i]); err != nil || n != 0 {
-					t.Fatalf("ParseSelector(%x) = (%v, %d, %v), want incomplete", test.wire[:i], sel, n, err)
+				if sel, n, err := ParseHeader(test.wire[:i]); err != nil || n != 0 {
+					t.Fatalf("ParseHeader(%x) = (%v, %d, %v), want incomplete", test.wire[:i], sel, n, err)
 				}
 			}
 		})
 	}
-	if len(AppendSelector(nil, Selector{Family: math.MaxUint32, Protocol: math.MaxUint32})) != MaxHeaderLen {
+	if len(AppendHeader(nil, math.MaxUint32)) != MaxHeaderLen {
 		t.Fatalf("largest header is not MaxHeaderLen bytes")
 	}
 }
 
-func TestReadSelectorRejectsInvalidHeaders(t *testing.T) {
+func TestReadHeaderRejectsInvalidHeaders(t *testing.T) {
 	for _, test := range []struct {
 		name string
 		wire []byte
 		want error
 	}{
-		{name: "family 19", wire: []byte{0x13, 0x00}, want: errInvalidHeader},
+		{name: "protocol 19", wire: []byte{0x13}, want: errInvalidHeader},
 		{name: "multistream-select header", wire: []byte{0x13, '/', 'm'}, want: errInvalidHeader},
-		{name: "non-minimal family", wire: []byte{0x80, 0x00, 0x00}, want: errInvalidHeader},
-		{name: "non-minimal family 19", wire: []byte{0x93, 0x00, 0x00}, want: errInvalidHeader},
-		{name: "non-minimal protocol", wire: []byte{0x01, 0x83, 0x00}, want: errInvalidHeader},
-		{name: "family above 32 bits", wire: []byte{0x80, 0x80, 0x80, 0x80, 0x10, 0x00}, want: errInvalidHeader},
-		{name: "protocol above 32 bits", wire: []byte{0x01, 0xff, 0xff, 0xff, 0xff, 0x1f}, want: errInvalidHeader},
-		{name: "family longer than five bytes", wire: []byte{0x80, 0x80, 0x80, 0x80, 0x80, 0x00}, want: errInvalidHeader},
+		{name: "non-minimal protocol", wire: []byte{0x80, 0x00}, want: errInvalidHeader},
+		{name: "non-minimal protocol 19", wire: []byte{0x93, 0x00}, want: errInvalidHeader},
+		{name: "protocol above 32 bits", wire: []byte{0x80, 0x80, 0x80, 0x80, 0x10}, want: errInvalidHeader},
+		{name: "protocol longer than five bytes", wire: []byte{0x80, 0x80, 0x80, 0x80, 0x80}, want: errInvalidHeader},
 		{name: "empty", wire: nil, want: io.EOF},
-		{name: "family only", wire: []byte{0x01}, want: io.ErrUnexpectedEOF},
-		{name: "truncated family", wire: []byte{0x80}, want: io.ErrUnexpectedEOF},
-		{name: "truncated protocol", wire: []byte{0x01, 0x80}, want: io.ErrUnexpectedEOF},
+		{name: "truncated protocol", wire: []byte{0x80}, want: io.ErrUnexpectedEOF},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			if _, err := ReadSelector(bytes.NewReader(test.wire)); !errors.Is(err, test.want) {
-				t.Fatalf("ReadSelector error = %v, want %v", err, test.want)
+			if _, err := ReadHeader(bytes.NewReader(test.wire)); !errors.Is(err, test.want) {
+				t.Fatalf("ReadHeader error = %v, want %v", err, test.want)
 			}
-			_, n, err := ParseSelector(test.wire)
+			_, n, err := ParseHeader(test.wire)
 			if test.want == errInvalidHeader {
 				if !errors.Is(err, errInvalidHeader) {
-					t.Fatalf("ParseSelector error = %v, want %v", err, errInvalidHeader)
+					t.Fatalf("ParseHeader error = %v, want %v", err, errInvalidHeader)
 				}
 			} else if err != nil || n != 0 {
-				t.Fatalf("ParseSelector = (%d, %v), want incomplete", n, err)
+				t.Fatalf("ParseHeader = (%d, %v), want incomplete", n, err)
 			}
 		})
 	}
 }
 
-func TestParseSelectorRejectsFamily19FromFirstByte(t *testing.T) {
+func TestParseHeaderRejectsProtocol19FromFirstByte(t *testing.T) {
 	// A classifier peeking one byte at a time must see the rejection at once.
-	if _, _, err := ParseSelector([]byte{0x13}); !errors.Is(err, errInvalidHeader) {
-		t.Fatalf("ParseSelector(13) error = %v, want %v", err, errInvalidHeader)
+	if _, _, err := ParseHeader([]byte{0x13}); !errors.Is(err, errInvalidHeader) {
+		t.Fatalf("ParseHeader(13) error = %v, want %v", err, errInvalidHeader)
 	}
 }
 
-func TestReadSelectorDoesNotReadPastHeader(t *testing.T) {
+func TestReadHeaderDoesNotReadPastHeader(t *testing.T) {
 	reader := &countingReader{data: []byte{0x01, 0x02, 0xaa, 0xbb}}
-	if _, err := ReadSelector(reader); err != nil {
+	if _, err := ReadHeader(reader); err != nil {
 		t.Fatal(err)
 	}
-	if reader.offset != 2 {
-		t.Fatalf("ReadSelector consumed %d bytes, want 2", reader.offset)
+	if reader.offset != 1 {
+		t.Fatalf("ReadHeader consumed %d bytes, want 1", reader.offset)
 	}
 }
 

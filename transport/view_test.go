@@ -207,10 +207,6 @@ func TestStatelessResetAfterEndpointRestart(t *testing.T) {
 	}
 }
 
-func testSelector(p wire.Protocol) wire.Selector {
-	return wire.Selector{Family: 1, Protocol: p}
-}
-
 func testPacket(t *testing.T) net.PacketConn {
 	t.Helper()
 	p, err := net.ListenPacket("udp4", "127.0.0.1:0")

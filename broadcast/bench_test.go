@@ -122,18 +122,18 @@ func benchmarkSessionDispatchFanout(b *testing.B, numPeers int) {
 // BenchmarkOutboundLoopChunkThroughput measures the raw throughput of
 // PeerConn's outbound loop processing chunk send events via chunk slots.
 func BenchmarkOutboundLoopChunkThroughput(b *testing.B) {
-	ctx, cancel := context.WithCancel(b.Context())
-	defer cancel()
+	ctx, cancel := context.WithCancelCause(b.Context())
+	defer cancel(nil)
 
 	streams := &blackholeOpener{}
 	bcastOut := &blackholeStream{}
 	p := &PeerConn{
 		engine:    &Engine{},
 		id:        "bench-peer",
-		streams:   streams,
+		handle:    streams,
 		ctrlOut:   bcastOut,
 		ctrlState: newCtrlOutState(),
-		chunkIn:   newFIFO[ethp2p.ReceiveStream](),
+		unread:    newFIFO[ethp2p.ReceiveStream](),
 		wakeCh:    make(chan struct{}, 1),
 		ctx:       ctx,
 		cancel:    cancel,
@@ -200,7 +200,7 @@ func BenchmarkOutboundLoopChunkThroughput(b *testing.B) {
 	})
 
 	b.StopTimer()
-	cancel()
+	cancel(nil)
 	<-done
 	close(resultCh)
 }
@@ -258,9 +258,11 @@ func spinUntil(cond func() bool) {
 // blackholeOpener discards stream writes to benchmark outbound loop overhead.
 type blackholeOpener struct{}
 
-func (*blackholeOpener) OpenUniStream(_ context.Context, _ wire.Protocol) (ethp2p.SendStream, error) {
+func (*blackholeOpener) OpenUniStream(context.Context) (ethp2p.SendStream, error) {
 	return &blackholeStream{}, nil
 }
+
+func (*blackholeOpener) Close(wire.Code) {}
 
 type blackholeStream struct{}
 

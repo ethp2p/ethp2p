@@ -129,14 +129,14 @@ func TestLibp2pViewCloseStopsAccept(t *testing.T) {
 	if pair.serverEth.conn.Context().Err() != nil {
 		t.Fatal("physical connection closed with one view still live")
 	}
-	out := openStream(t, ctx, pair.clientEth, testSelector(1))
+	out := openStream(t, ctx, pair.clientEth, 1)
 	want := []byte{1}
 	if _, err := out.Write(want); err != nil {
 		t.Fatal(err)
 	}
-	received, selector := nextSelected(t, pair.serverEth)
-	if selector != testSelector(1) {
-		t.Fatalf("selector = %d, want 1", selector)
+	received, protocol := nextSelected(t, pair.serverEth)
+	if protocol != 1 {
+		t.Fatalf("protocol = %d, want 1", protocol)
 	}
 	in, ok := any(received).(*quic.Stream)
 	if !ok {
@@ -179,7 +179,7 @@ func TestEthp2pViewCloseStopsPendingOperations(t *testing.T) {
 func TestClosedEthp2pViewResetsQueuedAndNewStreams(t *testing.T) {
 	ctx := testContext(t)
 	pair := newViewPair(t, 32)
-	bi := openStream(t, ctx, pair.clientEth, testSelector(1))
+	bi := openStream(t, ctx, pair.clientEth, 1)
 	uni, err := pair.clientEth.OpenUniStream(ctx)
 	if err != nil {
 		t.Fatal(err)

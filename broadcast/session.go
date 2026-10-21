@@ -129,7 +129,7 @@ func (s *session[CI, R]) closeWithCode(code wire.Code) {
 	s.strategy.Close()
 }
 
-// notifyPeersComplete marks every peer's outbound SESS stream for closure,
+// notifyPeersComplete marks every peer's outbound session stream for closure,
 // telling it we no longer need chunks. Called as soon as the strategy signals
 // completeness (before decode), since decode failure is non-recoverable.
 func (s *session[CI, R]) notifyPeersComplete() {
@@ -139,8 +139,8 @@ func (s *session[CI, R]) notifyPeersComplete() {
 }
 
 // notifyPeersSessionDone marks the peer session closed so the outbound loop
-// closes its SESS stream and drops the chunk slot. It covers completed peers
-// too: notifyPeersComplete ended only their SESS stream, and their chunk slot
+// closes its session stream and drops the chunk slot. It covers completed peers
+// too: notifyPeersComplete ended only their session stream, and their chunk slot
 // stays registered until this close.
 func (s *session[CI, R]) notifyPeersSessionDone() {
 	for _, sp := range s.peers {
@@ -486,7 +486,7 @@ func (s *session[CI, R]) handlePeerCompleted(peer identity.PeerID) {
 //   - Not decoded: dispose when all peers have been dropped (removed from
 //     map). Completed peers stay in the map because they may still send
 //     us chunks on separate streams; only a drop (disconnection, or the
-//     end of their SESS stream other than Reconstructed) removes them. If
+//     end of their session stream other than Reconstructed) removes them. If
 //     all peers are gone, the session can't make progress.
 //
 // The channel checks it after a peer drops or completes and after decode,

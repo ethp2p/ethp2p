@@ -22,7 +22,7 @@ func TestNextStreamPerDirection(t *testing.T) {
 	client, server := transporttest.NewEndpoint(t), transporttest.NewEndpoint(t)
 	dialed, accepted := transporttest.Connect(t, client, server)
 	ctx := connContext(t)
-	uni, err := transporttest.OpenUniStream(ctx, dialed, testSelector(5))
+	uni, err := transporttest.OpenUniStream(ctx, dialed, 5)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -41,7 +41,7 @@ func TestNextStreamPerDirection(t *testing.T) {
 		t.Fatalf("bidi queue yielded %T before a bidi stream was opened", s)
 	}
 	first, sel, err := transporttest.NextUniStream(ctx, accepted)
-	if err != nil || sel != testSelector(5) {
+	if err != nil || sel != 5 {
 		t.Fatalf("first stream = %d, %v; want 5", sel, err)
 	}
 	if _, ok := any(first).(*quic.Stream); ok {
@@ -51,7 +51,7 @@ func TestNextStreamPerDirection(t *testing.T) {
 	if err != nil || len(payload) != 1 || payload[0] != 0xaa {
 		t.Fatalf("uni payload = %x, %v", payload, err)
 	}
-	bidi, err := transporttest.OpenStream(ctx, dialed, testSelector(6))
+	bidi, err := transporttest.OpenStream(ctx, dialed, 6)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -60,7 +60,7 @@ func TestNextStreamPerDirection(t *testing.T) {
 	}
 	_ = bidi.Close()
 	second, sel, err := transporttest.NextStream(ctx, accepted)
-	if err != nil || sel != testSelector(6) {
+	if err != nil || sel != 6 {
 		t.Fatalf("second stream = %d, %v; want 6", sel, err)
 	}
 	defer second.Close()

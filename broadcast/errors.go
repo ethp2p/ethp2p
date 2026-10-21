@@ -10,7 +10,9 @@ var (
 	ErrEngineClosed  = errors.New("engine closed")
 	ErrChannelExists = errors.New("channel already exists")
 
-	ErrProtocolMismatch = errors.New("protocol version mismatch")
+	// ErrPeerViolation wraps the cause of a binding ended because the peer
+	// broke the broadcast protocol.
+	ErrPeerViolation = errors.New("peer violated the broadcast protocol")
 
 	ErrAlreadySubscribed      = errors.New("channel already has a subscriber")
 	ErrUnbufferedSubscription = errors.New("subscriber channel must be buffered")

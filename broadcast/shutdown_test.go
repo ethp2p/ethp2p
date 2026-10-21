@@ -12,15 +12,16 @@ import (
 	"github.com/ethp2p/ethp2p/wire"
 )
 
-// Stopping a channel cancels every CHUNK stream a peer routed to it, including
+// Stopping a channel cancels every chunk stream a peer routed to it, including
 // one whose send to the inbox lands after the channel's final drain (the late
-// send in processChunk), without closing the peer. The race can reach that
+// send in routeChunk), without closing the peer. The race can reach that
 // branch but does not force it.
 func TestStoppedChannelReleasesInbox(t *testing.T) {
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
 	p := newPeerConn(&Engine{ctx: t.Context(), config: EngineConfig{}}, t.Context(), "peer", nil)
 	defer p.Close()
+	p.handshook = true
 	inbox := make(chan channelEvent, 4)
 	tr := newTestChannel(inbox)
 	tr.ctx = ctx
@@ -29,9 +30,9 @@ func TestStoppedChannelReleasesInbox(t *testing.T) {
 	for range 3 {
 		var payload bytes.Buffer
 		_ = writeFrame(&payload, headerFrame, &bcastpb.Chunk_Header{Channel: "channel", ObjectId: "m", DataLength: 1})
-		raw, in := f.incoming(t, CHUNK, &payload)
+		raw, in := f.incoming(t, &payload)
 		_ = raw.out.Close()
-		p.processChunk(in)
+		p.open(in)
 	}
 	// Race unread payload producers with termination while earlier completed
 	// headers remain buffered. The peer and QUIC connection stay alive.
@@ -42,9 +43,9 @@ func TestStoppedChannelReleasesInbox(t *testing.T) {
 		var payload bytes.Buffer
 		_ = writeFrame(&payload, headerFrame, &bcastpb.Chunk_Header{Channel: "channel", ObjectId: "m", DataLength: 1})
 		payload.Write(wire.AppendFrame(nil, dataFrame, []byte{7}))
-		raw, in := f.incoming(t, CHUNK, &payload)
+		raw, in := f.incoming(t, &payload)
 		probes = append(probes, raw)
-		producers.Go(func() { <-start; p.processChunk(in) })
+		producers.Go(func() { <-start; p.open(in) })
 	}
 	close(start)
 	cancel()

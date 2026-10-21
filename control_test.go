@@ -25,12 +25,12 @@ const (
 const maxControlFrame = 16 << 10
 
 // rawControlPeer speaks the control protocol by hand through quic-go against a
-// stack serving family 1, protocols 1 and 2. The stack's endpoint keeps a
+// stack serving protocol 1. The stack's endpoint keeps a
 // libp2p view, so releasing the ethp2p view does not close the QUIC connection
 // before the raw peer reads GOAWAY.
 type rawControlPeer struct {
 	stack        *Stack
-	fam          *Family
+	prot         *Protocol
 	wake         chan struct{}
 	raw          *quic.Conn
 	out          *quic.SendStream // our control stream, header written; nil without one
@@ -42,7 +42,7 @@ func newRawControlPeer(t *testing.T) rawControlPeer {
 	return startRawControlPeer(t, true, &quic.Config{}, true)
 }
 
-// startRawControlPeer dials a fresh stack with family 1 and no extra families.
+// startRawControlPeer dials a fresh stack with protocol 1 and no extra protocols.
 // It reads the stack's HELLO and opens our control stream as requested.
 func startRawControlPeer(t *testing.T, openControl bool, config *quic.Config, readHello bool) rawControlPeer {
 	t.Helper()
@@ -51,20 +51,18 @@ func startRawControlPeer(t *testing.T, openControl bool, config *quic.Config, re
 
 // startRawControlPeerWith dials a fresh stack. It reads the stack's header and
 // HELLO when readHello is set, and opens our control stream with its header
-// when openControl is set; it sends no HELLO. Extra families use codes above
-// the reserved family 19, so a large HELLO can exceed quic-go's write buffer
+// when openControl is set; it sends no HELLO. Extra protocols use codes above
+// the reserved protocol 19, so a large HELLO can exceed quic-go's write buffer
 // without changing the advertised receive window or making the HELLO invalid.
-func startRawControlPeerWith(t *testing.T, openControl bool, config *quic.Config, readHello bool, extraFamilies int) rawControlPeer {
+func startRawControlPeerWith(t *testing.T, openControl bool, config *quic.Config, readHello bool, extraProtocols int) rawControlPeer {
 	t.Helper()
 	ctx := transporttest.Context(t)
 	server := transporttest.NewEndpoint(t)
 	keepLibp2p(t, server)
 	s := newTestStack(t, server)
-	fam, wake := registerTestFamily(t, s, 1,
-		ProtocolSpec{Protocol: 1, MaxQueued: 8},
-		ProtocolSpec{Protocol: 2, MaxQueued: 8})
-	for i := range extraFamilies {
-		registerTestFamily(t, s, wire.Family(20+i), ProtocolSpec{Protocol: 1, MaxQueued: 1})
+	prot, wake := registerTestProtocol(t, s, 1)
+	for i := range extraProtocols {
+		registerTestProtocol(t, s, wire.Protocol(20+i))
 	}
 	startTestStack(t, s)
 	raw, err := transporttest.DialRaw(t, ctx, server.Endpoint.Addr(), server.Endpoint.PeerID(), config)
@@ -79,8 +77,8 @@ func startRawControlPeerWith(t *testing.T, openControl bool, config *quic.Config
 		t.Fatalf("control stream ID = %d, want first server uni stream 3", in.StreamID())
 	}
 	if readHello {
-		if selector, err := wire.ReadSelector(in); err != nil || selector != control.ControlSelector {
-			t.Fatalf("stack control selector = %d, %v", selector, err)
+		if protocol, err := wire.ReadHeader(in); err != nil || protocol != control.ControlProtocol {
+			t.Fatalf("stack control protocol = %d, %v", protocol, err)
 		}
 		if message, err := readTestFrame(in, helloFrame, new(control.Hello)); err != nil {
 			t.Fatalf("stack HELLO = %v, %v", message, err)
@@ -92,20 +90,20 @@ func startRawControlPeerWith(t *testing.T, openControl bool, config *quic.Config
 		if err != nil {
 			t.Fatal(err)
 		}
-		if err := wire.WriteSelector(out, control.ControlSelector); err != nil {
+		if err := wire.WriteHeader(out, control.ControlProtocol); err != nil {
 			t.Fatal(err)
 		}
 	}
-	return rawControlPeer{stack: s, fam: fam, wake: wake, raw: raw, out: out, stackControl: in}
+	return rawControlPeer{stack: s, prot: prot, wake: wake, raw: raw, out: out, stackControl: in}
 }
 
-// newHelloedRawControlPeer sends a valid HELLO for family 1 and returns once
+// newHelloedRawControlPeer sends a valid HELLO for protocol 1 and returns once
 // the stack admitted the view.
 func newHelloedRawControlPeer(t *testing.T) rawControlPeer {
 	t.Helper()
 	p := newRawControlPeer(t)
 	p.write(t, helloFrame, helloMsg(1))
-	p.peer = awaitPeer(t, p.fam, p.wake)
+	p.peer = awaitPeer(t, p.prot, p.wake)
 	return p
 }
 
@@ -132,21 +130,21 @@ func (p rawControlPeer) writeViolation(t *testing.T, raw []byte) {
 
 func (p rawControlPeer) assertNoEvent(t *testing.T) {
 	t.Helper()
-	if ev, ok := p.fam.Next(); ok {
+	if ev, ok := p.prot.Next(); ok {
 		t.Fatalf("unadmitted view produced %+v", ev)
 	}
 }
 
 func (p rawControlPeer) awaitDown(t *testing.T, code wire.Code) {
 	t.Helper()
-	down := awaitEvent(t, p.fam, p.wake)
+	down := awaitEvent(t, p.prot, p.wake)
 	if down.Kind != PeerDown || down.Peer != p.peer || down.Code != code {
 		t.Fatalf("down = %+v, want PeerDown with %s", down, code)
 	}
 }
 
-func helloMsg(families ...uint32) *control.Hello {
-	return &control.Hello{Families: families}
+func helloMsg(protocols ...uint32) *control.Hello {
+	return &control.Hello{Protocols: protocols}
 }
 
 func goAwayMsg(code wire.Code) *control.GoAway {
@@ -195,7 +193,7 @@ func shortenHelloTimeout(t *testing.T, timeout time.Duration) {
 }
 
 func TestControlViolations(t *testing.T) {
-	tooMany := make([]uint32, control.MaxFamilies+1)
+	tooMany := make([]uint32, control.MaxProtocols+1)
 	for i := range tooMany {
 		tooMany[i] = uint32(i + 20)
 	}
@@ -206,8 +204,8 @@ func TestControlViolations(t *testing.T) {
 		send    func(*testing.T, rawControlPeer)
 	}{
 		{name: "descending", wire: controlWire(t, helloFrame, helloMsg(2, 1))},
-		{name: "control family", wire: controlWire(t, helloFrame, helloMsg(0))},
-		{name: "reserved family", wire: controlWire(t, helloFrame, helloMsg(19))},
+		{name: "control protocol", wire: controlWire(t, helloFrame, helloMsg(0))},
+		{name: "reserved protocol", wire: controlWire(t, helloFrame, helloMsg(19))},
 		{name: "too many", wire: controlWire(t, helloFrame, helloMsg(tooMany...))},
 		{name: "oversize", wire: wire.AppendFrame(nil, helloFrame, bytes.Repeat([]byte{0}, maxControlFrame+1))},
 		{name: "malformed protobuf", wire: wire.AppendFrame(nil, helloFrame, []byte{0xff})},
@@ -230,23 +228,7 @@ func TestControlViolations(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				if err := wire.WriteSelector(other, control.ControlSelector); err != nil {
-					t.Fatal(err)
-				}
-				assertRawReadCancel(t, other, wire.ControlViolation)
-			},
-		},
-		{
-			name:    "other control-family protocol",
-			helloed: true,
-			send: func(t *testing.T, p rawControlPeer) {
-				selector := control.ControlSelector
-				selector.Protocol = 1
-				other, err := p.raw.OpenUniStream()
-				if err != nil {
-					t.Fatal(err)
-				}
-				if err := wire.WriteSelector(other, selector); err != nil {
+				if err := wire.WriteHeader(other, control.ControlProtocol); err != nil {
 					t.Fatal(err)
 				}
 				assertRawReadCancel(t, other, wire.ControlViolation)
@@ -260,34 +242,7 @@ func TestControlViolations(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				if err := wire.WriteSelector(stream, control.ControlSelector); err != nil {
-					t.Fatal(err)
-				}
-				_ = stream.SetReadDeadline(time.Now().Add(time.Second))
-				_, err = stream.Read(make([]byte, 1))
-				reset, ok := errors.AsType[*quic.StreamError](err)
-				if !ok || !reset.Remote || uint64(reset.ErrorCode) != wire.ControlViolation.Wire() {
-					t.Fatalf("bidi reset = %v, want remote wire 22", err)
-				}
-				_ = stream.SetWriteDeadline(time.Now().Add(time.Second))
-				_, err = stream.Write(make([]byte, 1<<20))
-				reset, ok = errors.AsType[*quic.StreamError](err)
-				if !ok || !reset.Remote || uint64(reset.ErrorCode) != wire.ControlViolation.Wire() {
-					t.Fatalf("bidi read cancellation = %v, want remote wire 22", err)
-				}
-			},
-		},
-		{
-			name:    "bidirectional control family",
-			helloed: true,
-			send: func(t *testing.T, p rawControlPeer) {
-				selector := control.ControlSelector
-				selector.Protocol = 1
-				stream, err := p.raw.OpenStreamSync(transporttest.Context(t))
-				if err != nil {
-					t.Fatal(err)
-				}
-				if err := wire.WriteSelector(stream, selector); err != nil {
+				if err := wire.WriteHeader(stream, control.ControlProtocol); err != nil {
 					t.Fatal(err)
 				}
 				_ = stream.SetReadDeadline(time.Now().Add(time.Second))
@@ -418,7 +373,7 @@ func TestControlEarlyStreamWaitsForHello(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := wire.WriteSelector(bi, wire.Selector{Family: 1, Protocol: 2}); err != nil {
+	if err := wire.WriteHeader(bi, 1); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := bi.Write([]byte("early bidi")); err != nil {
@@ -429,7 +384,7 @@ func TestControlEarlyStreamWaitsForHello(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := wire.WriteSelector(out, wire.Selector{Family: 1, Protocol: 1}); err != nil {
+	if err := wire.WriteHeader(out, 1); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := out.Write([]byte("before HELLO")); err != nil {
@@ -439,24 +394,25 @@ func TestControlEarlyStreamWaitsForHello(t *testing.T) {
 	// The view is not admitted before HELLO arrives.
 	select {
 	case <-p.wake:
-		ev, _ := p.fam.Next()
+		ev, _ := p.prot.Next()
 		t.Fatalf("event before HELLO: %+v", ev)
 	case <-time.After(30 * time.Millisecond):
 	}
 	p.write(t, helloFrame, helloMsg(1))
-	awaitPeer(t, p.fam, p.wake)
+	awaitPeer(t, p.prot, p.wake)
 	// Both early streams are routed after admission; their relative order is
 	// header-read completion order, so accept the set.
-	got := make(map[wire.Protocol]string)
+	got := make(map[bool]string)
 	for range 2 {
-		ev := awaitStreamEvent(t, p.fam, p.wake)
+		ev := awaitStreamEvent(t, p.prot, p.wake)
 		payload, err := io.ReadAll(ev.Stream)
 		if err != nil {
 			t.Fatal(err)
 		}
-		got[ev.Protocol] = string(payload)
+		_, bidi := ev.Stream.(Stream)
+		got[bidi] = string(payload)
 	}
-	if got[1] != "before HELLO" || got[2] != "early bidi" {
+	if got[false] != "before HELLO" || got[true] != "early bidi" {
 		t.Fatalf("early streams = %v", got)
 	}
 }

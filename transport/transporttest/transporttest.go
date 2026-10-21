@@ -143,40 +143,40 @@ func NextRawUniStream(ctx context.Context, c *transport.Conn) (*quic.ReceiveStre
 
 // NextStream pulls the next incoming bidirectional ethp2p stream like
 // NextRawStream and reads its stream header.
-func NextStream(ctx context.Context, c *transport.Conn) (*quic.Stream, wire.Selector, error) {
+func NextStream(ctx context.Context, c *transport.Conn) (*quic.Stream, wire.Protocol, error) {
 	s, err := NextRawStream(ctx, c)
 	if err != nil {
-		return nil, wire.Selector{}, err
+		return nil, 0, err
 	}
-	sel, err := wire.ReadSelector(s)
+	sel, err := wire.ReadHeader(s)
 	if err != nil {
-		return nil, wire.Selector{}, err
+		return nil, 0, err
 	}
 	return s, sel, nil
 }
 
 // NextUniStream pulls the next incoming unidirectional ethp2p stream like
 // NextRawUniStream and reads its stream header.
-func NextUniStream(ctx context.Context, c *transport.Conn) (*quic.ReceiveStream, wire.Selector, error) {
+func NextUniStream(ctx context.Context, c *transport.Conn) (*quic.ReceiveStream, wire.Protocol, error) {
 	s, err := NextRawUniStream(ctx, c)
 	if err != nil {
-		return nil, wire.Selector{}, err
+		return nil, 0, err
 	}
-	sel, err := wire.ReadSelector(s)
+	sel, err := wire.ReadHeader(s)
 	if err != nil {
-		return nil, wire.Selector{}, err
+		return nil, 0, err
 	}
 	return s, sel, nil
 }
 
 // OpenUniStream opens a unidirectional stream and writes its stream header,
 // as an ethp2p peer would.
-func OpenUniStream(ctx context.Context, c *transport.Conn, sel wire.Selector) (*quic.SendStream, error) {
+func OpenUniStream(ctx context.Context, c *transport.Conn, sel wire.Protocol) (*quic.SendStream, error) {
 	s, err := c.OpenUniStream(ctx)
 	if err != nil {
 		return nil, err
 	}
-	if err := wire.WriteSelector(s, sel); err != nil {
+	if err := wire.WriteHeader(s, sel); err != nil {
 		s.CancelWrite(quic.StreamErrorCode(wire.Unspecified.Wire()))
 		return nil, err
 	}
@@ -185,12 +185,12 @@ func OpenUniStream(ctx context.Context, c *transport.Conn, sel wire.Selector) (*
 
 // OpenStream opens a bidirectional stream and writes its stream header, as
 // an ethp2p peer would.
-func OpenStream(ctx context.Context, c *transport.Conn, sel wire.Selector) (*quic.Stream, error) {
+func OpenStream(ctx context.Context, c *transport.Conn, sel wire.Protocol) (*quic.Stream, error) {
 	s, err := c.OpenStream(ctx)
 	if err != nil {
 		return nil, err
 	}
-	if err := wire.WriteSelector(s, sel); err != nil {
+	if err := wire.WriteHeader(s, sel); err != nil {
 		s.CancelRead(quic.StreamErrorCode(wire.Unspecified.Wire()))
 		s.CancelWrite(quic.StreamErrorCode(wire.Unspecified.Wire()))
 		return nil, err
@@ -199,10 +199,10 @@ func OpenStream(ctx context.Context, c *transport.Conn, sel wire.Selector) (*qui
 }
 
 // Hello is the content of a raw peer's HELLO. SendHello writes it as given,
-// without validation, so a test can send an invalid family list or record.
+// without validation, so a test can send an invalid protocol list or record.
 type Hello struct {
-	Families []wire.Family
-	Record   []byte
+	Protocols []wire.Protocol
+	Record    []byte
 }
 
 // RawPeer is one end of a view that speaks the control protocol by hand, for
@@ -246,7 +246,7 @@ func SendHello(ctx context.Context, conn *transport.Conn, h Hello) (*RawPeer, er
 	if err != nil {
 		return nil, err
 	}
-	frame, err := control.HelloBytes(h.Families, h.Record)
+	frame, err := control.HelloBytes(h.Protocols, h.Record)
 	if err != nil {
 		return nil, err
 	}

@@ -15,7 +15,7 @@ import (
 
 // Observe queue admission without transferring stream ownership to the test.
 // This distinguishes streams pending in the stack from those still in QUIC.
-func waitPending(t *testing.T, f *Family, count int) {
+func waitPending(t *testing.T, f *Protocol, count int) {
 	t.Helper()
 	deadline := time.Now().Add(testTimeout)
 	for time.Now().Before(deadline) {
@@ -41,24 +41,24 @@ func TestDeliveryQueuedStreamsResetOnDown(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			pair := newTestPair(t)
 			stack := newTestStack(t, pair.server)
-			fam, wake := registerTestFamily(t, stack, familyAlpha, ProtocolSpec{Protocol: testProtocol, MaxQueued: 8})
+			prot, wake := registerTestProtocol(t, stack, protocolAlpha)
 			pair.connect(t, nil, stack)
 			if test.takeUp {
-				awaitPeer(t, fam, wake)
+				awaitPeer(t, prot, wake)
 			}
 			ctx, stop := context.WithTimeout(t.Context(), testTimeout)
 			defer stop()
-			uni, err := transporttest.OpenUniStream(ctx, pair.clientConn, selectorAlpha)
+			uni, err := transporttest.OpenUniStream(ctx, pair.clientConn, protocolAlpha)
 			if err != nil {
 				t.Fatal(err)
 			}
-			bi, err := transporttest.OpenStream(ctx, pair.clientConn, selectorAlpha)
+			bi, err := transporttest.OpenStream(ctx, pair.clientConn, protocolAlpha)
 			if err != nil {
 				t.Fatal(err)
 			}
 			_, _ = uni.Write([]byte{1})
 			_, _ = bi.Write([]byte{2})
-			waitPending(t, fam, 2)
+			waitPending(t, prot, 2)
 			if test.closeStack {
 				if err := stack.Close(); err != nil {
 					t.Fatal(err)
@@ -67,12 +67,12 @@ func TestDeliveryQueuedStreamsResetOnDown(t *testing.T) {
 				disconnectTest(t, stack, pair.client.Endpoint.PeerID())
 			}
 			if test.takeUp {
-				down := awaitEvent(t, fam, wake)
+				down := awaitEvent(t, prot, wake)
 				if down.Kind != PeerDown || down.Code != wire.Closing || down.Peer.Context().Err() == nil {
 					t.Fatalf("down = %+v", down)
 				}
 			}
-			if event, ok := fam.Next(); ok {
+			if event, ok := prot.Next(); ok {
 				t.Fatalf("unexpected event after close: %+v", event)
 			}
 			for _, out := range []interface {

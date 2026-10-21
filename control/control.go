@@ -15,30 +15,27 @@ import (
 	"google.golang.org/protobuf/proto"
 )
 
-// ControlFamily is the family of the control protocol. Every view shares it,
+// ControlProtocol is the protocol of the control protocol. Every view shares it,
 // and no Hello announces it.
-const ControlFamily wire.Family = 0
+const ControlProtocol wire.Protocol = 0
 
-// ControlSelector identifies the view's control stream.
-var ControlSelector = wire.Selector{Family: ControlFamily, Protocol: 0}
+// MaxProtocols bounds the number of protocols in one Hello.
+const MaxProtocols = 1024
 
-// MaxFamilies bounds the number of families in one Hello.
-const MaxFamilies = 1024
+var errInvalidProtocols = errors.New("invalid protocol list")
 
-var errInvalidFamilies = errors.New("invalid family list")
-
-// ValidateFamilies requires a strictly ascending list of at most MaxFamilies
-// families, none of them the control family or the reserved family.
-func ValidateFamilies(families []wire.Family) error {
-	if len(families) > MaxFamilies {
-		return fmt.Errorf("%w: maximum is %d", errInvalidFamilies, MaxFamilies)
+// ValidateProtocols requires a strictly ascending list of at most MaxProtocols
+// protocols, none of them the control protocol or the reserved protocol.
+func ValidateProtocols(protocols []wire.Protocol) error {
+	if len(protocols) > MaxProtocols {
+		return fmt.Errorf("%w: maximum is %d", errInvalidProtocols, MaxProtocols)
 	}
-	for i, family := range families {
-		if family == ControlFamily || family == wire.ReservedFamily {
-			return fmt.Errorf("%w: family %d is never announced", errInvalidFamilies, family)
+	for i, protocol := range protocols {
+		if protocol == ControlProtocol || protocol == wire.ReservedProtocol {
+			return fmt.Errorf("%w: protocol %d is never announced", errInvalidProtocols, protocol)
 		}
-		if i > 0 && family <= families[i-1] {
-			return fmt.Errorf("%w: families must be strictly ascending", errInvalidFamilies)
+		if i > 0 && protocol <= protocols[i-1] {
+			return fmt.Errorf("%w: protocols must be strictly ascending", errInvalidProtocols)
 		}
 	}
 	return nil
@@ -60,16 +57,16 @@ var (
 
 // PeerHello is a peer's decoded HELLO.
 type PeerHello struct {
-	Families []wire.Family // strictly ascending; see ValidateFamilies
-	Record   []byte        // empty, or an EIP-778 encoding the supervisor checks
+	Protocols []wire.Protocol // strictly ascending; see ValidateProtocols
+	Record    []byte          // empty, or an EIP-778 encoding the supervisor checks
 }
 
 // HelloBytes returns our control stream's first write: its stream header and
 // HELLO frame. It fails when the HELLO exceeds MAX_CONTROL_FRAME.
-func HelloBytes(families []wire.Family, record []byte) ([]byte, error) {
-	msg := &Hello{Families: make([]uint32, len(families)), Record: record}
-	for i, family := range families {
-		msg.Families[i] = uint32(family)
+func HelloBytes(protocols []wire.Protocol, record []byte) ([]byte, error) {
+	msg := &Hello{Protocols: make([]uint32, len(protocols)), Record: record}
+	for i, protocol := range protocols {
+		msg.Protocols[i] = uint32(protocol)
 	}
 	raw, err := proto.Marshal(msg)
 	if err != nil {
@@ -78,29 +75,29 @@ func HelloBytes(families []wire.Family, record []byte) ([]byte, error) {
 	if len(raw) > maxControlFrame {
 		return nil, wire.ErrFrameTooLarge
 	}
-	return wire.AppendFrame(wire.AppendSelector(nil, ControlSelector), helloFrame, raw), nil
+	return wire.AppendFrame(wire.AppendHeader(nil, ControlProtocol), helloFrame, raw), nil
 }
 
 // ReadHello reads a control stream's header and HELLO frame from in and
 // returns the decoded Hello. The stream must be the peer's first
-// unidirectional stream: any other selector is an error.
+// unidirectional stream: any other protocol is an error.
 func ReadHello(in io.Reader) (PeerHello, error) {
-	sel, err := wire.ReadSelector(in)
+	protocol, err := wire.ReadHeader(in)
 	if err != nil {
 		return PeerHello{}, err
 	}
-	if sel != ControlSelector {
+	if protocol != ControlProtocol {
 		return PeerHello{}, errNotControlStream
 	}
 	msg := new(Hello)
 	if err := readControlFrame(in, helloFrame, msg); err != nil {
 		return PeerHello{}, err
 	}
-	h := PeerHello{Families: make([]wire.Family, len(msg.Families)), Record: msg.Record}
-	for i, family := range msg.Families {
-		h.Families[i] = wire.Family(family)
+	h := PeerHello{Protocols: make([]wire.Protocol, len(msg.Protocols)), Record: msg.Record}
+	for i, protocol := range msg.Protocols {
+		h.Protocols[i] = wire.Protocol(protocol)
 	}
-	if err := ValidateFamilies(h.Families); err != nil {
+	if err := ValidateProtocols(h.Protocols); err != nil {
 		return PeerHello{}, err
 	}
 	return h, nil

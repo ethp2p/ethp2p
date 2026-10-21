@@ -4,9 +4,9 @@ package ethp2p.control;
 option go_package = "github.com/ethp2p/ethp2p/control";
 
 message Hello {
-  // Families this endpoint serves besides control: strictly ascending, at most
+  // Protocols this endpoint serves besides control: strictly ascending, at most
   // 1024, neither 0 (control) nor 19 (reserved).
-  repeated uint32 families = 1;
+  repeated uint32 protocols = 1;
   // Optional: the sender's current node record (EIP-778 RLP encoding).
   bytes record = 2;
 }

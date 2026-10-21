@@ -68,7 +68,7 @@ type Stack struct {
 	acceptDone chan struct{}
 
 	mu             sync.Mutex
-	families       []*Family // appended by Register; immutable once serving
+	protocols      []*Protocol // appended by Register; immutable once serving
 	peers          map[identity.PeerID]*peerSupervisor
 	views          map[*transport.Conn]struct{} // committed views not yet released
 	dials          map[identity.PeerID]*dialAttempt
@@ -133,7 +133,7 @@ func (s *Stack) Start() error {
 	if s.config.Record != nil {
 		record = s.config.Record.Encode()
 	}
-	helloBytes, err := control.HelloBytes(s.localFamilies(), record)
+	helloBytes, err := control.HelloBytes(s.localProtocols(), record)
 	if err != nil {
 		return err
 	}
@@ -237,14 +237,14 @@ func (s *Stack) closeView(ctl *controlSession, code wire.Code, goAway bool, done
 	})
 }
 
-// localFamilies runs under mu.
-func (s *Stack) localFamilies() []wire.Family {
-	families := make([]wire.Family, len(s.families))
-	for i, family := range s.families {
-		families[i] = family.code
+// localProtocols runs under mu.
+func (s *Stack) localProtocols() []wire.Protocol {
+	protocols := make([]wire.Protocol, len(s.protocols))
+	for i, protocol := range s.protocols {
+		protocols[i] = protocol.id
 	}
-	slices.Sort(families)
-	return families
+	slices.Sort(protocols)
+	return protocols
 }
 
 // Disconnect abandons the peer's dial and releases its view, returning once

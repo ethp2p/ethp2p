@@ -141,7 +141,7 @@ func TestChannelReceive(t *testing.T) {
 			t.Fatalf("second Subscribe = %v, want ErrAlreadySubscribed", err)
 		}
 
-		channel.inbox <- channelSessionOpen{peerID: "peer1", msg: &bcastpb.Sess_Open{ObjectId: "msg1", Preamble: []byte("mock-header")}}
+		channel.inbox <- channelSessionOpen{peerID: "peer1", msg: &bcastpb.Sess_Open{ObjectId: "msg1"}, preamble: []byte("mock-header")}
 		synctest.Wait()
 		channel.inbox <- newFakeChunk("peer1", "msg1", []byte("hello"))
 		synctest.Wait()
@@ -254,7 +254,7 @@ func TestChannel_SessionExpiryTimerDisposesSession(t *testing.T) {
 		channel := AttachChannel[*testChunk, *testRouting, *testPreamble](engine, "test-channel", newMockScheme())
 		defer channel.Stop()
 
-		channel.inbox <- channelSessionOpen{peerID: "peer1", msg: &bcastpb.Sess_Open{ObjectId: "msg1", Preamble: []byte("mock-header")}}
+		channel.inbox <- channelSessionOpen{peerID: "peer1", msg: &bcastpb.Sess_Open{ObjectId: "msg1"}, preamble: []byte("mock-header")}
 		synctest.Wait()
 
 		time.Sleep(activeSessionTTL + time.Second)

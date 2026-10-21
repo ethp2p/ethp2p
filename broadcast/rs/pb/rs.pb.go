@@ -23,12 +23,20 @@ const (
 
 // Preamble is the session preamble for Reed-Solomon coded messages.
 type Preamble struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	NumData       int32                  `protobuf:"varint,1,opt,name=num_data,json=numData,proto3" json:"num_data,omitempty"`
-	NumParity     int32                  `protobuf:"varint,2,opt,name=num_parity,json=numParity,proto3" json:"num_parity,omitempty"`
-	Length        int32                  `protobuf:"varint,3,opt,name=length,proto3" json:"length,omitempty"`
-	Hashes        [][]byte               `protobuf:"bytes,4,rep,name=hashes,proto3" json:"hashes,omitempty"`
-	Hash          []byte                 `protobuf:"bytes,5,opt,name=hash,proto3" json:"hash,omitempty"`
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Number of data shards (k). Indices 0 through k-1.
+	NumData int32 `protobuf:"varint,1,opt,name=num_data,json=numData,proto3" json:"num_data,omitempty"`
+	// Number of parity shards (n-k). Indices k through n-1.
+	NumParity int32 `protobuf:"varint,2,opt,name=num_parity,json=numParity,proto3" json:"num_parity,omitempty"`
+	// Original unpadded message size in bytes. Used to trim decoded output.
+	Length int32 `protobuf:"varint,3,opt,name=length,proto3" json:"length,omitempty"`
+	// SHA-256 hash of each shard, indexed by shard index. Used for per-chunk
+	// verification. Provisional; will be replaced by Merkle commitment or
+	// builder signature.
+	Hashes [][]byte `protobuf:"bytes,4,rep,name=hashes,proto3" json:"hashes,omitempty"`
+	// SHA-256 hash of the original message. Verified after decode for
+	// end-to-end integrity.
+	Hash          []byte `protobuf:"bytes,5,opt,name=hash,proto3" json:"hash,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }

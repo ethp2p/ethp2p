@@ -247,7 +247,7 @@ tier-aware forwarding exploits both topology and coding gain.
 
 <!-- MISSING from design doc:
 - Erasure coding framing: "transforms broadcast from a bandwidth-concentration problem into a bandwidth-distribution problem"
-- Framework design: three stream types (BCAST, SESS, CHUNK) with per-stream flow control
+- Framework design: three stream types (control, session, chunk) with per-stream flow control
 - Pull-based strategy dispatch: framework polls after every state-mutating event, synchronous on event loop, no locks on hot path; Work channel exception for async producers
 - RS details: emit planner (min-heap by allocation count), Fibonacci hashing for per-relay priority, forward multiplier budget
 - RLNC details: generation/basis structure, relay recoding, rank-based routing (subspace fingerprinting with pivot columns)

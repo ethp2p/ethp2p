@@ -10,42 +10,42 @@ import (
 	"google.golang.org/protobuf/proto"
 )
 
-func TestValidateFamilies(t *testing.T) {
-	if err := ValidateFamilies([]wire.Family{1, 2, 18, 20, math.MaxUint32}); err != nil {
+func TestValidateProtocols(t *testing.T) {
+	if err := ValidateProtocols([]wire.Protocol{1, 2, 18, 20, math.MaxUint32}); err != nil {
 		t.Fatal(err)
 	}
-	if err := ValidateFamilies(nil); err != nil {
+	if err := ValidateProtocols(nil); err != nil {
 		t.Fatal(err)
 	}
 	for _, test := range []struct {
 		name    string
-		entries []wire.Family
+		entries []wire.Protocol
 	}{
-		{name: "non-ascending", entries: []wire.Family{2, 1}},
-		{name: "duplicate", entries: []wire.Family{3, 3}},
-		{name: "control family", entries: []wire.Family{ControlFamily}},
-		{name: "reserved family", entries: []wire.Family{1, wire.ReservedFamily}},
+		{name: "non-ascending", entries: []wire.Protocol{2, 1}},
+		{name: "duplicate", entries: []wire.Protocol{3, 3}},
+		{name: "control protocol", entries: []wire.Protocol{ControlProtocol}},
+		{name: "reserved protocol", entries: []wire.Protocol{1, wire.ReservedProtocol}},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			if err := ValidateFamilies(test.entries); !errors.Is(err, errInvalidFamilies) {
-				t.Fatalf("ValidateFamilies error = %v, want %v", err, errInvalidFamilies)
+			if err := ValidateProtocols(test.entries); !errors.Is(err, errInvalidProtocols) {
+				t.Fatalf("ValidateProtocols error = %v, want %v", err, errInvalidProtocols)
 			}
 		})
 	}
-	families := make([]wire.Family, MaxFamilies)
-	for i := range families {
-		families[i] = wire.Family(i + 1000)
+	protocols := make([]wire.Protocol, MaxProtocols)
+	for i := range protocols {
+		protocols[i] = wire.Protocol(i + 1000)
 	}
-	if err := ValidateFamilies(families); err != nil {
-		t.Fatalf("ValidateFamilies(%d families): %v", MaxFamilies, err)
+	if err := ValidateProtocols(protocols); err != nil {
+		t.Fatalf("ValidateProtocols(%d protocols): %v", MaxProtocols, err)
 	}
-	if err := ValidateFamilies(append(families, 2024)); !errors.Is(err, errInvalidFamilies) {
-		t.Fatalf("ValidateFamilies too many = %v", err)
+	if err := ValidateProtocols(append(protocols, 2024)); !errors.Is(err, errInvalidProtocols) {
+		t.Fatalf("ValidateProtocols too many = %v", err)
 	}
 }
 
 func TestHelloRoundTrip(t *testing.T) {
-	raw, err := HelloBytes([]wire.Family{1, 7, 20}, []byte{0xaa, 0xbb})
+	raw, err := HelloBytes([]wire.Protocol{1, 7, 20}, []byte{0xaa, 0xbb})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -53,8 +53,8 @@ func TestHelloRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(h.Families) != 3 || h.Families[0] != 1 || h.Families[1] != 7 || h.Families[2] != 20 {
-		t.Fatalf("families = %v", h.Families)
+	if len(h.Protocols) != 3 || h.Protocols[0] != 1 || h.Protocols[1] != 7 || h.Protocols[2] != 20 {
+		t.Fatalf("protocols = %v", h.Protocols)
 	}
 	if !bytes.Equal(h.Record, []byte{0xaa, 0xbb}) {
 		t.Fatalf("record = %x", h.Record)
@@ -62,11 +62,11 @@ func TestHelloRoundTrip(t *testing.T) {
 }
 
 func TestReadHelloRejectsNonControlStream(t *testing.T) {
-	msg, err := proto.Marshal(&Hello{Families: []uint32{1}})
+	msg, err := proto.Marshal(&Hello{Protocols: []uint32{1}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	raw := wire.AppendFrame(wire.AppendSelector(nil, wire.Selector{Family: 9}), helloFrame, msg)
+	raw := wire.AppendFrame(wire.AppendHeader(nil, 9), helloFrame, msg)
 	if _, err := ReadHello(bytes.NewReader(raw)); !errors.Is(err, errNotControlStream) {
 		t.Fatalf("ReadHello error = %v, want %v", err, errNotControlStream)
 	}
@@ -85,7 +85,7 @@ func TestGoAwayRoundTrip(t *testing.T) {
 }
 
 func TestReadGoAwayRejectsHelloFrame(t *testing.T) {
-	msg, err := proto.Marshal(&Hello{Families: []uint32{1}})
+	msg, err := proto.Marshal(&Hello{Protocols: []uint32{1}})
 	if err != nil {
 		t.Fatal(err)
 	}

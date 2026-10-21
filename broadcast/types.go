@@ -54,8 +54,6 @@ type (
 	ChunkHandle uint64
 )
 
-const ProtocolV1 uint32 = 1
-
 // Verdict classifies the result of processing an inbound chunk.
 type Verdict uint8
 

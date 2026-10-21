@@ -3,6 +3,8 @@ package broadcast
 import (
 	"context"
 	"errors"
+	"fmt"
+	"io"
 	"time"
 
 	ethp2p "github.com/ethp2p/ethp2p"
@@ -25,36 +27,46 @@ type slotUpdate struct {
 }
 
 // runCtrlReader reads and dispatches control messages from the peer's inbound
-// BCAST stream. On read error, it stops this broadcast binding. The borrowed
-// connection remains owned by the application; stream cancellation is limited
-// to streams owned by this binding.
+// control stream. When the stream ends, it stops this broadcast binding, with
+// a violation cause if the peer sent a bad frame. The borrowed connection
+// remains owned by the application; stream cancellation is limited to streams
+// owned by this binding.
 func (p *PeerConn) runCtrlReader() {
-	defer p.cancel()
+	var cause error
+	defer func() { p.cancel(cause) }()
 	stop := ctxutil.OnCancel(p.ctx, func() { p.ctrlIn.CancelRead(streamFailureCode(p.ctx.Err())) })
 	defer stop()
 	for {
 		typ, data, err := wire.ReadFrame(p.ctrlIn, maxBroadcastFrame)
+		if err != nil {
+			stop()
+			// FIN between frames ends the binding without a violation.
+			if !errors.Is(err, io.EOF) && isPeerFault(err) {
+				cause = peerViolation(fmt.Errorf("control stream: %w", err))
+			}
+			// Reads never cancel a side, so end it here with the read error's code.
+			p.ctrlIn.CancelRead(streamCancellationCode(errors.Join(err, p.ctx.Err())))
+			return
+		}
 		var channel string
 		var handle func(*PeerConn, ChannelID)
-		if err == nil {
-			switch typ {
-			case subscribeFrame:
-				var msg bcastpb.Bcast_Subscribe
-				err = unmarshalFrame(data, &msg)
-				channel, handle = msg.Channel, p.engine.peerSubscribed
-			case unsubscribeFrame:
-				var msg bcastpb.Bcast_Unsubscribe
-				err = unmarshalFrame(data, &msg)
-				channel, handle = msg.Channel, p.engine.peerUnsubscribed
-			default:
-				// HANDSHAKE comes only first, and the handshake consumed it.
-				err = errUnexpectedFrame
-			}
+		switch typ {
+		case subscribeFrame:
+			var msg bcastpb.Bcast_Subscribe
+			err = unmarshalFrame(data, &msg)
+			channel, handle = msg.Channel, p.engine.peerSubscribed
+		case unsubscribeFrame:
+			var msg bcastpb.Bcast_Unsubscribe
+			err = unmarshalFrame(data, &msg)
+			channel, handle = msg.Channel, p.engine.peerUnsubscribed
+		default:
+			// HANDSHAKE comes only first, and the handshake consumed it.
+			err = fmt.Errorf("frame type %d: %w", typ, errUnexpectedFrame)
 		}
 		if err != nil {
 			stop()
-			// Reads never cancel a side, so end it here with the read error's code.
-			p.ctrlIn.CancelRead(streamCancellationCode(errors.Join(err, p.ctx.Err())))
+			cause = peerViolation(fmt.Errorf("control stream: %w", err))
+			p.ctrlIn.CancelRead(wire.Refused)
 			return
 		}
 		channelID := ChannelID(channel)
@@ -65,9 +77,9 @@ func (p *PeerConn) runCtrlReader() {
 const slotUpdateCap = 32
 
 // runCtrlLoop emits outbound control state in phase order. It owns the sessions
-// map and SESS stream writes.
+// map and session stream writes.
 func (p *PeerConn) runCtrlLoop(slotCh chan<- slotUpdate) {
-	// sessions holds each open outbound SESS stream until it is closed,
+	// sessions holds each open outbound session stream until it is closed,
 	// ended with Reconstructed, or fails a write.
 	sessions := make(map[sessionKey]ethp2p.SendStream)
 	defer func() {
@@ -191,24 +203,30 @@ func (p *PeerConn) handleSessionOpen(e peerOpenSession, sessions map[sessionKey]
 		}
 	}
 
-	s, err := p.streams.OpenUniStream(p.ctx, SESS)
+	s, err := p.handle.OpenUniStream(p.ctx)
 	if err != nil {
-		p.cancel()
+		p.cancel(nil)
 		return
 	}
 	stop := ctxutil.OnCancel(p.ctx, func() { s.CancelWrite(streamFailureCode(p.ctx.Err())) })
 	defer stop()
-	frame := &bcastpb.Sess_Open{
+	// OPEN and PREAMBLE go in one write.
+	frames, err := appendFrame(nil, openFrame, &bcastpb.Sess_Open{
 		Channel:       string(e.channelID),
 		ObjectId:      string(e.messageID),
-		Preamble:      e.preamble,
 		InitialUpdate: e.initialRouting,
+	})
+	if err == nil {
+		frames, err = appendFrame(frames, preambleFrame, &bcastpb.Sess_Preamble{Data: e.preamble})
 	}
-	if err := writeFrame(s, openFrame, frame); err != nil {
+	if err == nil {
+		_, err = s.Write(frames)
+	}
+	if err != nil {
 		stop()
 		// Writes never cancel a side, so end it here before abandoning the stream.
 		s.CancelWrite(streamFailureCode(err))
-		p.cancel()
+		p.cancel(nil)
 		return
 	}
 
@@ -220,7 +238,7 @@ func (p *PeerConn) handleSessionOpen(e peerOpenSession, sessions map[sessionKey]
 	}
 }
 
-// writeCtrl writes a frame of type typ to the outbound BCAST stream. On
+// writeCtrl writes a frame of type typ to the outbound control stream. On
 // failure, cancels the peer context so all goroutines shut down.
 func (p *PeerConn) writeCtrl(typ wire.FrameType, msg proto.Message) {
 	stop := ctxutil.OnCancel(p.ctx, func() { p.ctrlOut.CancelWrite(streamFailureCode(p.ctx.Err())) })
@@ -230,7 +248,7 @@ func (p *PeerConn) writeCtrl(typ wire.FrameType, msg proto.Message) {
 		// runCtrlLoop's later Unspecified does not replace this one.
 		p.ctrlOut.CancelWrite(streamFailureCode(err))
 		stop()
-		p.cancel()
+		p.cancel(nil)
 	}
 }
 
@@ -289,7 +307,7 @@ func (p *PeerConn) doSendChunk(e peerSendChunk) (int, error) {
 	deadline := time.Now().Add(chunkWriteTimeout)
 	ctx, cancel := context.WithDeadline(p.ctx, deadline)
 	defer cancel()
-	s, err := p.streams.OpenUniStream(ctx, CHUNK)
+	s, err := p.handle.OpenUniStream(ctx)
 	if err != nil {
 		return 0, ErrChunkWriteFail
 	}

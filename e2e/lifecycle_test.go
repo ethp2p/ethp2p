@@ -14,22 +14,19 @@ import (
 
 func TestEngineCloseCleanup(t *testing.T) {
 	harness.Run(t, func(t *testing.T, n *harness.Net) {
-		const (
-			probeFamily   wire.Family   = 17
-			probeProtocol wire.Protocol = 1
-		)
-		var probeA, probeB *ethp2p.Family
+		const probeProtocol wire.Protocol = 17
+		var probeA, probeB *ethp2p.Protocol
 		wakeA, wakeB := make(chan struct{}, 1), make(chan struct{}, 1)
 		a := n.Node("a", harness.BeforeStart(func(s *ethp2p.Stack) {
 			var err error
-			probeA, err = s.Register(probeFamily, []ethp2p.ProtocolSpec{{Protocol: probeProtocol, MaxQueued: 16}}, wakeA)
+			probeA, err = s.Register(probeProtocol, wakeA)
 			if err != nil {
 				t.Fatal(err)
 			}
 		}))
 		b := n.Node("b", harness.BeforeStart(func(s *ethp2p.Stack) {
 			var err error
-			probeB, err = s.Register(probeFamily, []ethp2p.ProtocolSpec{{Protocol: probeProtocol, MaxQueued: 16}}, wakeB)
+			probeB, err = s.Register(probeProtocol, wakeB)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -46,7 +43,7 @@ func TestEngineCloseCleanup(t *testing.T) {
 		if err := a.Engine.Close(); err != nil {
 			t.Fatal(err)
 		}
-		// The engine borrows its connection. The probe family still routes
+		// The engine borrows its connection. The probe protocol still routes
 		// a bidirectional stream through the same Stack after engine shutdown.
 		var peer *ethp2p.Peer
 		for peer == nil {
@@ -63,7 +60,7 @@ func TestEngineCloseCleanup(t *testing.T) {
 				t.Fatal(ctx.Err())
 			}
 		}
-		out, err := peer.OpenStream(ctx, probeProtocol)
+		out, err := peer.OpenStream(ctx)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -90,9 +87,6 @@ func TestEngineCloseCleanup(t *testing.T) {
 			case <-ctx.Done():
 				t.Fatal(ctx.Err())
 			}
-		}
-		if ev.Protocol != probeProtocol {
-			t.Fatalf("protocol=%d", ev.Protocol)
 		}
 		stream, ok := ev.Stream.(ethp2p.Stream)
 		if !ok {

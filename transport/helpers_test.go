@@ -114,19 +114,15 @@ func nextUniStream(tb testing.TB, c *Conn) *quic.ReceiveStream {
 	return s
 }
 
-func testSelector(p wire.Protocol) wire.Selector {
-	return wire.Selector{Family: 1, Protocol: p}
-}
-
 // openStream opens a bidirectional stream and writes sel's stream header, as
 // the stack does.
-func openStream(t *testing.T, ctx context.Context, c *Conn, sel wire.Selector) *quic.Stream {
+func openStream(t *testing.T, ctx context.Context, c *Conn, sel wire.Protocol) *quic.Stream {
 	t.Helper()
 	s, err := c.OpenStream(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := wire.WriteSelector(s, sel); err != nil {
+	if err := wire.WriteHeader(s, sel); err != nil {
 		t.Fatal(err)
 	}
 	return s
@@ -134,10 +130,10 @@ func openStream(t *testing.T, ctx context.Context, c *Conn, sel wire.Selector) *
 
 // nextSelected pulls the next incoming bidirectional ethp2p stream and reads
 // its stream header, as the stack does.
-func nextSelected(tb testing.TB, c *Conn) (*quic.Stream, wire.Selector) {
+func nextSelected(tb testing.TB, c *Conn) (*quic.Stream, wire.Protocol) {
 	tb.Helper()
 	s := nextStream(tb, c)
-	sel, err := wire.ReadSelector(s)
+	sel, err := wire.ReadHeader(s)
 	if err != nil {
 		tb.Fatal(err)
 	}

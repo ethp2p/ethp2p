@@ -9,14 +9,14 @@ import (
 	"net"
 )
 
-// ReservedFamily is never assigned: its stream header would begin with 0x13,
+// ReservedProtocol is never assigned: its stream header would begin with 0x13,
 // the first byte of every multistream-select header, which is how a receiver
 // tells libp2p streams apart.
-const ReservedFamily Family = 19
+const ReservedProtocol Protocol = 19
 
-// MaxHeaderLen is the longest stream header: two uvarints of at most 32 bits,
-// five bytes each.
-const MaxHeaderLen = 10
+// MaxHeaderLen is the longest stream header: one uvarint of at most 32 bits,
+// five bytes.
+const MaxHeaderLen = 5
 
 const maxFieldLen = 5
 
@@ -24,26 +24,13 @@ var (
 	errInvalidHeader = errors.New("invalid stream header")
 	// ErrFrameTooLarge indicates that the frame payload exceeds the caller's limit.
 	ErrFrameTooLarge = errors.New("frame exceeds maximum length")
-	errFrameLength   = errors.New("frame type or length is not a minimal uvarint")
+	// ErrFrameEncoding indicates a frame type or length that is not a minimal
+	// uvarint, or that overflows 64 bits.
+	ErrFrameEncoding = errors.New("frame type or length is not a minimal uvarint")
 )
 
-// Family numbers a set of protocols that nodes serve together.
-type Family uint32
-
-// Protocol numbers a protocol within its family.
+// Protocol numbers a protocol; it is the whole stream header value.
 type Protocol uint32
-
-// Selector names an ethp2p stream protocol on the wire: its family and its
-// number within that family.
-type Selector struct {
-	Family   Family
-	Protocol Protocol
-}
-
-// String formats the selector as family/protocol.
-func (s Selector) String() string {
-	return fmt.Sprintf("%d/%d", s.Family, s.Protocol)
-}
 
 // FrameType numbers a frame type within its protocol.
 type FrameType uint64
@@ -64,17 +51,16 @@ var (
 	// Timeout means a deadline expired.
 	Timeout = Code{value: 2}
 
-	// BadSelector means the stream header was invalid.
-	BadSelector = Code{value: 8}
-	// UnsupportedSelector means the stream's family is not shared on the view,
-	// or its protocol is not one the family serves.
-	UnsupportedSelector = Code{value: 9}
+	// BadHeader means the stream header was invalid.
+	BadHeader = Code{value: 8}
+	// UnsupportedProtocol means the stream's protocol is not shared on the view.
+	UnsupportedProtocol = Code{value: 9}
 	// Closing means the stack view is closing.
 	Closing = Code{value: 10}
 	// ControlViolation means the control stream protocol was violated.
 	ControlViolation = Code{value: 11}
-	// NoSharedProtocols means no family is shared on the view, or no local
-	// family still holds it.
+	// NoSharedProtocols means no protocol is shared on the view, or no local
+	// protocol still holds it.
 	NoSharedProtocols = Code{value: 12}
 	// Duplicate means another connection to the same peer was kept.
 	Duplicate = Code{value: 13}
@@ -82,12 +68,12 @@ var (
 
 var stackCodeNames = map[uint64]string{
 	0: "Unspecified", 1: "Refused", 2: "Timeout",
-	8: "BadSelector", 9: "UnsupportedSelector", 10: "Closing",
+	8: "BadHeader", 9: "UnsupportedProtocol", 10: "Closing",
 	11: "ControlViolation", 12: "NoSharedProtocols", 13: "Duplicate",
 }
 
 // ProtocolCode returns a protocol-namespace outcome code for value. It
-// carries no selector binding; the stream it is sent on determines where it
+// carries no protocol binding; the stream it is sent on determines where it
 // applies.
 func ProtocolCode(value uint16) Code {
 	return Code{value: uint64(value), protocol: true}
@@ -152,8 +138,15 @@ func AppendFrameHead(dst []byte, typ FrameType, length int) []byte {
 // payload allocation and must not be negative. An EOF before the first byte is
 // returned as io.EOF; a truncated type, length or payload returns
 // io.ErrUnexpectedEOF; a type or length that is not a minimal uvarint returns
-// errFrameLength. The caller decides which types its protocol accepts.
+// ErrFrameEncoding. The caller decides which types its protocol accepts.
 func ReadFrame(r io.Reader, maxLen int) (FrameType, []byte, error) {
+	return ReadFrameLimit(r, func(FrameType) int { return maxLen })
+}
+
+// ReadFrameLimit is ReadFrame with the payload limit chosen by frame type,
+// which is read before the length, so one read can admit a large frame of
+// one type and bound every other type tightly.
+func ReadFrameLimit(r io.Reader, maxLen func(FrameType) int) (FrameType, []byte, error) {
 	typ, err := readMinimalUvarint(r)
 	if err != nil {
 		return 0, nil, err
@@ -165,7 +158,7 @@ func ReadFrame(r io.Reader, maxLen int) (FrameType, []byte, error) {
 		}
 		return 0, nil, err
 	}
-	if length > uint64(maxLen) {
+	if length > uint64(maxLen(FrameType(typ))) {
 		return 0, nil, ErrFrameTooLarge
 	}
 	payload := make([]byte, length)
@@ -185,17 +178,22 @@ func readMinimalUvarint(r io.Reader) (uint64, error) {
 	br := &byteReader{Reader: r}
 	value, err := binary.ReadUvarint(br)
 	if err != nil {
+		if br.err == nil {
+			// The reader never failed, so ReadUvarint rejected the encoding.
+			return 0, fmt.Errorf("%w: %w", ErrFrameEncoding, err)
+		}
 		return 0, err
 	}
 	if br.n != len(binary.AppendUvarint(nil, value)) {
-		return 0, errFrameLength
+		return 0, ErrFrameEncoding
 	}
 	return value, nil
 }
 
 type byteReader struct {
 	io.Reader
-	n int
+	n   int
+	err error // the last error from Reader
 }
 
 func (r *byteReader) ReadByte() (byte, error) {
@@ -204,41 +202,37 @@ func (r *byteReader) ReadByte() (byte, error) {
 	if err == nil {
 		r.n++
 	}
+	r.err = err
 	return b[0], err
 }
 
-// AppendSelector appends the stream header for selector to dst.
-func AppendSelector(dst []byte, selector Selector) []byte {
-	dst = binary.AppendUvarint(dst, uint64(selector.Family))
-	return binary.AppendUvarint(dst, uint64(selector.Protocol))
+// AppendHeader appends the stream header for protocol to dst.
+func AppendHeader(dst []byte, protocol Protocol) []byte {
+	return binary.AppendUvarint(dst, uint64(protocol))
 }
 
-// WriteSelector writes one stream header in a single write. The selected
-// protocol applies to the rest of the stream; this function does not close w.
-func WriteSelector(w io.Writer, selector Selector) error {
+// WriteHeader writes one stream header in a single write. The protocol
+// applies to the rest of the stream; this function does not close w.
+func WriteHeader(w io.Writer, protocol Protocol) error {
 	// io.Writer requires a non-nil error on a short write.
-	_, err := w.Write(AppendSelector(nil, selector))
+	_, err := w.Write(AppendHeader(nil, protocol))
 	return err
 }
 
-// ParseSelector parses the stream header at the start of b. It returns the
+// ParseHeader parses the stream header at the start of b. It returns the
 // header's length, or 0 and a nil error when b holds only part of a valid
 // header, so a caller can peek one byte more and retry. It rejects a field that
-// is not a minimal uvarint or exceeds 32 bits, and family 19 as soon as its one
-// byte is seen. Whether the selector is served is the caller's policy.
-func ParseSelector(b []byte) (Selector, int, error) {
-	family, n, err := parseField(b)
+// is not a minimal uvarint or exceeds 32 bits, and protocol 19 as soon as its one
+// byte is seen. Whether the protocol is served is the caller's policy.
+func ParseHeader(b []byte) (Protocol, int, error) {
+	protocol, n, err := parseField(b)
 	if n == 0 || err != nil {
-		return Selector{}, 0, err
+		return 0, 0, err
 	}
-	if Family(family) == ReservedFamily {
-		return Selector{}, 0, fmt.Errorf("%w: family %d is reserved", errInvalidHeader, ReservedFamily)
+	if Protocol(protocol) == ReservedProtocol {
+		return 0, 0, fmt.Errorf("%w: protocol %d is reserved", errInvalidHeader, ReservedProtocol)
 	}
-	protocol, m, err := parseField(b[n:])
-	if m == 0 || err != nil {
-		return Selector{}, 0, err
-	}
-	return Selector{Family: Family(family), Protocol: Protocol(protocol)}, n + m, nil
+	return Protocol(protocol), n, nil
 }
 
 // parseField parses one header field: a minimal uvarint of at most 32 bits.
@@ -263,24 +257,24 @@ func parseField(b []byte) (uint32, int, error) {
 	return 0, 0, nil
 }
 
-// ReadSelector reads one stream header a byte at a time, so it never consumes
+// ReadHeader reads one stream header a byte at a time, so it never consumes
 // past it. An EOF before the first byte is returned as io.EOF and a truncated
 // header as io.ErrUnexpectedEOF.
-func ReadSelector(r io.Reader) (Selector, error) {
+func ReadHeader(r io.Reader) (Protocol, error) {
 	var head [MaxHeaderLen]byte
 	for i := range head {
 		if _, err := io.ReadFull(r, head[i:i+1]); err != nil {
 			if err == io.EOF && i > 0 {
 				err = io.ErrUnexpectedEOF
 			}
-			return Selector{}, err
+			return 0, err
 		}
-		selector, n, err := ParseSelector(head[:i+1])
+		protocol, n, err := ParseHeader(head[:i+1])
 		if err != nil || n != 0 {
-			return selector, err
+			return protocol, err
 		}
 	}
-	// Two complete fields fit in MaxHeaderLen bytes, so ParseSelector has
+	// One complete field fits in MaxHeaderLen bytes, so ParseHeader has
 	// returned a header or an error before the loop ends.
 	panic("unreachable")
 }

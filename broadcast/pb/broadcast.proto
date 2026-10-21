@@ -3,13 +3,13 @@ package ethp2p.broadcast;
 
 option go_package = "github.com/ethp2p/ethp2p/broadcast/pb";
 
-// Bcast is the protocol namespace for BCAST streams: a HANDSHAKE frame, then
-// any number of SUBSCRIBE and UNSUBSCRIBE frames.
+// Bcast holds the payloads of the control stream: a HANDSHAKE frame, then any
+// number of SUBSCRIBE and UNSUBSCRIBE frames.
 message Bcast {
-  // Handshake is the payload of the HANDSHAKE frame.
+  // Handshake is the payload of the HANDSHAKE frame, the control stream's
+  // opening message. The protocol number carries the version.
   message Handshake {
-    uint32 version = 1;
-    repeated string channels = 2;
+    repeated string channels = 1;
   }
 
   // Subscribe requests the remote peer to include us in a channel.
@@ -23,15 +23,21 @@ message Bcast {
   }
 }
 
-// Sess is the protocol namespace for SESS streams: an OPEN frame, then any
-// number of UPDATE frames.
+// Sess holds the payloads of a session stream: an OPEN frame, then one
+// PREAMBLE frame, then any number of UPDATE frames.
 message Sess {
-  // Open is the payload of the OPEN frame, which establishes the session.
+  // Open is the payload of the OPEN frame, the session stream's opening
+  // message.
   message Open {
     string channel = 1;
     string object_id = 2;
-    bytes preamble = 3;
-    bytes initial_update = 4;
+    bytes initial_update = 3;
+  }
+
+  // Preamble is the payload of the PREAMBLE frame: the scheme's opaque
+  // preamble, which a relay needs to build its strategy.
+  message Preamble {
+    bytes data = 1;
   }
 
   // Update is the payload of an UPDATE frame: an opaque routing state update
@@ -41,8 +47,8 @@ message Sess {
   }
 }
 
-// Chunk is the protocol namespace for CHUNK streams: a HEADER frame, then one
-// DATA frame whose payload is the raw chunk data.
+// Chunk holds the payloads of a chunk stream: a HEADER frame, its opening
+// message, then one DATA frame whose payload is the raw chunk data.
 message Chunk {
   // Header is the payload of the HEADER frame. data_length announces the
   // payload length of the DATA frame that follows.

@@ -18,7 +18,7 @@ func TestRegisteredDeliveryClosesBindingAndRefusesUnboundStream(t *testing.T) {
 	e := &Engine{
 		ctx: ctx, cancel: cancel, config: EngineConfig{Observer: NoOpObserver{}},
 		eventCh: make(chan func(), 128), deliveryWake: make(chan struct{}, 1),
-		bindings: make(map[*ethp2p.Peer]*PeerConn),
+		bindings: make(map[peerHandle]*PeerConn),
 		peers:    make(map[identity.PeerID]*PeerConn),
 	}
 	// The test owns the event loop: claim Start so Register does not start it.
@@ -40,10 +40,10 @@ func TestRegisteredDeliveryClosesBindingAndRefusesUnboundStream(t *testing.T) {
 		t.Fatal(err)
 	}
 	client := transporttest.NewEndpoint(t)
-	if _, err := transporttest.DialHello(t.Context(), client, endpoint, transporttest.Hello{Families: []wire.Family{Family}}); err != nil {
+	if _, err := transporttest.DialHello(t.Context(), client, endpoint, transporttest.Hello{Protocols: []wire.Protocol{Protocol}}); err != nil {
 		t.Fatal(err)
 	}
-	sub := e.family
+	sub := e.proto
 	up := nextOutcomeEvent(t, sub, e.deliveryWake)
 	if up.Kind != ethp2p.PeerUp {
 		t.Fatalf("first event = %v", up.Kind)
@@ -66,8 +66,8 @@ func TestRegisteredDeliveryClosesBindingAndRefusesUnboundStream(t *testing.T) {
 	}
 
 	f := newOutcomeFixture(t)
-	raw, stream := f.incoming(t, SESS, nil)
-	e.handleDelivery(ethp2p.Event{Kind: ethp2p.StreamIn, Peer: f.peer, Protocol: SESS, Stream: stream})
+	raw, stream := f.incoming(t, nil)
+	e.handleDelivery(ethp2p.Event{Kind: ethp2p.StreamIn, Peer: f.peer, Stream: stream})
 	requireCode(t, raw.CancelReadCodes(), 2)
 	if e.bindings[f.peer] != nil {
 		t.Fatal("stream created a binding without PeerUp")

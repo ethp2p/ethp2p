@@ -4,15 +4,16 @@ import (
 	"bytes"
 	"context"
 	"errors"
-	"github.com/quic-go/quic-go"
 	"io"
 	"os"
 	"sync"
 	"testing"
-	"testing/synctest"
 	"time"
 
+	"github.com/quic-go/quic-go"
+
 	ethp2p "github.com/ethp2p/ethp2p"
+	bcastpb "github.com/ethp2p/ethp2p/broadcast/pb"
 	"github.com/ethp2p/ethp2p/transport"
 	"github.com/ethp2p/ethp2p/transport/transporttest"
 	"github.com/ethp2p/ethp2p/wire"
@@ -25,34 +26,24 @@ func TestStreamEndPolicyUsesWireCodes(t *testing.T) {
 		run  func(*testing.T) []uint64
 	}{
 		{
-			name: "malformed input",
-			want: 0,
+			name: "malformed opening message",
+			want: 2,
 			run: func(t *testing.T) []uint64 {
 				payload := wire.AppendFrame(nil, headerFrame, []byte{0x0f})
 				stream := &recordingReceiveStream{Reader: bytes.NewReader(payload)}
-				(&PeerConn{ctx: context.Background()}).processChunk(stream)
+				newPeerConn(&Engine{ctx: t.Context()}, t.Context(), "peer", nil).open(stream)
 				return stream.CancelReadCodes()
 			},
 		},
 		{
-			name: "bounded stream queue is full",
-			want: 0,
-			run: func(t *testing.T) []uint64 {
-				stream := &recordingReceiveStream{}
-				peer := &PeerConn{ctx: context.Background(), sessionIn: make(chan ethp2p.ReceiveStream, 1)}
-				peer.sessionIn <- nil
-				peer.enqueueStream(SESS, stream)
-				return stream.CancelReadCodes()
-			},
-		},
-		{
-			name: "duplicate BCAST is refused",
+			name: "second HANDSHAKE is refused",
 			want: 2,
 			run: func(t *testing.T) []uint64 {
-				stream := &recordingReceiveStream{}
-				peer := &PeerConn{ctx: context.Background()}
-				peer.bcastAccepted = true
-				peer.acceptBcast(stream)
+				payload := testFrame(t, testHandshakeType, &bcastpb.Bcast_Handshake{})
+				stream := &recordingReceiveStream{Reader: bytes.NewReader(payload)}
+				peer := newPeerConn(&Engine{ctx: t.Context()}, t.Context(), "peer", nil)
+				peer.bcastTaken.Store(true)
+				peer.open(stream)
 				return stream.CancelReadCodes()
 			},
 		},
@@ -61,14 +52,14 @@ func TestStreamEndPolicyUsesWireCodes(t *testing.T) {
 			want: 0,
 			run: func(t *testing.T) []uint64 {
 				f := newOutcomeFixture(t)
-				raw := f.openIncoming(t, SESS, nil)
+				raw := f.openIncoming(t, nil)
 				select {
 				case <-f.wake:
 				case <-time.After(time.Second):
 					t.Fatal("stream not queued")
 				}
 				engine := &Engine{eventCh: make(chan func(), 1)}
-				engine.family = f.family
+				engine.proto = f.proto
 				engine.shutdown()
 				return raw.CancelReadCodes()
 			},
@@ -78,7 +69,7 @@ func TestStreamEndPolicyUsesWireCodes(t *testing.T) {
 			want: 3,
 			run: func(t *testing.T) []uint64 {
 				f := newOutcomeFixture(t)
-				stream, err := f.peer.OpenUniStream(f.ctx, SESS)
+				stream, err := f.peer.OpenUniStream(f.ctx)
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -118,18 +109,6 @@ func TestStreamEndPolicyUsesWireCodes(t *testing.T) {
 			requireCode(t, test.run(t), test.want)
 		})
 	}
-}
-
-// processChunk arms the real chunkReadTimeout, so this case runs on the
-// synctest clock instead of waiting it out.
-func TestChunkHeaderReadTimesOut(t *testing.T) {
-	synctest.Test(t, func(t *testing.T) {
-		s := &codeStream{}
-		(&PeerConn{ctx: context.Background()}).processChunk(s)
-		if len(s.codes) != 1 || s.codes[0] != wire.Timeout {
-			t.Fatalf("CancelRead codes = %v, want [Timeout]", s.codes)
-		}
-	})
 }
 
 // codeStream is a receive stream whose peer never sends: Read blocks until
@@ -172,11 +151,11 @@ func (s *recordingReceiveStream) CancelReadCodes() []uint64 {
 }
 
 type outcomeFixture struct {
-	ctx    context.Context
-	conn   *transport.Conn
-	peer   *ethp2p.Peer
-	family *ethp2p.Family
-	wake   chan struct{}
+	ctx   context.Context
+	conn  *transport.Conn
+	peer  *ethp2p.Peer
+	proto *ethp2p.Protocol
+	wake  chan struct{}
 }
 
 func newOutcomeFixture(t *testing.T) *outcomeFixture {
@@ -187,7 +166,7 @@ func newOutcomeFixture(t *testing.T) *outcomeFixture {
 		t.Fatal(err)
 	}
 	wake := make(chan struct{}, 1)
-	family, err := stack.Register(Family, []ethp2p.ProtocolSpec{{Protocol: BCAST, MaxQueued: 1}, {Protocol: SESS, MaxQueued: 64}, {Protocol: CHUNK, MaxQueued: 128}}, wake)
+	proto, err := stack.Register(Protocol, wake)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -197,12 +176,12 @@ func newOutcomeFixture(t *testing.T) *outcomeFixture {
 	t.Cleanup(func() { _ = stack.Close() })
 	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
 	t.Cleanup(cancel)
-	raw, err := transporttest.DialHello(ctx, client, server, transporttest.Hello{Families: []wire.Family{Family}})
+	raw, err := transporttest.DialHello(ctx, client, server, transporttest.Hello{Protocols: []wire.Protocol{Protocol}})
 	if err != nil {
 		t.Fatal(err)
 	}
 	conn := raw.Conn
-	up := nextOutcomeEvent(t, family, wake)
+	up := nextOutcomeEvent(t, proto, wake)
 	if up.Kind != ethp2p.PeerUp {
 		t.Fatal("missing peer")
 	}
@@ -210,12 +189,12 @@ func newOutcomeFixture(t *testing.T) *outcomeFixture {
 	case <-wake:
 	default:
 	}
-	return &outcomeFixture{ctx: ctx, conn: conn, peer: up.Peer, family: family, wake: wake}
+	return &outcomeFixture{ctx: ctx, conn: conn, peer: up.Peer, proto: proto, wake: wake}
 }
 
-func (f *outcomeFixture) openIncoming(t *testing.T, protocol wire.Protocol, payload []byte) *wireReceiveProbe {
+func (f *outcomeFixture) openIncoming(t *testing.T, payload []byte) *wireReceiveProbe {
 	t.Helper()
-	out, err := transporttest.OpenUniStream(f.ctx, f.conn, wire.Selector{Family: Family, Protocol: protocol})
+	out, err := transporttest.OpenUniStream(f.ctx, f.conn, Protocol)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -226,7 +205,7 @@ func (f *outcomeFixture) openIncoming(t *testing.T, protocol wire.Protocol, payl
 	}
 	return &wireReceiveProbe{out: out}
 }
-func (f *outcomeFixture) incoming(t *testing.T, protocol wire.Protocol, reader io.Reader) (*wireReceiveProbe, ethp2p.ReceiveStream) {
+func (f *outcomeFixture) incoming(t *testing.T, reader io.Reader) (*wireReceiveProbe, ethp2p.ReceiveStream) {
 	t.Helper()
 	var payload []byte
 	if reader != nil {
@@ -236,9 +215,9 @@ func (f *outcomeFixture) incoming(t *testing.T, protocol wire.Protocol, reader i
 			t.Fatal(err)
 		}
 	}
-	raw := f.openIncoming(t, protocol, payload)
-	event := nextOutcomeEvent(t, f.family, f.wake)
-	if event.Kind != ethp2p.StreamIn || event.Protocol != protocol {
+	raw := f.openIncoming(t, payload)
+	event := nextOutcomeEvent(t, f.proto, f.wake)
+	if event.Kind != ethp2p.StreamIn {
 		t.Fatalf("event = %+v", event)
 	}
 	return raw, event.Stream
@@ -279,12 +258,12 @@ func (p *wireSendProbe) CancelWriteCodes() []uint64 {
 	return nil
 }
 
-func nextOutcomeEvent(t *testing.T, family *ethp2p.Family, wake <-chan struct{}) ethp2p.Event {
+func nextOutcomeEvent(t *testing.T, proto *ethp2p.Protocol, wake <-chan struct{}) ethp2p.Event {
 	t.Helper()
 	timeout := time.NewTimer(time.Second)
 	defer timeout.Stop()
 	for {
-		if event, ok := family.Next(); ok {
+		if event, ok := proto.Next(); ok {
 			return event
 		}
 		select {

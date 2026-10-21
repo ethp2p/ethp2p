@@ -100,7 +100,7 @@ func TestBidirectionalClassificationFailures(t *testing.T) {
 			t.Fatal(err)
 		}
 		_ = out.Close()
-		assertBiReset(t, out, wire.BadSelector.Wire())
+		assertBiReset(t, out, wire.BadHeader.Wire())
 	})
 	t.Run("peer reset", func(t *testing.T) {
 		ctx := testContext(t)

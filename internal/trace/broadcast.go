@@ -28,8 +28,12 @@ type PeerSubscribed struct{ Peer, Channel string }
 // PeerUnsubscribed records removal of a peer's channel subscription.
 type PeerUnsubscribed struct{ Peer, Channel string }
 
-// PeerGone records loss of an authenticated peer.
-type PeerGone struct{ Peer string }
+// PeerGone records the end of a peer's broadcast binding. Err is its cause:
+// nil for an ordinary end, else a handshake failure or a protocol violation.
+type PeerGone struct {
+	Peer string
+	Err  error
+}
 
 // SessionStarted records creation of an origin or relay session.
 type SessionStarted struct{ Channel, Message, Role string }
@@ -121,7 +125,12 @@ func (e PeerUnsubscribed) String() string {
 }
 
 // String formats the event on one line for failure timelines.
-func (e PeerGone) String() string { return oneLine("PeerGone peer=%s", peerLabel(e.Peer)) }
+func (e PeerGone) String() string {
+	if e.Err != nil {
+		return oneLine("PeerGone peer=%s err=%v", peerLabel(e.Peer), e.Err)
+	}
+	return oneLine("PeerGone peer=%s", peerLabel(e.Peer))
+}
 
 // String formats the event on one line for failure timelines.
 func (e SessionStarted) String() string {

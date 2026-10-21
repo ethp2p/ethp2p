@@ -3,6 +3,7 @@ package broadcast
 import (
 	"bytes"
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -10,16 +11,6 @@ import (
 	bcastpb "github.com/ethp2p/ethp2p/broadcast/pb"
 	"github.com/ethp2p/ethp2p/wire"
 	"google.golang.org/protobuf/proto"
-)
-
-// Frame types from the BCAST, SESS and CHUNK specs, written out here so the
-// tests check the wire numbers rather than the package's constants.
-const (
-	testHandshakeType wire.FrameType = 0
-	testSubscribeType wire.FrameType = 1
-	testUpdateType    wire.FrameType = 1
-	testHeaderType    wire.FrameType = 0
-	testDataType      wire.FrameType = 1
 )
 
 func testFrame(t *testing.T, typ wire.FrameType, msg proto.Message) []byte {
@@ -31,94 +22,51 @@ func testFrame(t *testing.T, typ wire.FrameType, msg proto.Message) []byte {
 	return wire.AppendFrame(nil, typ, raw)
 }
 
-func TestProtocolFirstFrameGates(t *testing.T) {
+// Frames out of place after a stream's opening message refuse the stream. On
+// the control stream they also end the binding as a violation; opening
+// messages themselves are covered by TestOpeningViolationsEndBinding.
+func TestFramesAfterOpeningMessage(t *testing.T) {
+	ctrlReader := func(t *testing.T, in ethp2p.ReceiveStream) {
+		ctx, cancel := context.WithCancelCause(t.Context())
+		defer cancel(nil)
+		(&PeerConn{ctx: ctx, cancel: cancel, ctrlIn: in}).runCtrlReader()
+		if err := context.Cause(ctx); !errors.Is(err, ErrPeerViolation) {
+			t.Fatalf("binding cause = %v, want ErrPeerViolation", err)
+		}
+	}
+	session := func(t *testing.T, in ethp2p.ReceiveStream) {
+		(&PeerConn{ctx: t.Context()}).runInboundSession(in, &bcastpb.Sess_Open{Channel: "c", ObjectId: "m"})
+	}
 	tests := []struct {
-		name     string
-		protocol wire.Protocol
-		frame    []byte
-		invoke   func(*testing.T, ethp2p.ReceiveStream)
+		name   string
+		frame  []byte
+		invoke func(*testing.T, ethp2p.ReceiveStream)
 	}{
 		{
-			name:     "BCAST/first/SUBSCRIBE",
-			protocol: BCAST,
-			frame:    testFrame(t, testSubscribeType, &bcastpb.Bcast_Subscribe{Channel: "c"}),
-			invoke: func(t *testing.T, in ethp2p.ReceiveStream) {
-				p := &PeerConn{ctx: t.Context(), streams: &blackholeOpener{}, bcastIn: make(chan ethp2p.ReceiveStream, 1)}
-				p.bcastIn <- in
-				if _, err := p.handshake(); err == nil {
-					t.Fatal("handshake accepted a non-HANDSHAKE first frame")
-				}
-			},
+			name:   "control/HANDSHAKE",
+			frame:  testFrame(t, testHandshakeType, &bcastpb.Bcast_Handshake{}),
+			invoke: ctrlReader,
 		},
 		{
-			name:     "BCAST/first/unknown",
-			protocol: BCAST,
-			frame:    wire.AppendFrame(nil, 7, nil),
-			invoke: func(t *testing.T, in ethp2p.ReceiveStream) {
-				p := &PeerConn{ctx: t.Context(), streams: &blackholeOpener{}, bcastIn: make(chan ethp2p.ReceiveStream, 1)}
-				p.bcastIn <- in
-				if _, err := p.handshake(); err == nil {
-					t.Fatal("handshake accepted an unknown first frame")
-				}
-			},
+			name:   "control/unknown",
+			frame:  wire.AppendFrame(nil, 9, nil),
+			invoke: ctrlReader,
 		},
 		{
-			name:     "BCAST/second/HANDSHAKE",
-			protocol: BCAST,
-			frame:    testFrame(t, testHandshakeType, &bcastpb.Bcast_Handshake{Version: ProtocolV1}),
-			invoke: func(t *testing.T, in ethp2p.ReceiveStream) {
-				ctx, cancel := context.WithCancel(t.Context())
-				defer cancel()
-				(&PeerConn{ctx: ctx, cancel: cancel, ctrlIn: in}).runCtrlReader()
-			},
+			name:   "session/UPDATE before PREAMBLE",
+			frame:  testFrame(t, testUpdateType, &bcastpb.Sess_Update{Data: []byte{5}}),
+			invoke: session,
 		},
 		{
-			name:     "BCAST/second/unknown",
-			protocol: BCAST,
-			frame:    wire.AppendFrame(nil, 7, nil),
-			invoke: func(t *testing.T, in ethp2p.ReceiveStream) {
-				ctx, cancel := context.WithCancel(t.Context())
-				defer cancel()
-				(&PeerConn{ctx: ctx, cancel: cancel, ctrlIn: in}).runCtrlReader()
-			},
-		},
-		{
-			name:     "SESS/first/UPDATE",
-			protocol: SESS,
-			frame:    testFrame(t, testUpdateType, &bcastpb.Sess_Update{Data: []byte{5}}),
-			invoke: func(t *testing.T, in ethp2p.ReceiveStream) {
-				(&PeerConn{ctx: t.Context()}).runInboundSession(in)
-			},
-		},
-		{
-			name:     "SESS/first/unknown",
-			protocol: SESS,
-			frame:    wire.AppendFrame(nil, 7, nil),
-			invoke: func(t *testing.T, in ethp2p.ReceiveStream) {
-				(&PeerConn{ctx: t.Context()}).runInboundSession(in)
-			},
-		},
-		{
-			name:     "CHUNK/first/DATA",
-			protocol: CHUNK,
-			frame:    wire.AppendFrame(nil, testDataType, []byte("abc")),
-			invoke: func(t *testing.T, in ethp2p.ReceiveStream) {
-				(&PeerConn{ctx: t.Context()}).processChunk(in)
-			},
-		},
-		{
-			name:     "CHUNK/first/unknown",
-			protocol: CHUNK,
-			frame:    wire.AppendFrame(nil, 7, nil),
-			invoke: func(t *testing.T, in ethp2p.ReceiveStream) {
-				(&PeerConn{ctx: t.Context()}).processChunk(in)
-			},
+			name:   "session/unknown",
+			frame:  wire.AppendFrame(nil, 9, nil),
+			invoke: session,
 		},
 	}
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			raw, in := newOutcomeFixture(t).incoming(t, test.protocol, bytes.NewReader(test.frame))
+			raw, in := newOutcomeFixture(t).incoming(t, bytes.NewReader(test.frame))
 			test.invoke(t, in)
 			requireCode(t, raw.CancelReadCodes(), wire.Refused.Wire())
 		})
@@ -146,7 +94,7 @@ func TestChunkDataFrame(t *testing.T) {
 		{name: "second DATA", frames: [][]byte{data, data}},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			raw, in := newOutcomeFixture(t).incoming(t, CHUNK, bytes.NewReader(bytes.Join(test.frames, nil)))
+			raw, in := newOutcomeFixture(t).incoming(t, bytes.NewReader(bytes.Join(test.frames, nil)))
 			if test.fin {
 				if err := raw.out.Close(); err != nil {
 					t.Fatal(err)

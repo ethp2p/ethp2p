@@ -288,8 +288,8 @@ func (tr *Channel[CI, R, P]) handleChunk(e channelChunkStream) {
 		return
 	}
 
-	// A parked CHUNK depends on a missing SESS. Bound it per message rather
-	// than holding all credit that the SESS itself needs; the peer's QUIC
+	// A parked chunk stream depends on a missing session stream. Bound it per message rather
+	// than holding all credit that the session stream itself needs; the peer's QUIC
 	// stream limit is the only bound across messages.
 	group := tr.parked[messageID]
 	if group != nil && len(group.streams) >= maxParkedChunks {
@@ -317,7 +317,7 @@ func (tr *Channel[CI, R, P]) handleSessionOpen(e channelSessionOpen) {
 		}
 		return
 	}
-	if _, err := tr.createRelaySession(messageID, e.msg.Preamble, e.peerID, e.msg.InitialUpdate); err != nil {
+	if _, err := tr.createRelaySession(messageID, e.preamble, e.peerID, e.msg.InitialUpdate); err != nil {
 		tr.engine.config.Observer.OnChunkError(ChunkProcessError{Peer: e.peerID, ChannelID: tr.id, MessageID: messageID, Err: err})
 	}
 }
@@ -501,7 +501,7 @@ func (tr *Channel[CI, R, P]) expireDue() {
 	}
 }
 
-// drainInbox cancels CHUNK streams still buffered once tr.ctx has ended. It
+// drainInbox cancels chunk streams still buffered once tr.ctx has ended. It
 // runs after every session and watcher has stopped, so only peers and the
 // engine can still send. A producer whose send lands after the final poll
 // sees ch.ctx ended and cancels its own stream (see processChunk).

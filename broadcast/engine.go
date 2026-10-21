@@ -2,6 +2,7 @@ package broadcast
 
 import (
 	"context"
+	"errors"
 	"maps"
 	"slices"
 	"sync"
@@ -10,9 +11,6 @@ import (
 	"github.com/ethp2p/ethp2p/identity"
 	"github.com/ethp2p/ethp2p/wire"
 )
-
-// maxInboundChunkStreams bounds concurrent inbound CHUNK header readers per peer.
-const maxInboundChunkStreams = 5
 
 // EngineConfig holds configuration for an Engine.
 type EngineConfig struct {
@@ -32,9 +30,10 @@ type Engine struct {
 	// Run reports its exit.
 	peers map[identity.PeerID]*PeerConn
 
-	// bindings routes streams by the stable family peer handle. Only PeerUp
-	// creates a binding; PeerDown removes it.
-	bindings map[*ethp2p.Peer]*PeerConn
+	// bindings routes streams by the stack's peer handle (*ethp2p.Peer).
+	// Only PeerUp creates a binding; PeerDown, or the binding's own end,
+	// removes it.
+	bindings map[peerHandle]*PeerConn
 
 	eventCh chan func()
 
@@ -42,9 +41,9 @@ type Engine struct {
 	ctx    context.Context
 	cancel context.CancelFunc
 
-	// family is set by Register before the event loop starts (Register
+	// proto is set by Register before the event loop starts (Register
 	// starts it), so the loop reads it without synchronization.
-	family       *ethp2p.Family
+	proto        *ethp2p.Protocol
 	started      bool
 	deliveryWake chan struct{}
 }
@@ -61,7 +60,7 @@ func NewEngine(config EngineConfig) *Engine {
 		config:       config,
 		channels:     make(map[ChannelID]*channelHandle),
 		peers:        make(map[identity.PeerID]*PeerConn),
-		bindings:     make(map[*ethp2p.Peer]*PeerConn),
+		bindings:     make(map[peerHandle]*PeerConn),
 		eventCh:      make(chan func(), 128),
 		deliveryWake: make(chan struct{}, 1),
 		ctx:          ctx,
@@ -120,8 +119,8 @@ func (e *Engine) run() {
 			e.shutdown()
 			return
 		case <-e.deliveryWake:
-			if family := e.family; family != nil {
-				for event, ok := family.Next(); ok; event, ok = family.Next() {
+			if proto := e.proto; proto != nil {
+				for event, ok := proto.Next(); ok; event, ok = proto.Next() {
 					e.handleDelivery(event)
 				}
 			}
@@ -214,7 +213,7 @@ func (e *Engine) handleStreamEvent(event ethp2p.Event) {
 		event.Reject()
 		return
 	}
-	p.enqueueStream(event.Protocol, event.Stream)
+	p.enqueueStream(event.Stream)
 }
 
 func (e *Engine) handlePeerHandshake(p *PeerConn, channels []ChannelID) {
@@ -254,14 +253,30 @@ func (e *Engine) handlePeerHandshake(p *PeerConn, channels []ChannelID) {
 	}
 }
 
+// handlePeerGone ends a binding. Run's exit and PeerDown both call it, in
+// either order; it reports the binding once.
 func (e *Engine) handlePeerGone(p *PeerConn) {
-	// A binding may finish after a reconnect has already installed a new
-	// PeerConn for the same authenticated ID. Only the current binding can
-	// remove the peer and notify channels.
 	e.removePeer(p)
 	p.Close()
+	if !p.goneReported {
+		p.goneReported = true
+		cause := context.Cause(p.ctx)
+		if errors.Is(cause, context.Canceled) {
+			cause = nil
+		}
+		e.config.Observer.OnPeerGone(p.id, cause)
+	}
+	// A binding that ends before its PeerDown would leave the view open with
+	// nobody reading broadcast streams; closing the handle releases it.
+	if e.bindings[p.handle] == p {
+		delete(e.bindings, p.handle)
+		p.handle.Close(wire.Unspecified)
+	}
 }
 
+// removePeer unenrols p from its channels if it is the current binding for
+// its ID: a binding may finish after a reconnect has already installed a new
+// PeerConn for the same authenticated ID.
 func (e *Engine) removePeer(p *PeerConn) {
 	if e.peers[p.id] != p {
 		return
@@ -270,7 +285,6 @@ func (e *Engine) removePeer(p *PeerConn) {
 	for channelID := range p.subs {
 		e.unenrolPeerFromChannel(p, channelID)
 	}
-	e.config.Observer.OnPeerGone(p.id)
 }
 
 func (e *Engine) enrolPeerToChannel(p *PeerConn, channelID ChannelID) {
@@ -298,17 +312,19 @@ func (e *Engine) unenrolPeerFromChannel(p *PeerConn, channelID ChannelID) {
 }
 
 func (e *Engine) shutdown() {
-	if family := e.family; family != nil {
-		for event, ok := family.Next(); ok; event, ok = family.Next() {
+	if proto := e.proto; proto != nil {
+		for event, ok := proto.Next(); ok; event, ok = proto.Next() {
 			event.Cancel(wire.Unspecified)
 		}
 	}
 
-	// Every live PeerConn keeps its binding until PeerDown closes it, so this
-	// also closes every peer with a handshake event still queued. Senders of
-	// unprocessed events escape through ctx.Done().
-	for _, p := range e.bindings {
+	// Every live PeerConn keeps its binding until PeerDown or its own end
+	// removes it, so this also closes every peer with a handshake event still
+	// queued. Senders of unprocessed events escape through ctx.Done(). Closing
+	// each handle releases views no other protocol holds.
+	for handle, p := range e.bindings {
 		p.Close()
+		handle.Close(wire.Closing)
 	}
 
 	for _, th := range e.channels {

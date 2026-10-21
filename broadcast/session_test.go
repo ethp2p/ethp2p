@@ -167,15 +167,15 @@ func (ms *mockStrategy) Close() error {
 var _ Strategy[*testChunk, *testRouting] = (*mockStrategy)(nil)
 
 func testPeer(peerID identity.PeerID) *PeerConn {
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancelCause(context.Background())
 	_ = cancel
 	bcastOut, _ := newTestBcastStreams(ctx)
 	return &PeerConn{
 		id:            peerID,
-		streams:       newHighCapTransport(context.Background()),
+		handle:        newHighCapTransport(context.Background()),
 		ctrlOut:       bcastOut,
 		ctrlState:     newCtrlOutState(),
-		chunkIn:       newFIFO[ethp2p.ReceiveStream](),
+		unread:        newFIFO[ethp2p.ReceiveStream](),
 		wakeCh:        make(chan struct{}, 1),
 		ctx:           ctx,
 		cancel:        cancel,

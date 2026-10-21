@@ -23,9 +23,9 @@ const (
 
 type Hello struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
-	// Families this endpoint serves besides control: strictly ascending, at most
+	// Protocols this endpoint serves besides control: strictly ascending, at most
 	// 1024, neither 0 (control) nor 19 (reserved).
-	Families []uint32 `protobuf:"varint,1,rep,packed,name=families,proto3" json:"families,omitempty"`
+	Protocols []uint32 `protobuf:"varint,1,rep,packed,name=protocols,proto3" json:"protocols,omitempty"`
 	// Optional: the sender's current node record (EIP-778 RLP encoding).
 	Record        []byte `protobuf:"bytes,2,opt,name=record,proto3" json:"record,omitempty"`
 	unknownFields protoimpl.UnknownFields
@@ -62,9 +62,9 @@ func (*Hello) Descriptor() ([]byte, []int) {
 	return file_control_control_proto_rawDescGZIP(), []int{0}
 }
 
-func (x *Hello) GetFamilies() []uint32 {
+func (x *Hello) GetProtocols() []uint32 {
 	if x != nil {
-		return x.Families
+		return x.Protocols
 	}
 	return nil
 }
@@ -125,9 +125,9 @@ var File_control_control_proto protoreflect.FileDescriptor
 
 const file_control_control_proto_rawDesc = "" +
 	"\n" +
-	"\x15control/control.proto\x12\x0eethp2p.control\";\n" +
-	"\x05Hello\x12\x1a\n" +
-	"\bfamilies\x18\x01 \x03(\rR\bfamilies\x12\x16\n" +
+	"\x15control/control.proto\x12\x0eethp2p.control\"=\n" +
+	"\x05Hello\x12\x1c\n" +
+	"\tprotocols\x18\x01 \x03(\rR\tprotocols\x12\x16\n" +
 	"\x06record\x18\x02 \x01(\fR\x06record\"\x1c\n" +
 	"\x06GoAway\x12\x12\n" +
 	"\x04code\x18\x01 \x01(\x04R\x04codeB\"Z github.com/ethp2p/ethp2p/controlb\x06proto3"

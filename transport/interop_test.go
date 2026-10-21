@@ -266,7 +266,7 @@ func (h *harness) echo(from, to *node, name string, payload []byte) {
 }
 
 func (h *harness) exchangeEth(ctx context.Context, pair ethPair, payload []byte) error {
-	out, err := transporttest.OpenStream(ctx, pair.dialed, testSelector(1))
+	out, err := transporttest.OpenStream(ctx, pair.dialed, 1)
 	if err != nil {
 		return err
 	}
@@ -274,12 +274,12 @@ func (h *harness) exchangeEth(ctx context.Context, pair ethPair, payload []byte)
 	if _, err := out.Write(payload); err != nil {
 		return err
 	}
-	in, selector, err := transporttest.NextStream(ctx, pair.accepted)
+	in, protocol, err := transporttest.NextStream(ctx, pair.accepted)
 	if err != nil {
 		return err
 	}
-	if selector != testSelector(1) {
-		return fmt.Errorf("selector = %v, want %v", selector, testSelector(1))
+	if protocol != 1 {
+		return fmt.Errorf("protocol = %v, want 1", protocol)
 	}
 	want := payload
 	got := make([]byte, len(want))

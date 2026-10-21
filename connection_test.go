@@ -64,34 +64,32 @@ func releaseLibp2pView(t *testing.T, e *transporttest.Endpoint) {
 func TestRoutingUnsupported(t *testing.T) {
 	pair := newTestPair(t)
 	s := newTestStack(t, pair.server)
-	accepted, acceptedWake := registerTestFamily(t, s, familyCommon, ProtocolSpec{Protocol: testProtocol, MaxQueued: 8})
-	// The peer never lists family 15, so it is never shared.
-	unlisted, _ := registerTestFamily(t, s, 15, ProtocolSpec{Protocol: testProtocol, MaxQueued: 8})
+	accepted, acceptedWake := registerTestProtocol(t, s, protocolCommon)
+	// The peer never lists protocol 15, so it is never shared.
+	unlisted, _ := registerTestProtocol(t, s, 15)
 	pair.connect(t, nil, s)
 	awaitPeer(t, accepted, acceptedWake)
-	// Unregistered families, an unregistered protocol of a shared family, and
-	// an unshared family are all unsupported.
-	for _, selector := range []wire.Selector{selectorAlpha, selectorGamma,
-		{Family: familyCommon, Protocol: testProtocol + 1}, {Family: 15, Protocol: testProtocol}} {
-		stream, err := transporttest.OpenStream(t.Context(), pair.clientConn, selector)
+	// Unregistered protocols and an unshared protocol are all unsupported.
+	for _, protocol := range []wire.Protocol{protocolAlpha, protocolGamma, 15} {
+		stream, err := transporttest.OpenStream(t.Context(), pair.clientConn, protocol)
 		if err != nil {
 			t.Fatal(err)
 		}
 		_ = stream.SetReadDeadline(time.Now().Add(testTimeout))
 		_, err = stream.Read(make([]byte, 1))
 		reset, ok := errors.AsType[*quic.StreamError](err)
-		if !ok || uint64(reset.ErrorCode) != wire.UnsupportedSelector.Wire() {
-			t.Fatalf("read reset = %v, want wire %d", err, wire.UnsupportedSelector.Wire())
+		if !ok || uint64(reset.ErrorCode) != wire.UnsupportedProtocol.Wire() {
+			t.Fatalf("read reset = %v, want wire %d", err, wire.UnsupportedProtocol.Wire())
 		}
 		_ = stream.SetWriteDeadline(time.Now().Add(testTimeout))
 		_, err = stream.Write(make([]byte, 2<<20))
 		writeReset, ok := errors.AsType[*quic.StreamError](err)
-		if !ok || !writeReset.Remote || uint64(writeReset.ErrorCode) != wire.UnsupportedSelector.Wire() {
-			t.Fatalf("write reset = %v, want wire %d", err, wire.UnsupportedSelector.Wire())
+		if !ok || !writeReset.Remote || uint64(writeReset.ErrorCode) != wire.UnsupportedProtocol.Wire() {
+			t.Fatalf("write reset = %v, want wire %d", err, wire.UnsupportedProtocol.Wire())
 		}
 	}
 	if ev, ok := unlisted.Next(); ok {
-		t.Fatalf("unshared family got %+v", ev)
+		t.Fatalf("unshared protocol got %+v", ev)
 	}
 }
 
@@ -109,8 +107,8 @@ func TestConnectRecordsAndSnapshot(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = left.Close(); _ = right.Close() })
-	ls, lsWake := registerTestFamily(t, left, 1, ProtocolSpec{Protocol: testProtocol, MaxQueued: 8})
-	rs, rsWake := registerTestFamily(t, right, 1, ProtocolSpec{Protocol: testProtocol, MaxQueued: 8})
+	ls, lsWake := registerTestProtocol(t, left, 1)
+	rs, rsWake := registerTestProtocol(t, right, 1)
 	startTestStack(t, left)
 	startTestStack(t, right)
 	before := time.Now()
@@ -141,7 +139,7 @@ func TestConnectRecordsAndSnapshot(t *testing.T) {
 			t.Fatal("snapshot aliases table")
 		}
 	}
-	out, err := lp.OpenUniStream(t.Context(), testProtocol)
+	out, err := lp.OpenUniStream(t.Context())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -168,8 +166,8 @@ func TestStackCloseReleasesViews(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = left.Close(); _ = right.Close() })
-	ls, lsWake := registerTestFamily(t, left, 1, ProtocolSpec{Protocol: testProtocol, MaxQueued: 8})
-	rs, rsWake := registerTestFamily(t, right, 1, ProtocolSpec{Protocol: testProtocol, MaxQueued: 8})
+	ls, lsWake := registerTestProtocol(t, left, 1)
+	rs, rsWake := registerTestProtocol(t, right, 1)
 	startTestStack(t, left)
 	startTestStack(t, right)
 	if err := left.Connect(t.Context(), b.Record(t, 1)); err != nil {
@@ -181,10 +179,10 @@ func TestStackCloseReleasesViews(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, sub := range []struct {
-		fam  *Family
+		prot *Protocol
 		wake chan struct{}
 	}{{ls, lsWake}, {rs, rsWake}} {
-		e := awaitEvent(t, sub.fam, sub.wake)
+		e := awaitEvent(t, sub.prot, sub.wake)
 		if e.Kind != PeerDown || e.Code != wire.Closing || e.Peer.Context().Err() == nil {
 			t.Fatalf("down = %+v", e)
 		}
@@ -203,8 +201,8 @@ func TestConnectValidationAndRejection(t *testing.T) {
 	keepLibp2p(t, a)
 	keepLibp2p(t, b)
 	left, right := newTestStack(t, a), newTestStack(t, b)
-	registerTestFamily(t, left, 1, ProtocolSpec{Protocol: testProtocol, MaxQueued: 8})
-	registerTestFamily(t, right, 2, ProtocolSpec{Protocol: testProtocol, MaxQueued: 8})
+	registerTestProtocol(t, left, 1)
+	registerTestProtocol(t, right, 2)
 	startTestStack(t, left)
 	startTestStack(t, right)
 	rec, err := enr.Sign(b.Key, 1)
@@ -235,8 +233,8 @@ func TestConnectValidationAndRejection(t *testing.T) {
 func TestConnectCoalesces(t *testing.T) {
 	a, b := transporttest.NewEndpoint(t), transporttest.NewEndpoint(t)
 	left, right := newTestStack(t, a), newTestStack(t, b)
-	registerTestFamily(t, left, 1, ProtocolSpec{Protocol: testProtocol, MaxQueued: 8})
-	registerTestFamily(t, right, 1, ProtocolSpec{Protocol: testProtocol, MaxQueued: 8})
+	registerTestProtocol(t, left, 1)
+	registerTestProtocol(t, right, 1)
 	startTestStack(t, left)
 	startTestStack(t, right)
 	var wg sync.WaitGroup
@@ -260,8 +258,8 @@ func TestConnectCoalesces(t *testing.T) {
 func TestConnectWaiterTakesOver(t *testing.T) {
 	a, b := transporttest.NewEndpoint(t), transporttest.NewEndpoint(t)
 	left, right := newTestStack(t, a), newTestStack(t, b)
-	registerTestFamily(t, left, 1, ProtocolSpec{Protocol: testProtocol, MaxQueued: 8})
-	registerTestFamily(t, right, 1, ProtocolSpec{Protocol: testProtocol, MaxQueued: 8})
+	registerTestProtocol(t, left, 1)
+	registerTestProtocol(t, right, 1)
 	startTestStack(t, left)
 	startTestStack(t, right)
 	// A record for the same peer whose address never answers, so the driver's
@@ -304,8 +302,8 @@ func TestConnectWaiterTakesOver(t *testing.T) {
 func TestSimultaneousConnectConverges(t *testing.T) {
 	a, b := transporttest.NewEndpoint(t), transporttest.NewEndpoint(t)
 	left, right := newTestStack(t, a), newTestStack(t, b)
-	registerTestFamily(t, left, 1, ProtocolSpec{Protocol: testProtocol, MaxQueued: 8})
-	registerTestFamily(t, right, 1, ProtocolSpec{Protocol: testProtocol, MaxQueued: 8})
+	registerTestProtocol(t, left, 1)
+	registerTestProtocol(t, right, 1)
 	startTestStack(t, left)
 	startTestStack(t, right)
 	errs := make(chan error, 2)
@@ -327,8 +325,8 @@ func TestSimultaneousConnectConverges(t *testing.T) {
 func TestDisconnectBeforeAttach(t *testing.T) {
 	a, b := transporttest.NewEndpoint(t), transporttest.NewEndpoint(t)
 	left, right := newTestStack(t, a), newTestStack(t, b)
-	registerTestFamily(t, left, 1, ProtocolSpec{Protocol: testProtocol, MaxQueued: 8})
-	registerTestFamily(t, right, 1, ProtocolSpec{Protocol: testProtocol, MaxQueued: 8})
+	registerTestProtocol(t, left, 1)
+	registerTestProtocol(t, right, 1)
 	startTestStack(t, left)
 	startTestStack(t, right)
 	ctx, cancel := context.WithTimeout(t.Context(), testTimeout)
@@ -376,8 +374,8 @@ func TestDisconnectBeforeAttach(t *testing.T) {
 func TestRestartReplacesView(t *testing.T) {
 	a, b := transporttest.NewEndpoint(t), transporttest.NewEndpoint(t)
 	left, right := newTestStack(t, a), newTestStack(t, b)
-	lfam, lWake := registerTestFamily(t, left, 1, ProtocolSpec{Protocol: testProtocol, MaxQueued: 8})
-	registerTestFamily(t, right, 1, ProtocolSpec{Protocol: testProtocol, MaxQueued: 8})
+	lfam, lWake := registerTestProtocol(t, left, 1)
+	registerTestProtocol(t, right, 1)
 	startTestStack(t, left)
 	startTestStack(t, right)
 	connectTest(t, right, a)
@@ -393,7 +391,7 @@ func TestRestartReplacesView(t *testing.T) {
 	t.Cleanup(func() { _ = endpoint.Close(); _ = packet.Close() })
 	restarted := &transporttest.Endpoint{Endpoint: endpoint, Eth: endpoint.Ethp2p(), Packet: packet, Key: b.Key}
 	next := newTestStack(t, restarted)
-	registerTestFamily(t, next, 1, ProtocolSpec{Protocol: testProtocol, MaxQueued: 8})
+	registerTestProtocol(t, next, 1)
 	startTestStack(t, next)
 	connectTest(t, next, a)
 	down, up := awaitEvent(t, lfam, lWake), awaitEvent(t, lfam, lWake)
@@ -408,12 +406,12 @@ func TestHelloRecordMismatchRejected(t *testing.T) {
 	keepLibp2p(t, client)
 	keepLibp2p(t, server)
 	s := newTestStack(t, server)
-	fam, _ := registerTestFamily(t, s, 1, ProtocolSpec{Protocol: testProtocol, MaxQueued: 8})
+	prot, _ := registerTestProtocol(t, s, 1)
 	startTestStack(t, s)
 	// The client presents the server's record as its own.
 	ctx, cancel := context.WithTimeout(t.Context(), testTimeout)
 	defer cancel()
-	raw, err := transporttest.DialHello(ctx, client, server, transporttest.Hello{Families: []wire.Family{1}, Record: server.Record(t, 1).Encode()})
+	raw, err := transporttest.DialHello(ctx, client, server, transporttest.Hello{Protocols: []wire.Protocol{1}, Record: server.Record(t, 1).Encode()})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -424,7 +422,7 @@ func TestHelloRecordMismatchRejected(t *testing.T) {
 	if code != wire.ControlViolation {
 		t.Fatalf("record rejection code = %s", code)
 	}
-	if _, ok := fam.Next(); ok {
+	if _, ok := prot.Next(); ok {
 		t.Fatal("invalid record produced event")
 	}
 }

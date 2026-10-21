@@ -25,17 +25,19 @@ func newHighCapTransport(ctx context.Context) *testTransport {
 	}
 }
 
-func (t *testTransport) OpenUniStream(ctx context.Context, protocol wire.Protocol) (ethp2p.SendStream, error) {
+func (t *testTransport) OpenUniStream(ctx context.Context) (ethp2p.SendStream, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
 	stream := &testStream{send: t.streamSend, recv: t.streamRecv, ctx: t.ctx}
-	if err := wire.WriteSelector(stream, wire.Selector{Family: Family, Protocol: protocol}); err != nil {
+	if err := wire.WriteHeader(stream, Protocol); err != nil {
 		stream.CancelWrite(wire.Unspecified)
 		return nil, err
 	}
 	return stream, nil
 }
+
+func (*testTransport) Close(wire.Code) {}
 
 func (t *testTransport) AcceptUniStream(context.Context) (ethp2p.ReceiveStream, error) {
 	return &testStream{send: t.streamSend, recv: t.streamRecv, ctx: t.ctx}, nil
@@ -97,7 +99,7 @@ func (s *testStream) SetWriteDeadline(t time.Time) error { return nil }
 
 var _ ethp2p.Stream = (*testStream)(nil)
 
-// newTestBcastStreams returns a pair of streams suitable for use as bcastOut/bcastIn
+// newTestBcastStreams returns a pair of streams suitable for use as ctrlOut/ctrlIn
 // in tests where no real control I/O is needed.
 func newTestBcastStreams(ctx context.Context) (ethp2p.SendStream, ethp2p.ReceiveStream) {
 	ch := make(chan []byte, 256)

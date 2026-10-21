@@ -22,7 +22,7 @@ import (
 // for this peer stall: it runs no consumer code and takes no consumer lock
 // (a consumer's Peer.Close re-enters through the inbox), it releases views in
 // goroutines (closeView), and it does not hold stack.mu while ending handles,
-// which takes family mutexes and resets streams.
+// which takes protocol mutexes and resets streams.
 type peerSupervisor struct {
 	stack *Stack
 	id    identity.PeerID
@@ -38,7 +38,7 @@ type peerSupervisor struct {
 
 	conn    *transport.Conn
 	ctl     *controlSession
-	routes  map[wire.Selector]*peerDelivery
+	routes  map[wire.Protocol]*peerDelivery
 	handles []*peerDelivery
 	// viewCtx ends when the view is dropped, which cancels header reads in
 	// progress with Closing.
@@ -134,8 +134,8 @@ func (sup *peerSupervisor) tryExit() bool {
 }
 
 // attach runs the admission checks and returns the Connect result. The record
-// and family checks run before taking the table mutex, so a view that shares
-// no family never displaces a working view; they call no consumer code.
+// and protocol checks run before taking the table mutex, so a view that shares
+// no protocol never displaces a working view; they call no consumer code.
 func (sup *peerSupervisor) attach(v *pendingView) error {
 	id := sup.id
 	conn := v.ctl.conn
@@ -148,14 +148,14 @@ func (sup *peerSupervisor) attach(v *pendingView) error {
 			return &transport.ViewClosedError{Code: wire.ControlViolation}
 		}
 	}
-	// Registration is immutable after Start, so families needs no lock.
-	var families []*Family
-	for _, family := range sup.stack.families {
-		if family.sharedWith(v.hello.Families) {
-			families = append(families, family)
+	// Registration is immutable after Start, so protocols needs no lock.
+	var protocols []*Protocol
+	for _, protocol := range sup.stack.protocols {
+		if protocol.sharedWith(v.hello.Protocols) {
+			protocols = append(protocols, protocol)
 		}
 	}
-	if len(families) == 0 {
+	if len(protocols) == 0 {
 		sup.reject(v, wire.NoSharedProtocols)
 		return &transport.ViewClosedError{Code: wire.NoSharedProtocols}
 	}
@@ -200,17 +200,15 @@ func (sup *peerSupervisor) attach(v *pendingView) error {
 	}
 	sup.conn, sup.ctl = conn, v.ctl
 	sup.viewCtx, sup.viewCancel = context.WithCancel(context.Background())
-	routes := make(map[wire.Selector]*peerDelivery)
+	routes := make(map[wire.Protocol]*peerDelivery)
 	var handles []*peerDelivery
-	for _, family := range families {
+	for _, protocol := range protocols {
 		ctx, cancel := context.WithCancel(context.Background())
-		peer := &Peer{ctx: ctx, cancel: cancel, id: id, sup: sup, family: family, conn: conn}
-		delivery := family.addPeer(peer)
+		peer := &Peer{ctx: ctx, cancel: cancel, id: id, sup: sup, protocol: protocol, conn: conn}
+		delivery := protocol.addPeer(peer)
 		peer.delivery = delivery
 		handles = append(handles, delivery)
-		for _, spec := range family.protocols {
-			routes[wire.Selector{Family: family.code, Protocol: spec.Protocol}] = delivery
-		}
+		routes[protocol.id] = delivery
 	}
 	sup.routes = routes
 	sup.handles = handles
@@ -274,11 +272,11 @@ func (sup *peerSupervisor) readHeaders() {
 
 // readHeader reads a stream header within the deadline ctx carries
 // (CLASSIFY_TIMEOUT). On failure it cancels the stream with Timeout if the
-// read deadline passed, else BadSelector; a peer's reset of a bidirectional
+// read deadline passed, else BadHeader; a peer's reset of a bidirectional
 // stream is answered by resetting its write side with Unspecified, and a
 // connection end needs no reset. Cancellation of ctx cancels a read in
 // progress with Closing and reports ctx's error.
-func readHeader(ctx context.Context, s receivedStream) (wire.Selector, error) {
+func readHeader(ctx context.Context, s receivedStream) (wire.Protocol, error) {
 	stop := context.AfterFunc(ctx, func() {
 		// The read deadline ends a timed-out read itself; only a caller
 		// cancellation needs the interrupt, with Closing.
@@ -288,10 +286,10 @@ func readHeader(ctx context.Context, s receivedStream) (wire.Selector, error) {
 	})
 	deadline, _ := ctx.Deadline()
 	_ = s.SetReadDeadline(deadline)
-	sel, err := wire.ReadSelector(s)
+	sel, err := wire.ReadHeader(s)
 	_ = s.SetReadDeadline(time.Time{})
 	if !stop() && !errors.Is(ctx.Err(), context.DeadlineExceeded) {
-		return wire.Selector{}, ctx.Err()
+		return 0, ctx.Err()
 	}
 	if err != nil {
 		_, reset := errors.AsType[*quic.StreamError](err)
@@ -302,16 +300,16 @@ func readHeader(ctx context.Context, s receivedStream) (wire.Selector, error) {
 				bi.CancelWrite(streamCode(wire.Unspecified))
 			}
 		default:
-			cancelReceived(s, wire.TimeoutOr(err, wire.BadSelector))
+			cancelReceived(s, wire.TimeoutOr(err, wire.BadHeader))
 		}
 	}
 	return sel, err
 }
 
-// headerRead routes a stream whose header read ended. Family 0 here is a
+// headerRead routes a stream whose header read ended. Protocol 0 here is a
 // control violation: the view's one control stream was taken before
 // admission.
-func (sup *peerSupervisor) headerRead(conn *transport.Conn, d int, s receivedStream, sel wire.Selector, err error) {
+func (sup *peerSupervisor) headerRead(conn *transport.Conn, d int, s receivedStream, sel wire.Protocol, err error) {
 	if sup.conn != conn {
 		if err == nil {
 			cancelReceived(s, wire.Closing)
@@ -322,14 +320,14 @@ func (sup *peerSupervisor) headerRead(conn *transport.Conn, d int, s receivedStr
 	if err == nil {
 		route := sup.routes[sel]
 		switch {
-		case sel.Family == control.ControlFamily:
+		case sel == control.ControlProtocol:
 			cancelReceived(s, wire.ControlViolation)
 			sup.dropView(wire.ControlViolation, true, nil)
 			return
 		case route == nil:
-			cancelReceived(s, wire.UnsupportedSelector)
+			cancelReceived(s, wire.UnsupportedProtocol)
 		default:
-			route.push(sel.Protocol, s)
+			route.push(s)
 		}
 	}
 	sup.readHeaders()
@@ -363,15 +361,15 @@ func (sup *peerSupervisor) dropView(code wire.Code, goAway bool, done chan<- str
 	s.closeView(ctl, code, goAway, done)
 }
 
-// handleClosed ends the view once no family holds it anymore.
+// handleClosed ends the view once no protocol holds it anymore.
 func (sup *peerSupervisor) handleClosed() {
 	if sup.conn == nil {
 		return
 	}
 	for _, h := range sup.handles {
-		h.family.mu.Lock()
+		h.protocol.mu.Lock()
 		down := h.down
-		h.family.mu.Unlock()
+		h.protocol.mu.Unlock()
 		if !down {
 			return
 		}

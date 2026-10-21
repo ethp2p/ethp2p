@@ -21,8 +21,8 @@ const (
 	_ = protoimpl.EnforceVersion(protoimpl.MaxVersion - 20)
 )
 
-// Bcast is the protocol namespace for BCAST streams: a HANDSHAKE frame, then
-// any number of SUBSCRIBE and UNSUBSCRIBE frames.
+// Bcast holds the payloads of the control stream: a HANDSHAKE frame, then any
+// number of SUBSCRIBE and UNSUBSCRIBE frames.
 type Bcast struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	unknownFields protoimpl.UnknownFields
@@ -59,8 +59,8 @@ func (*Bcast) Descriptor() ([]byte, []int) {
 	return file_broadcast_pb_broadcast_proto_rawDescGZIP(), []int{0}
 }
 
-// Sess is the protocol namespace for SESS streams: an OPEN frame, then any
-// number of UPDATE frames.
+// Sess holds the payloads of a session stream: an OPEN frame, then one
+// PREAMBLE frame, then any number of UPDATE frames.
 type Sess struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	unknownFields protoimpl.UnknownFields
@@ -97,8 +97,8 @@ func (*Sess) Descriptor() ([]byte, []int) {
 	return file_broadcast_pb_broadcast_proto_rawDescGZIP(), []int{1}
 }
 
-// Chunk is the protocol namespace for CHUNK streams: a HEADER frame, then one
-// DATA frame whose payload is the raw chunk data.
+// Chunk holds the payloads of a chunk stream: a HEADER frame, its opening
+// message, then one DATA frame whose payload is the raw chunk data.
 type Chunk struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	unknownFields protoimpl.UnknownFields
@@ -135,11 +135,11 @@ func (*Chunk) Descriptor() ([]byte, []int) {
 	return file_broadcast_pb_broadcast_proto_rawDescGZIP(), []int{2}
 }
 
-// Handshake is the payload of the HANDSHAKE frame.
+// Handshake is the payload of the HANDSHAKE frame, the control stream's
+// opening message. The protocol number carries the version.
 type Bcast_Handshake struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
-	Version       uint32                 `protobuf:"varint,1,opt,name=version,proto3" json:"version,omitempty"`
-	Channels      []string               `protobuf:"bytes,2,rep,name=channels,proto3" json:"channels,omitempty"`
+	Channels      []string               `protobuf:"bytes,1,rep,name=channels,proto3" json:"channels,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -172,13 +172,6 @@ func (x *Bcast_Handshake) ProtoReflect() protoreflect.Message {
 // Deprecated: Use Bcast_Handshake.ProtoReflect.Descriptor instead.
 func (*Bcast_Handshake) Descriptor() ([]byte, []int) {
 	return file_broadcast_pb_broadcast_proto_rawDescGZIP(), []int{0, 0}
-}
-
-func (x *Bcast_Handshake) GetVersion() uint32 {
-	if x != nil {
-		return x.Version
-	}
-	return 0
 }
 
 func (x *Bcast_Handshake) GetChannels() []string {
@@ -278,13 +271,13 @@ func (x *Bcast_Unsubscribe) GetChannel() string {
 	return ""
 }
 
-// Open is the payload of the OPEN frame, which establishes the session.
+// Open is the payload of the OPEN frame, the session stream's opening
+// message.
 type Sess_Open struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Channel       string                 `protobuf:"bytes,1,opt,name=channel,proto3" json:"channel,omitempty"`
 	ObjectId      string                 `protobuf:"bytes,2,opt,name=object_id,json=objectId,proto3" json:"object_id,omitempty"`
-	Preamble      []byte                 `protobuf:"bytes,3,opt,name=preamble,proto3" json:"preamble,omitempty"`
-	InitialUpdate []byte                 `protobuf:"bytes,4,opt,name=initial_update,json=initialUpdate,proto3" json:"initial_update,omitempty"`
+	InitialUpdate []byte                 `protobuf:"bytes,3,opt,name=initial_update,json=initialUpdate,proto3" json:"initial_update,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -333,16 +326,55 @@ func (x *Sess_Open) GetObjectId() string {
 	return ""
 }
 
-func (x *Sess_Open) GetPreamble() []byte {
+func (x *Sess_Open) GetInitialUpdate() []byte {
 	if x != nil {
-		return x.Preamble
+		return x.InitialUpdate
 	}
 	return nil
 }
 
-func (x *Sess_Open) GetInitialUpdate() []byte {
+// Preamble is the payload of the PREAMBLE frame: the scheme's opaque
+// preamble, which a relay needs to build its strategy.
+type Sess_Preamble struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Data          []byte                 `protobuf:"bytes,1,opt,name=data,proto3" json:"data,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *Sess_Preamble) Reset() {
+	*x = Sess_Preamble{}
+	mi := &file_broadcast_pb_broadcast_proto_msgTypes[7]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *Sess_Preamble) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*Sess_Preamble) ProtoMessage() {}
+
+func (x *Sess_Preamble) ProtoReflect() protoreflect.Message {
+	mi := &file_broadcast_pb_broadcast_proto_msgTypes[7]
 	if x != nil {
-		return x.InitialUpdate
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use Sess_Preamble.ProtoReflect.Descriptor instead.
+func (*Sess_Preamble) Descriptor() ([]byte, []int) {
+	return file_broadcast_pb_broadcast_proto_rawDescGZIP(), []int{1, 1}
+}
+
+func (x *Sess_Preamble) GetData() []byte {
+	if x != nil {
+		return x.Data
 	}
 	return nil
 }
@@ -358,7 +390,7 @@ type Sess_Update struct {
 
 func (x *Sess_Update) Reset() {
 	*x = Sess_Update{}
-	mi := &file_broadcast_pb_broadcast_proto_msgTypes[7]
+	mi := &file_broadcast_pb_broadcast_proto_msgTypes[8]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -370,7 +402,7 @@ func (x *Sess_Update) String() string {
 func (*Sess_Update) ProtoMessage() {}
 
 func (x *Sess_Update) ProtoReflect() protoreflect.Message {
-	mi := &file_broadcast_pb_broadcast_proto_msgTypes[7]
+	mi := &file_broadcast_pb_broadcast_proto_msgTypes[8]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -383,7 +415,7 @@ func (x *Sess_Update) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Sess_Update.ProtoReflect.Descriptor instead.
 func (*Sess_Update) Descriptor() ([]byte, []int) {
-	return file_broadcast_pb_broadcast_proto_rawDescGZIP(), []int{1, 1}
+	return file_broadcast_pb_broadcast_proto_rawDescGZIP(), []int{1, 2}
 }
 
 func (x *Sess_Update) GetData() []byte {
@@ -407,7 +439,7 @@ type Chunk_Header struct {
 
 func (x *Chunk_Header) Reset() {
 	*x = Chunk_Header{}
-	mi := &file_broadcast_pb_broadcast_proto_msgTypes[8]
+	mi := &file_broadcast_pb_broadcast_proto_msgTypes[9]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -419,7 +451,7 @@ func (x *Chunk_Header) String() string {
 func (*Chunk_Header) ProtoMessage() {}
 
 func (x *Chunk_Header) ProtoReflect() protoreflect.Message {
-	mi := &file_broadcast_pb_broadcast_proto_msgTypes[8]
+	mi := &file_broadcast_pb_broadcast_proto_msgTypes[9]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -467,21 +499,21 @@ var File_broadcast_pb_broadcast_proto protoreflect.FileDescriptor
 
 const file_broadcast_pb_broadcast_proto_rawDesc = "" +
 	"\n" +
-	"\x1cbroadcast/pb/broadcast.proto\x12\x10ethp2p.broadcast\"\x9a\x01\n" +
-	"\x05Bcast\x1aA\n" +
-	"\tHandshake\x12\x18\n" +
-	"\aversion\x18\x01 \x01(\rR\aversion\x12\x1a\n" +
-	"\bchannels\x18\x02 \x03(\tR\bchannels\x1a%\n" +
+	"\x1cbroadcast/pb/broadcast.proto\x12\x10ethp2p.broadcast\"\x80\x01\n" +
+	"\x05Bcast\x1a'\n" +
+	"\tHandshake\x12\x1a\n" +
+	"\bchannels\x18\x01 \x03(\tR\bchannels\x1a%\n" +
 	"\tSubscribe\x12\x18\n" +
 	"\achannel\x18\x01 \x01(\tR\achannel\x1a'\n" +
 	"\vUnsubscribe\x12\x18\n" +
-	"\achannel\x18\x01 \x01(\tR\achannel\"\xa7\x01\n" +
-	"\x04Sess\x1a\x80\x01\n" +
+	"\achannel\x18\x01 \x01(\tR\achannel\"\xaa\x01\n" +
+	"\x04Sess\x1ad\n" +
 	"\x04Open\x12\x18\n" +
 	"\achannel\x18\x01 \x01(\tR\achannel\x12\x1b\n" +
-	"\tobject_id\x18\x02 \x01(\tR\bobjectId\x12\x1a\n" +
-	"\bpreamble\x18\x03 \x01(\fR\bpreamble\x12%\n" +
-	"\x0einitial_update\x18\x04 \x01(\fR\rinitialUpdate\x1a\x1c\n" +
+	"\tobject_id\x18\x02 \x01(\tR\bobjectId\x12%\n" +
+	"\x0einitial_update\x18\x03 \x01(\fR\rinitialUpdate\x1a\x1e\n" +
+	"\bPreamble\x12\x12\n" +
+	"\x04data\x18\x01 \x01(\fR\x04data\x1a\x1c\n" +
 	"\x06Update\x12\x12\n" +
 	"\x04data\x18\x01 \x01(\fR\x04data\"\x84\x01\n" +
 	"\x05Chunk\x1a{\n" +
@@ -504,7 +536,7 @@ func file_broadcast_pb_broadcast_proto_rawDescGZIP() []byte {
 	return file_broadcast_pb_broadcast_proto_rawDescData
 }
 
-var file_broadcast_pb_broadcast_proto_msgTypes = make([]protoimpl.MessageInfo, 9)
+var file_broadcast_pb_broadcast_proto_msgTypes = make([]protoimpl.MessageInfo, 10)
 var file_broadcast_pb_broadcast_proto_goTypes = []any{
 	(*Bcast)(nil),             // 0: ethp2p.broadcast.Bcast
 	(*Sess)(nil),              // 1: ethp2p.broadcast.Sess
@@ -513,8 +545,9 @@ var file_broadcast_pb_broadcast_proto_goTypes = []any{
 	(*Bcast_Subscribe)(nil),   // 4: ethp2p.broadcast.Bcast.Subscribe
 	(*Bcast_Unsubscribe)(nil), // 5: ethp2p.broadcast.Bcast.Unsubscribe
 	(*Sess_Open)(nil),         // 6: ethp2p.broadcast.Sess.Open
-	(*Sess_Update)(nil),       // 7: ethp2p.broadcast.Sess.Update
-	(*Chunk_Header)(nil),      // 8: ethp2p.broadcast.Chunk.Header
+	(*Sess_Preamble)(nil),     // 7: ethp2p.broadcast.Sess.Preamble
+	(*Sess_Update)(nil),       // 8: ethp2p.broadcast.Sess.Update
+	(*Chunk_Header)(nil),      // 9: ethp2p.broadcast.Chunk.Header
 }
 var file_broadcast_pb_broadcast_proto_depIdxs = []int32{
 	0, // [0:0] is the sub-list for method output_type
@@ -535,7 +568,7 @@ func file_broadcast_pb_broadcast_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_broadcast_pb_broadcast_proto_rawDesc), len(file_broadcast_pb_broadcast_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   9,
+			NumMessages:   10,
 			NumExtensions: 0,
 			NumServices:   0,
 		},

@@ -102,7 +102,7 @@ the strategy falls back to on-demand recoding.
 ## 3. Preamble
 
 The RLNC preamble carries the generation structure.
-It is transmitted in the `Sess.Open` frame as opaque bytes (see framework spec, Section 5.1).
+It is transmitted in the `PREAMBLE` frame as opaque bytes (see framework spec, Section 5.1).
 
 ```protobuf
 // Preamble is the session preamble for RLNC-coded messages.

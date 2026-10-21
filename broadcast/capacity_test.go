@@ -28,7 +28,7 @@ func capacityTake[T any](t *testing.T, ch <-chan T) T {
 
 func TestLifecycleElisionAndCloseStreamRetention(t *testing.T) {
 	p := testPeer("peer")
-	defer p.cancel()
+	defer p.cancel(nil)
 	p.ctrlState.openSession(peerOpenSession{messageID: "discard"})
 	p.ctrlState.closeSession(sessionKey{messageID: "discard"})
 	p.ctrlState.openSession(peerOpenSession{messageID: "keep"})
@@ -54,21 +54,23 @@ type stalledSessionOpener struct {
 	once    sync.Once
 }
 
-func (s *stalledSessionOpener) OpenUniStream(ctx context.Context, _ wire.Protocol) (ethp2p.SendStream, error) {
+func (*stalledSessionOpener) Close(wire.Code) {}
+
+func (s *stalledSessionOpener) OpenUniStream(ctx context.Context) (ethp2p.SendStream, error) {
 	s.once.Do(func() { close(s.entered) })
 	<-ctx.Done()
 	return nil, ctx.Err()
 }
 
-// A SESS open stalled in the control loop must not stop the channel actor
-// routing an independent CHUNK for an existing session.
+// A session open stalled in the control loop must not stop the channel actor
+// routing an independent chunk for an existing session.
 func TestChannelRoutesChunkWhileSessionOpenStalled(t *testing.T) {
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
 	p := testPeer("peer")
-	defer p.cancel()
+	defer p.cancel(nil)
 	opener := &stalledSessionOpener{entered: make(chan struct{})}
-	p.streams = opener
+	p.handle = opener
 	ctrlDone := make(chan struct{})
 	go func() { defer close(ctrlDone); p.runCtrlLoop(make(chan slotUpdate, 1)) }()
 	inbox := make(chan channelEvent, 64)
@@ -97,7 +99,7 @@ func TestChannelRoutesChunkWhileSessionOpenStalled(t *testing.T) {
 	}()
 	capacityTake(t, opener.entered)
 	f := newOutcomeFixture(t)
-	raw, stream := f.incoming(t, CHUNK, bytes.NewReader(wire.AppendFrame(nil, dataFrame, []byte("data"))))
+	raw, stream := f.incoming(t, bytes.NewReader(wire.AppendFrame(nil, dataFrame, []byte("data"))))
 	// The reader waits for FIN after DATA, since DATA must be the last frame.
 	_ = raw.out.Close()
 	// Observe the routing result through the read-completion event before
@@ -111,7 +113,7 @@ func TestChannelRoutesChunkWhileSessionOpenStalled(t *testing.T) {
 		t.Fatalf("chunk = %#v", event)
 	}
 	cancel()
-	p.cancel()
+	p.cancel(nil)
 	capacityTake(t, actorDone)
 	capacityTake(t, ctrlDone)
 	for _, s := range tr.sessions {
@@ -131,11 +133,11 @@ func TestPeerDataLoopContinuesAfterOtherPeerDrops(t *testing.T) {
 	stalled := testPeer("stalled")
 	stalled.engine = &Engine{config: EngineConfig{Observer: NoOpObserver{}}}
 	stalledOpener := &stalledSessionOpener{entered: make(chan struct{})}
-	stalled.streams = stalledOpener
+	stalled.handle = stalledOpener
 	live := testPeer("live")
 	live.engine = &Engine{config: EngineConfig{Observer: NoOpObserver{}}}
 	liveTransport := newHighCapTransport(live.ctx)
-	live.streams = liveTransport
+	live.handle = liveTransport
 	sess.handlePeerAttached(stalled)
 	sess.handlePeerAttached(live)
 
@@ -159,7 +161,7 @@ func TestPeerDataLoopContinuesAfterOtherPeerDrops(t *testing.T) {
 	})
 
 	capacityTake(t, stalledOpener.entered)
-	// The live control loop has opened its SESS stream and registered the
+	// The live control loop has opened its session stream and registered the
 	// chunk slot before the stalled peer is dropped.
 	capacityTake(t, liveTransport.streamSend)
 	capacityTake(t, liveTransport.streamSend)
@@ -177,53 +179,44 @@ func TestPeerDataLoopContinuesAfterOtherPeerDrops(t *testing.T) {
 	}
 }
 
-func TestChunkFIFOAndHeaderBudgetWait(t *testing.T) {
-	for _, blocked := range []bool{false, true} {
-		t.Run(fmt.Sprint(blocked), func(t *testing.T) {
-			ctx, cancel := context.WithCancel(t.Context())
-			defer cancel()
-			engine := &Engine{ctx: ctx}
-			p := newPeerConn(engine, ctx, "peer", nil)
-			p.chunkSem = make(chan struct{}, 1)
-			inbox := make(chan channelEvent, 100)
-			p.BindChannel("channel", &channelHandle{inbox: inbox, ctx: ctx})
-			if blocked {
-				p.chunkSem <- struct{}{}
-			}
-			f := newOutcomeFixture(t)
-			const count = 80 // the CHUNK FIFO has no count cap; QUIC credit bounds it
-			for i := range count {
-				var payload bytes.Buffer
-				if err := writeFrame(&payload, headerFrame, &bcastpb.Chunk_Header{Channel: "channel", ObjectId: "m", DataLength: 1}); err != nil {
-					t.Fatal(err)
-				}
-				payload.Write(wire.AppendFrame(nil, dataFrame, []byte{byte(i)}))
-				_, stream := f.incoming(t, CHUNK, &payload)
-				p.enqueueStream(CHUNK, stream)
-			}
-			p.wg.Go(p.runChunkAcceptLoop)
-			if blocked {
-				select {
-				case <-inbox:
-					t.Fatal("read without header slot")
-				case <-time.After(20 * time.Millisecond):
-				}
-				<-p.chunkSem
-			}
-			for i := range count {
-				e := capacityTake(t, inbox).(channelChunkStream)
-				typ, data, err := wire.ReadFrame(e.stream, 1)
-				if err != nil || typ != dataFrame || len(data) != 1 || data[0] != byte(i) {
-					t.Fatalf("payload %d = %d %x, %v", i, typ, data, err)
-				}
-				e.stream.CancelRead(wire.Unspecified)
-			}
-			p.Close()
-		})
+// Chunk streams waiting for an opener have no count cap: QUIC stream credit
+// bounds them, so every one of them is routed once the openers run.
+func TestUnreadStreamsHaveNoCountCap(t *testing.T) {
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	engine := &Engine{ctx: ctx}
+	p := newPeerConn(engine, ctx, "peer", nil)
+	p.handshook = true
+	inbox := make(chan channelEvent, 100)
+	p.BindChannel("channel", &channelHandle{inbox: inbox, ctx: ctx})
+	f := newOutcomeFixture(t)
+	const count = 80
+	for i := range count {
+		var payload bytes.Buffer
+		if err := writeFrame(&payload, headerFrame, &bcastpb.Chunk_Header{Channel: "channel", ObjectId: "m", DataLength: 1}); err != nil {
+			t.Fatal(err)
+		}
+		payload.Write(wire.AppendFrame(nil, dataFrame, []byte{byte(i)}))
+		_, stream := f.incoming(t, &payload)
+		p.enqueueStream(stream)
 	}
+	for range maxOpeningReads {
+		p.wg.Go(p.runOpener)
+	}
+	seen := make(map[byte]bool, count)
+	for range count {
+		e := capacityTake(t, inbox).(channelChunkStream)
+		typ, data, err := wire.ReadFrame(e.stream, 1)
+		if err != nil || typ != dataFrame || len(data) != 1 || seen[data[0]] {
+			t.Fatalf("payload = %d %x, %v", typ, data, err)
+		}
+		seen[data[0]] = true
+		e.stream.CancelRead(wire.Unspecified)
+	}
+	p.Close()
 }
 
-// Post-header CHUNK streams parked or queued for a peer are cancelled once the
+// Post-header chunk streams parked or queued for a peer are cancelled once the
 // channel processes that peer's unbind; the QUIC connection may stay up.
 func TestChunkStreamsCancelledOnPeerUnbind(t *testing.T) {
 	inbox := make(chan channelEvent, 8)
@@ -239,7 +232,7 @@ func TestChunkStreamsCancelledOnPeerUnbind(t *testing.T) {
 	var probes []*wireReceiveProbe
 	for _, id := range []MessageID{"parked", "queued"} {
 		payload := bytes.NewReader(wire.AppendFrame(nil, dataFrame, []byte{7}))
-		raw, in := f.incoming(t, CHUNK, payload)
+		raw, in := f.incoming(t, payload)
 		probes = append(probes, raw)
 		tr.handleChunk(channelChunkStream{peerID: "peer", frame: &bcastpb.Chunk_Header{ObjectId: string(id), DataLength: 1}, stream: in})
 	}
@@ -264,7 +257,7 @@ func TestSessionReadQueueDeliversBurst(t *testing.T) {
 	s.readSem <- struct{}{}
 	const count = 80
 	for i := range count {
-		raw, in := f.incoming(t, CHUNK, bytes.NewReader(wire.AppendFrame(nil, dataFrame, []byte{byte(i)})))
+		raw, in := f.incoming(t, bytes.NewReader(wire.AppendFrame(nil, dataFrame, []byte{byte(i)})))
 		// The reader waits for FIN after DATA, since DATA must be the last frame.
 		_ = raw.out.Close()
 		s.handleChunkStream("peer", []byte{byte(i)}, 1, in)
@@ -296,7 +289,7 @@ func TestChannelRejectsFullParkedChunkQueueAsUnspecified(t *testing.T) {
 			messageID: {streams: make([]channelChunkStream, maxParkedChunks)},
 		},
 	}
-	raw, stream := newOutcomeFixture(t).incoming(t, CHUNK, nil)
+	raw, stream := newOutcomeFixture(t).incoming(t, nil)
 	chunk := newFakeChunk("peer1", messageID, nil)
 	chunk.stream = stream
 
@@ -311,7 +304,7 @@ func TestChannelRejectsFullParkedChunkQueueAsUnspecified(t *testing.T) {
 // retained.
 func TestLifecycleRoutingCoalescing(t *testing.T) {
 	p := testPeer("peer")
-	defer p.cancel()
+	defer p.cancel(nil)
 	if p.ctrlState.setRouting(peerSendRouting{channelID: "ch", messageID: "missing", update: []byte{0}}) {
 		t.Fatal("routing update created a missing session")
 	}

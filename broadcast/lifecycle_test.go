@@ -77,7 +77,7 @@ func TestCtrlOutPhaseOrder(t *testing.T) {
 func TestHandleSessionOpenReplacesExistingStream(t *testing.T) {
 	p := testPeer("peer")
 	defer p.Close()
-	p.streams = newHighCapTransport(p.ctx)
+	p.handle = newHighCapTransport(p.ctx)
 	slotCh := make(chan slotUpdate, 3)
 	sessions := make(map[sessionKey]ethp2p.SendStream)
 	key := sessionKey{channelID: "channel", messageID: "message"}
@@ -99,7 +99,7 @@ func TestHandleSessionOpenReplacesExistingStream(t *testing.T) {
 		t.Fatalf("replacement stream = %T, want a fresh *testStream", sessions[key])
 	}
 	if !first.closed {
-		t.Fatal("replaced SESS stream was left open")
+		t.Fatal("replaced session stream was left open")
 	}
 	if update := <-slotCh; update.key != key || update.slot != nil {
 		t.Fatalf("old slot removal = %#v", update)

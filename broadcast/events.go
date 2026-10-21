@@ -54,8 +54,9 @@ type channelExpiry struct{}
 func (channelExpiry) channelEvent() {}
 
 type channelSessionOpen struct {
-	peerID identity.PeerID
-	msg    *bcastpb.Sess_Open
+	peerID   identity.PeerID
+	msg      *bcastpb.Sess_Open
+	preamble []byte
 }
 
 // channelPeerChange notifies the channel of a topology mutation.
@@ -72,7 +73,7 @@ type channelPeerReconstructed struct {
 	peerID    identity.PeerID
 }
 
-// channelPeerSessionEnded is sent by PeerConn when a peer's inbound SESS
+// channelPeerSessionEnded is sent by PeerConn when a peer's inbound session
 // stream for a message ends for any reason other than Reconstructed (clean
 // close, other reset, or read error) while the connection is still live. The
 // peer leaves that session only. peer identifies the connection that owned the
@@ -163,7 +164,7 @@ type peerCloseSession struct {
 	messageID MessageID
 }
 
-// peerCloseStream tells PeerConn to close the outbound SESS
+// peerCloseStream tells PeerConn to close the outbound session
 // stream (signaling we no longer need chunks) but keep the chunk slot
 // alive so we can continue serving chunks to this peer.
 type peerCloseStream struct {

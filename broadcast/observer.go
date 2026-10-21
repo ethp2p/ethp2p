@@ -26,7 +26,13 @@ type Observer interface {
 	OnPeerHandshook(peerID identity.PeerID, channels []ChannelID)
 	OnPeerSubscribed(peerID identity.PeerID, channelID ChannelID)
 	OnPeerUnsubscribed(peerID identity.PeerID, channelID ChannelID)
-	OnPeerGone(peerID identity.PeerID)
+	// OnPeerGone reports the end of a binding and its cause: nil when the
+	// binding ended without one (PeerDown, a local close), else the handshake
+	// error or an error wrapping ErrPeerViolation. It fires for every binding
+	// that ends while the engine runs, including one whose handshake never
+	// completed, so it can arrive without OnPeerHandshook. Bindings ended by
+	// Engine.Close are not reported: the engine actor has stopped.
+	OnPeerGone(peerID identity.PeerID, err error)
 
 	OnSessionStarted(channelID ChannelID, messageID MessageID, role SessionRole)
 	OnSessionDecoded(channelID ChannelID, messageID MessageID)
@@ -49,7 +55,7 @@ func (NoOpObserver) OnChannelDropped(ChannelID)                                 
 func (NoOpObserver) OnPeerHandshook(identity.PeerID, []ChannelID)               {}
 func (NoOpObserver) OnPeerSubscribed(identity.PeerID, ChannelID)                {}
 func (NoOpObserver) OnPeerUnsubscribed(identity.PeerID, ChannelID)              {}
-func (NoOpObserver) OnPeerGone(identity.PeerID)                                 {}
+func (NoOpObserver) OnPeerGone(identity.PeerID, error)                          {}
 func (NoOpObserver) OnSessionStarted(ChannelID, MessageID, SessionRole)         {}
 func (NoOpObserver) OnSessionDecoded(ChannelID, MessageID)                      {}
 func (NoOpObserver) OnSessionDisposed(ChannelID, MessageID, string)             {}

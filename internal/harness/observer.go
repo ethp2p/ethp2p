@@ -35,7 +35,9 @@ func (o observer) OnPeerSubscribed(p identity.PeerID, c broadcast.ChannelID) {
 func (o observer) OnPeerUnsubscribed(p identity.PeerID, c broadcast.ChannelID) {
 	o.emit(trace.PeerUnsubscribed{Peer: string(p), Channel: string(c)})
 }
-func (o observer) OnPeerGone(p identity.PeerID) { o.emit(trace.PeerGone{Peer: string(p)}) }
+func (o observer) OnPeerGone(p identity.PeerID, err error) {
+	o.emit(trace.PeerGone{Peer: string(p), Err: err})
+}
 func (o observer) OnSessionStarted(c broadcast.ChannelID, m broadcast.MessageID, role broadcast.SessionRole) {
 	r := "origin"
 	if role == broadcast.SessionRoleRelay {

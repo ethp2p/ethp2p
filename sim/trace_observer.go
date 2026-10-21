@@ -32,7 +32,7 @@ func (o *TracingObserver) OnPeerUnsubscribed(peer identity.PeerID, channelID bro
 	o.tw.WriteEvent(time.Now(), o.node, "pu", peer, channelID)
 }
 
-func (o *TracingObserver) OnPeerGone(peer identity.PeerID) {
+func (o *TracingObserver) OnPeerGone(peer identity.PeerID, _ error) {
 	o.tw.WriteEvent(time.Now(), o.node, "pg", peer)
 }
 

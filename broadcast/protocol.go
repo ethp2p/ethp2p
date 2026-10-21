@@ -8,37 +8,30 @@ import (
 	"github.com/ethp2p/ethp2p/wire"
 )
 
-// Family is broadcast's family code. Stack owns the Hello exchange and
-// routing; broadcast declares its family and protocols and handles the streams
-// Stack delivers.
-const Family wire.Family = 1
+// Protocol is broadcast v1's protocol number. Stack owns the Hello exchange
+// and routing; broadcast reads every stream past its header. An incompatible
+// revision takes a new number, which Hello negotiates.
+const Protocol wire.Protocol = 1
 
-// Broadcast's protocols, numbered within Family. With the frame types below
-// they are the broadcast wire contract.
+// Frame types, one namespace across the protocol. A stream's first frame is
+// its opening message and names its purpose: HANDSHAKE opens the control
+// stream (then SUBSCRIBE and UNSUBSCRIBE), OPEN a session stream (then
+// PREAMBLE, then UPDATE), and HEADER a chunk stream (then one DATA).
 const (
-	BCAST wire.Protocol = 1
-	SESS  wire.Protocol = 2
-	CHUNK wire.Protocol = 3
-)
-
-// Frame types, numbered per protocol.
-const (
-	// BCAST: HANDSHAKE, then any number of SUBSCRIBE and UNSUBSCRIBE.
 	handshakeFrame   wire.FrameType = 0
 	subscribeFrame   wire.FrameType = 1
 	unsubscribeFrame wire.FrameType = 2
-	// SESS: OPEN, then any number of UPDATE.
-	openFrame   wire.FrameType = 0
-	updateFrame wire.FrameType = 1
-	// CHUNK: HEADER, then one DATA.
-	headerFrame wire.FrameType = 0
-	dataFrame   wire.FrameType = 1
+	openFrame        wire.FrameType = 3
+	preambleFrame    wire.FrameType = 4
+	updateFrame      wire.FrameType = 5
+	headerFrame      wire.FrameType = 6
+	dataFrame        wire.FrameType = 7
 )
 
 var (
-	// Reconstructed ends a SESS stream after the sender reconstructs its message.
+	// Reconstructed ends a session stream after the sender reconstructs its message.
 	Reconstructed = wire.ProtocolCode(1)
-	// Redundant ends a CHUNK stream when the receiver no longer needs its chunk.
+	// Redundant ends a chunk stream when the receiver no longer needs its chunk.
 	Redundant = wire.ProtocolCode(2)
 
 	errChunkRedundant = errors.New("chunk is no longer needed")
@@ -64,26 +57,21 @@ func streamCancellationCode(cause error) wire.Code {
 	return wire.Unspecified
 }
 
-// Register adds broadcast's Family to a stack before the stack starts. A
-// stack hosts many families from many protocols; this registers broadcast's
-// one family, and may succeed only once per engine. Per the startup
-// choreography it is called once, before Stack.Start, and never races Close.
+// Register adds broadcast's Protocol to a stack before the stack starts, and
+// may succeed only once per engine. Per the startup choreography it is called
+// once, before Stack.Start, and never races Close.
 func (e *Engine) Register(stack *ethp2p.Stack) error {
-	if e.family != nil {
+	if e.proto != nil {
 		return errors.New("broadcast already registered")
 	}
 	if e.ctx.Err() != nil {
 		return errors.New("broadcast engine closed")
 	}
-	family, err := stack.Register(Family, []ethp2p.ProtocolSpec{
-		{Protocol: BCAST, MaxQueued: 1},
-		{Protocol: SESS, MaxQueued: 64},
-		{Protocol: CHUNK, MaxQueued: 128},
-	}, e.deliveryWake)
+	proto, err := stack.Register(Protocol, e.deliveryWake)
 	if err != nil {
 		return err
 	}
-	e.family = family
+	e.proto = proto
 	e.Start()
 	return nil
 }
